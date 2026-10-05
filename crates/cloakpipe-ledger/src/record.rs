@@ -30,6 +30,11 @@ pub enum Hop {
     MemoryWrite,
     RetrievalResult,
     Unmask,
+    /// An Agent Release manifest was registered (control plane).
+    ReleaseRegistered,
+    /// An environment pointer (staging, production, rollback, ...) moved to a
+    /// release (control plane).
+    ReleasePromoted,
 }
 
 impl Hop {
@@ -44,6 +49,8 @@ impl Hop {
             Hop::MemoryWrite => "memory_write",
             Hop::RetrievalResult => "retrieval_result",
             Hop::Unmask => "unmask",
+            Hop::ReleaseRegistered => "release_registered",
+            Hop::ReleasePromoted => "release_promoted",
         }
     }
 }

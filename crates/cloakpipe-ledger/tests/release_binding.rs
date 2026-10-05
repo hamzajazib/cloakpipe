@@ -40,3 +40,20 @@ fn records_without_a_release_keep_their_existing_encoding() {
     let canon = String::from_utf8(canonicalize(&r)).unwrap();
     assert!(canon.ends_with("\nmetadata="), "{canon}");
 }
+
+#[test]
+fn release_lifecycle_events_have_stable_tags() {
+    use cloakpipe_ledger::Hop;
+    // Tags are part of the signed canonical bytes: never rename them.
+    assert_eq!(Hop::ReleaseRegistered.tag(), "release_registered");
+    assert_eq!(Hop::ReleasePromoted.tag(), "release_promoted");
+}
+
+#[test]
+fn release_lifecycle_events_canonicalise_with_their_release() {
+    use cloakpipe_ledger::Hop;
+    let r = RecordBuilder::new().hop(Hop::ReleasePromoted).release(RELEASE).build().unwrap();
+    let canon = String::from_utf8(canonicalize(&r)).unwrap();
+    assert!(canon.contains("\nhop=release_promoted\n"), "{canon}");
+    assert!(canon.contains(&format!("{RELEASE_HASH_KEY}=hash:{}", "ae".repeat(32))), "{canon}");
+}
