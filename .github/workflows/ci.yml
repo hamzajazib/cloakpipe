@@ -95,10 +95,58 @@ jobs:
         run: |
           cargo run -q -p cloakpipe-verify -- all crates/cloakpipe-verify/tests/fixtures/sample.bundle.json
 
+  release-gate:
+    name: agent release manifests
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      TESTDATA: crates/cloakpipe-release/testdata
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build -p cloakpipe-cli
+      - name: Validate fixtures
+        run: |
+          for m in "$TESTDATA"/*.yaml "$TESTDATA"/*.json; do
+            ./target/debug/cloakpipe release validate "$m"
+          done
+      - name: Golden hash is unchanged
+        # A changed golden hash invalidates every release hash already issued.
+        run: |
+          got=$(./target/debug/cloakpipe release hash "$TESTDATA/support-agent-184.yaml")
+          want=$(cat "$TESTDATA/support-agent-184.hash")
+          echo "got  $got"; echo "want $want"
+          test "$got" = "$want"
+      - name: Rust and the reference implementation agree
+        # tools/release_hash_reference.py is a stdlib-only reimplementation of
+        # the spec; the manifest JSON is taken from the in-toto predicate.
+        run: |
+          for m in "$TESTDATA"/*.yaml "$TESTDATA"/*.json; do
+            rust=$(./target/debug/cloakpipe release hash "$m")
+            ./target/debug/cloakpipe release inspect --json "$m" \
+              | python3 -c 'import json,sys; json.dump(json.load(sys.stdin)["predicate"], sys.stdout)' > /tmp/manifest.json
+            ref=$(python3 tools/release_hash_reference.py /tmp/manifest.json)
+            echo "$m  rust=$rust  ref=$ref"
+            test "$rust" = "$ref"
+          done
+      - name: Invalid manifests are rejected
+        run: |
+          sed 's/support-answer@31/support-answer@latest/' "$TESTDATA/support-agent-184.yaml" > /tmp/mutable.yaml
+          if ./target/debug/cloakpipe release hash /tmp/mutable.yaml; then
+            echo "a mutable reference must not produce a hash"; exit 1
+          fi
+      - name: Diff reports required assurance
+        run: |
+          ./target/debug/cloakpipe release diff --json "$TESTDATA/support-agent-184.yaml" "$TESTDATA/support-agent-185.yaml" \
+            | tee diff.json \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["requires_approval"] and "trajectory" in d["required_suites"], d'
+
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, cloakleak-gate, verifier-e2e]
+    needs: [test, cloakleak-gate, verifier-e2e, release-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -113,6 +161,7 @@ jobs:
             - [x] build + test + clippy
             - [x] cloakleak zero-leak gate (prose + tool_json)
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
+            - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)
 
             See PR artifacts for the scoreboards.`;
             await github.rest.issues.createComment({
