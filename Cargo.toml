@@ -12,6 +12,7 @@ members = [
     "crates/cloakpipe-ledger",
     "crates/cloakpipe-anchor",
     "crates/cloakpipe-verify",
+    "crates/cloakpipe-release",
     "crates/cloakleak",
     "crates/cloakleak-cli",
 ]

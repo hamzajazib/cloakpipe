@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakpipe.dev/schemas/agent-release/v1alpha1.json",
+  "title": "CloakPipe Agent Release",
+  "description": "The complete, immutable set of behaviour-affecting components deployed as one unit. References are `<kind>:<name>@<version>`; environment aliases such as `@latest` or `@production` are structurally valid here but rejected by `cloakpipe release validate` because they are mutable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "cloakpipe.dev/v1alpha1"
+    },
+    "kind": {
+      "const": "AgentRelease"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent",
+        "version"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$",
+          "description": "Stable agent identity. Part of the manifest hash."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human release number. Not part of the manifest hash."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Bookkeeping only. Not part of the manifest hash."
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "prompts",
+        "model",
+        "runtime"
+      ],
+      "properties": {
+        "code": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "commit"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            }
+          }
+        },
+        "prompts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^prompt:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+              }
+            }
+          },
+          "minItems": 1,
+          "description": "Ordered: composition order is semantic."
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "pattern": "^model:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+            }
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Generation parameters, e.g. temperature, max_tokens."
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^tool:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+              }
+            }
+          },
+          "description": "Unordered set."
+        },
+        "mcpServers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^mcp:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+              }
+            }
+          },
+          "description": "Unordered set."
+        },
+        "retrieval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "pattern": "^retrieval:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+            }
+          }
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^policy:[a-z0-9][a-z0-9._/-]*@(sha256:[0-9a-f]{64}|[A-Za-z0-9._+-]+)$"
+              }
+            }
+          },
+          "description": "Unordered set."
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "image",
+            "region"
+          ],
+          "properties": {
+            "image": {
+              "type": "string",
+              "pattern": "^.+@sha256:[0-9a-f]{64}$",
+              "description": "Container image pinned by digest."
+            },
+            "region": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "Unordered set.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "featureFlags": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

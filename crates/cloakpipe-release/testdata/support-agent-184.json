@@ -1,0 +1,17 @@
+{
+  "kind": "AgentRelease",
+  "apiVersion": "cloakpipe.dev/v1alpha1",
+  "spec": {
+    "runtime": {"region": "in-south", "image": "registry.acme.dev/support-agent@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
+    "tools": [{"ref": "tool:refund@4"}, {"ref": "tool:lookup-customer@7"}],
+    "code": {"commit": "8fd29ac", "repository": "acme/support"},
+    "prompts": [{"ref": "prompt:support-answer@31"}],
+    "model": {"ref": "model:openai/gpt-5@2026-08-01"},
+    "parameters": {"max_tokens": 1200, "temperature": 0.2},
+    "mcpServers": [{"ref": "mcp:crm@12"}],
+    "retrieval": {"ref": "retrieval:support@22"},
+    "policies": [{"ref": "policy:support-prod@11"}],
+    "dependencies": [{"version": "2.4.1", "name": "orchestrator"}]
+  },
+  "metadata": {"version": "184", "agent": "support-agent", "labels": {"team": "support"}}
+}
