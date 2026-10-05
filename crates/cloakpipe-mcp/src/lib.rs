@@ -8,7 +8,7 @@
 //! and rehydrating results.
 
 pub mod proxy;
-pub use proxy::{run_proxy, ProxyContext};
+pub use proxy::{run_proxy, run_proxy_io, stable_ids, ProxyContext};
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},

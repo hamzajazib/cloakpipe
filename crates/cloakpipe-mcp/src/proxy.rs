@@ -32,6 +32,9 @@ pub struct ProxyContext {
     pub vault: Vault,
     /// Evidence ledger DB path (`CLOAKPIPE_LEDGER_DB`); `None` disables recording.
     pub ledger_db: Option<String>,
+    /// Agent Release manifest hash (`CLOAKPIPE_RELEASE`) every ledger hop is
+    /// bound to; `None` records unbound hops.
+    pub release: Option<[u8; 32]>,
 }
 
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
@@ -40,6 +43,16 @@ type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
 /// when the upstream exits (which happens when the agent closes stdin, or when
 /// the upstream itself dies).
 pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
+    run_proxy_io(upstream, ctx, std::io::stdin(), std::io::stdout())
+}
+
+/// [`run_proxy`] with the agent side supplied by the caller instead of the
+/// process's stdin/stdout, so the interceptor can be driven in-process.
+pub fn run_proxy_io<R, W>(upstream: Vec<String>, ctx: ProxyContext, agent_in: R, agent_out: W) -> Result<()>
+where
+    R: std::io::Read + Send + 'static,
+    W: Write + Send + 'static,
+{
     anyhow::ensure!(!upstream.is_empty(), "upstream MCP command is empty");
 
     let mut child = Command::new(&upstream[0])
@@ -57,6 +70,7 @@ pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
     let vault = Arc::new(Mutex::new(ctx.vault));
     let ledger: SharedLedger = ctx.ledger_db.as_deref().and_then(open_ledger);
     let (tenant, agent) = stable_ids();
+    let release = ctx.release;
 
     // Egress: agent stdin → mask tools/call → upstream stdin.
     {
@@ -65,8 +79,7 @@ pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
         let ledger = ledger.clone();
         std::thread::spawn(move || {
             let mut to_upstream = to_upstream; // owned: dropped (→ upstream stdin EOF) when this thread ends
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines() {
+            for line in BufReader::new(agent_in).lines() {
                 let Ok(line) = line else { break };
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
@@ -76,7 +89,7 @@ pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
                                 mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
                             };
                             if masked > 0 {
-                                record_hop(&ledger, tenant, agent, Hop::McpToolCall, masked);
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked);
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -99,7 +112,7 @@ pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
         let ledger = ledger.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(from_upstream);
-            let stdout = std::io::stdout();
+            let mut w = agent_out;
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let out = match serde_json::from_str::<Value>(&line) {
@@ -109,13 +122,12 @@ pub fn run_proxy(upstream: Vec<String>, ctx: ProxyContext) -> Result<()> {
                                 let v = vault.lock().expect("vault poisoned");
                                 rehydrate_value(msg.pointer_mut("/result/content"), &v);
                             }
-                            record_hop(&ledger, tenant, agent, Hop::McpToolResult, 0);
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
                     }
                     Err(_) => line,
                 };
-                let mut w = stdout.lock();
                 if w.write_all(out.as_bytes()).is_err()
                     || w.write_all(b"\n").is_err()
                     || w.flush().is_err()
@@ -190,7 +202,8 @@ fn open_ledger(path: &str) -> SharedLedger {
     }
 }
 
-fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
+/// The fixed `(tenant, agent)` ids the interceptor records ledger hops under.
+pub fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
     let ns = uuid::Uuid::NAMESPACE_URL;
     (
         uuid::Uuid::new_v5(&ns, b"cloakpipe-mcp-tenant"),
@@ -199,14 +212,21 @@ fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
 }
 
 /// Append a no-PII hop record (categories/count only, never text). Best-effort.
-fn record_hop(ledger: &SharedLedger, tenant: uuid::Uuid, agent: uuid::Uuid, hop: Hop, count: usize) {
+fn record_hop(
+    ledger: &SharedLedger,
+    tenant: uuid::Uuid,
+    agent: uuid::Uuid,
+    release: Option<[u8; 32]>,
+    hop: Hop,
+    count: usize,
+) {
     let Some(ledger) = ledger else { return };
     let Ok(mut store) = ledger.lock() else { return };
     let next_seq = match store.head(&tenant) {
         Ok((head, _)) => head.map(|s| s + 1).unwrap_or(0),
         Err(_) => return,
     };
-    let builder = RecordBuilder::new()
+    let mut builder = RecordBuilder::new()
         .seq(next_seq)
         .tenant(tenant)
         .hop(hop)
@@ -226,6 +246,9 @@ fn record_hop(ledger: &SharedLedger, tenant: uuid::Uuid, agent: uuid::Uuid, hop:
             upstream: "mcp".to_string(),
             region: std::env::var("CLOAKPIPE_REGION").unwrap_or_else(|_| "local".to_string()),
         });
+    if let Some(release) = release {
+        builder = builder.release(release);
+    }
     if let Ok(mut record) = builder.build() {
         let _ = store.append(&tenant, &mut record);
     }
