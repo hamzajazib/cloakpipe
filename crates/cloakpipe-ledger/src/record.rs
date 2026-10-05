@@ -207,6 +207,20 @@ pub enum MetadataValue {
     OpaqueId(String),
 }
 
+/// Metadata key under which a record is bound to the Agent Release
+/// (`sha256` manifest hash) that produced it.
+pub const RELEASE_HASH_KEY: &str = "release_hash";
+
+impl LedgerRecord {
+    /// The Agent Release manifest hash this record is bound to, if any.
+    pub fn release_hash(&self) -> Option<[u8; 32]> {
+        match self.metadata.get(RELEASE_HASH_KEY) {
+            Some(MetadataValue::Hash(h)) => Some(*h),
+            _ => None,
+        }
+    }
+}
+
 /// Errors raised when the builder is misused.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RecordError {
@@ -303,6 +317,12 @@ impl RecordBuilder {
     pub fn metadata(mut self, key: impl Into<String>, value: MetadataValue) -> Self {
         self.metadata.insert(key.into(), value);
         self
+    }
+
+    /// Bind the record to an Agent Release manifest hash. The hash is part of
+    /// the canonical bytes, so it is covered by the record hash and signature.
+    pub fn release(self, manifest_hash: [u8; 32]) -> Self {
+        self.metadata(RELEASE_HASH_KEY, MetadataValue::Hash(manifest_hash))
     }
 
     /// Borrow the staged metadata for inspection (e.g. validation before

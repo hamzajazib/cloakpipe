@@ -27,7 +27,7 @@ pub use canonical::canonicalize;
 pub use chain::{hash_record, ChainLinkError, GENESIS_HASH};
 pub use record::{
     Action, ActionKind, ConfidenceBucket, Detection, Detector, Egress, Hop, Identity, MetadataValue,
-    Policy, PolicyDecision, RecordBuilder, RecordError,
+    Policy, PolicyDecision, RecordBuilder, RecordError, RELEASE_HASH_KEY,
 };
 pub use sign::{Ed25519Signer, Signature, Signer, SignedRecord};
 pub use store::{LedgerStore, StoredRecord};
