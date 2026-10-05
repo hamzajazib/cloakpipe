@@ -111,3 +111,12 @@ fn issues_point_at_the_offending_field() {
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].path, "spec.tools[1].ref");
 }
+
+#[test]
+fn issue_codes_have_stable_snake_case_names() {
+    // API clients match on these strings: never rename them.
+    assert_eq!(IssueCode::MutableReference.as_str(), "mutable_reference");
+    assert_eq!(IssueCode::MalformedReference.as_str(), "malformed_reference");
+    assert_eq!(IssueCode::UnpinnedImage.as_str(), "unpinned_image");
+    assert_eq!(IssueCode::UnsupportedApiVersion.as_str(), "unsupported_api_version");
+}

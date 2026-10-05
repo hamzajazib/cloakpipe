@@ -19,6 +19,24 @@ pub enum IssueCode {
     InvalidName,
 }
 
+impl IssueCode {
+    /// Stable machine-readable name for API responses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueCode::UnsupportedApiVersion => "unsupported_api_version",
+            IssueCode::UnsupportedKind => "unsupported_kind",
+            IssueCode::MalformedReference => "malformed_reference",
+            IssueCode::MutableReference => "mutable_reference",
+            IssueCode::WrongReferenceKind => "wrong_reference_kind",
+            IssueCode::DuplicateEntry => "duplicate_entry",
+            IssueCode::InvalidCommit => "invalid_commit",
+            IssueCode::UnpinnedImage => "unpinned_image",
+            IssueCode::EmptyField => "empty_field",
+            IssueCode::InvalidName => "invalid_name",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     pub code: IssueCode,
