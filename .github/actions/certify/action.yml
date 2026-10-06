@@ -1,0 +1,168 @@
+name: CloakPipe certify
+description: >-
+  Certify an Agent Release against a CloakPipe certification policy using
+  evaluation runs as evidence, and sign the decision as a DSSE in-toto
+  attestation. See docs/CERTIFICATION.md.
+
+inputs:
+  manifest:
+    description: Path to the candidate Agent Release manifest (YAML or JSON). It must be certifiable.
+    required: true
+  policy:
+    description: Path to the CertificationPolicy (YAML or JSON).
+    required: true
+  runs:
+    description: Newline-separated paths to candidate EvaluationRun JSON files (e.g. from `cloakpipe eval import`).
+    required: true
+  baseline-manifest:
+    description: Path to the baseline (previously certified) release manifest. Its diff to the candidate sets the required assurance suites.
+    required: false
+    default: ""
+  baseline-runs:
+    description: Newline-separated paths to EvaluationRun JSON files of the baseline release. Requires baseline-manifest.
+    required: false
+    default: ""
+  require:
+    description: Additional required assurance suites, comma-separated (e.g. `privacy,functional`).
+    required: false
+    default: ""
+  environment:
+    description: Scope of the certification, e.g. `production`.
+    required: true
+  issuer:
+    description: Issuer identity recorded in the attestation. Defaults to `github:<owner/repo>/<workflow>@<ref>`.
+    required: false
+    default: ""
+  signing-key:
+    description: >-
+      Contents of a key file from `cloakpipe release keygen --out` (pass a
+      secret). Written to a 0600 temp file for the run and deleted afterwards;
+      never echoed. When empty the decision is made but not signed.
+    required: false
+    default: ""
+  out:
+    description: Where to write the signed envelope. Defaults to `<manifest stem>.cert.dsse.json` in the working directory.
+    required: false
+    default: ""
+  fail-on-blocked:
+    description: Fail the step when the decision is BLOCKED (`true`/`false`).
+    required: false
+    default: "true"
+  install:
+    description: Install the CloakPipe CLI with `cargo install` (`false` uses a `cloakpipe` already on PATH).
+    required: false
+    default: "true"
+  cloakpipe-ref:
+    description: Branch, tag or commit of https://github.com/rohansx/cloakpipe to install the CLI from.
+    required: false
+    default: main
+
+outputs:
+  outcome:
+    description: "`certified` or `blocked`."
+    value: ${{ steps.certify.outputs.outcome }}
+  envelope:
+    description: Path to the signed DSSE envelope (empty when no signing-key was given).
+    value: ${{ steps.certify.outputs.envelope }}
+  decision:
+    description: Path to the decision JSON (`{decision, envelope?}`).
+    value: ${{ steps.certify.outputs.decision }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install CloakPipe CLI
+      if: inputs.install == 'true'
+      shell: bash
+      env:
+        REF: ${{ inputs.cloakpipe-ref }}
+        REPO: https://github.com/rohansx/cloakpipe
+      run: |
+        set -euo pipefail
+        if [[ "$REF" =~ ^[0-9a-f]{7,40}$ ]]; then
+          sel=(--rev "$REF")
+        elif git ls-remote --exit-code --tags "$REPO" "refs/tags/$REF" >/dev/null 2>&1; then
+          sel=(--tag "$REF")
+        else
+          sel=(--branch "$REF")
+        fi
+        cargo install --git "$REPO" "${sel[@]}" cloakpipe-cli --locked
+
+    - name: Certify
+      id: certify
+      shell: bash
+      env:
+        MANIFEST: ${{ inputs.manifest }}
+        POLICY: ${{ inputs.policy }}
+        RUNS: ${{ inputs.runs }}
+        BASELINE: ${{ inputs.baseline-manifest }}
+        BASELINE_RUNS: ${{ inputs.baseline-runs }}
+        REQUIRE: ${{ inputs.require }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        ISSUER: ${{ inputs.issuer }}
+        SIGNING_KEY: ${{ inputs.signing-key }}
+        OUT: ${{ inputs.out }}
+        FAIL_ON_BLOCKED: ${{ inputs.fail-on-blocked }}
+      run: |
+        set -euo pipefail
+        issuer="${ISSUER:-github:${GITHUB_REPOSITORY}/${GITHUB_WORKFLOW}@${GITHUB_REF}}"
+        args=(release certify "$MANIFEST" --policy "$POLICY" --environment "$ENVIRONMENT" --issuer "$issuer" --json)
+        while IFS= read -r f; do
+          f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
+          if [ -n "$f" ]; then args+=(--run "$f"); fi
+        done <<< "$RUNS"
+        if [ -n "$BASELINE" ]; then
+          args+=(--baseline "$BASELINE")
+          while IFS= read -r f; do
+            f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
+            if [ -n "$f" ]; then args+=(--baseline-run "$f"); fi
+          done <<< "$BASELINE_RUNS"
+        fi
+        if [ -n "$REQUIRE" ]; then args+=(--require "$REQUIRE"); fi
+
+        envelope=""
+        if [ -n "$SIGNING_KEY" ]; then
+          umask 077
+          keyfile="$(mktemp "${RUNNER_TEMP:-/tmp}/cloakpipe-key.XXXXXX")"
+          trap 'rm -f "$keyfile"' EXIT
+          chmod 600 "$keyfile"
+          printf '%s' "$SIGNING_KEY" > "$keyfile"
+          envelope="${OUT:-$(basename "${MANIFEST%.*}").cert.dsse.json}"
+          args+=(--key "$keyfile" --out "$envelope")
+        fi
+
+        decision="${RUNNER_TEMP:-/tmp}/cloakpipe-decision-${GITHUB_RUN_ID:-local}-${GITHUB_ACTION:-certify}.json"
+        set +e
+        cloakpipe "${args[@]}" > "$decision"
+        code=$?
+        set -e
+        if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+          echo "::error::cloakpipe release certify failed (exit $code)"
+          exit "$code"
+        fi
+        if [ ! -s "$decision" ]; then
+          echo "::error::cloakpipe release certify rejected its inputs (exit $code)"
+          exit 1
+        fi
+
+        outcome="$(jq -r '.decision.outcome' "$decision")"
+        {
+          echo "outcome=$outcome"
+          echo "envelope=$envelope"
+          echo "decision=$decision"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### CloakPipe certification: $(printf %s "$outcome" | tr "[:lower:]" "[:upper:]")"
+          echo
+          echo "- release: \`$(jq -r '.decision.release' "$decision")\`"
+          echo "- policy: \`$(jq -r '.decision.policy | "\(.name)@\(.version)"' "$decision")\`"
+          echo "- environment: \`$ENVIRONMENT\`"
+          if [ -n "$envelope" ]; then echo "- envelope: \`$envelope\`"; fi
+          jq -r '.decision.reasons[] | "- **\(.code)**\(if .suite then " [\(.suite)]" else "" end)\(if .case then " `\(.case)`" else "" end): \(.message)"' "$decision"
+        } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+        if [ "$outcome" != "certified" ] && [ "$FAIL_ON_BLOCKED" = "true" ]; then
+          echo "::error::release is BLOCKED by policy"
+          exit 1
+        fi
