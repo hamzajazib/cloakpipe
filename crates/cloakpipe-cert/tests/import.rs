@@ -757,6 +757,87 @@ fn junit_deep_nesting_does_not_panic() {
     let _ = xml_error(&xml);
 }
 
+fn assert_xml_err(xml: &str) {
+    let _ = xml_error(xml);
+}
+
+#[test]
+fn junit_prefixed_attributes_do_not_override_name_or_classname() {
+    let xml = r#"<testsuites><testcase name="real" xmlns:name="urn:x"/><testcase name="t" foo:classname="Spoofed"/></testsuites>"#;
+    let run = import(xml);
+    assert_eq!(ids(&run), ["real", "t"]);
+}
+
+#[test]
+fn junit_malformed_attributes_are_rejected_on_every_element() {
+    for xml in [
+        r#"<testsuites><testsuite name="a" name="b"><testcase name="t"/></testsuite></testsuites>"#,
+        r#"<testsuites><testsuite name=unquoted><testcase name="t"/></testsuite></testsuites>"#,
+        r#"<testsuites><testcase name="t"><failure message="a < b"/></testcase></testsuites>"#,
+        r#"<testsuites><testcase name="t"><failure message="&bogus;"/></testcase></testsuites>"#,
+        r#"<testsuites a="1" a="2"/>"#,
+        r#"<testsuites><testcase name="t"><system-out x="&#1;"/></testcase></testsuites>"#,
+    ] {
+        assert_xml_err(xml);
+    }
+}
+
+#[test]
+fn junit_forbidden_control_chars_are_rejected() {
+    assert_xml_err(r#"<testsuites><testcase name="t&#1;"/></testsuites>"#);
+    assert_xml_err(r#"<testsuites><testcase name="t&#x1F;"/></testsuites>"#);
+    assert_xml_err(r#"<testsuites><testcase name="t&#xFFFE;"/></testsuites>"#);
+    assert_xml_err("<testsuites><testcase name=\"t\u{1}\"/></testsuites>");
+    assert_xml_err("<testsuites>\u{1}<testcase name=\"t\"/></testsuites>");
+    assert_xml_err("<testsuites><testcase name=\"t\"><failure>&#8;</failure></testcase></testsuites>");
+    assert_xml_err("<testsuites><!-- \u{b} --></testsuites>");
+}
+
+#[test]
+fn junit_undefined_entity_in_text_is_rejected() {
+    assert_xml_err(r#"<testsuites><testcase name="t"><failure>&bogus;</failure></testcase></testsuites>"#);
+}
+
+#[test]
+fn junit_prolog_and_markup_errors_are_rejected() {
+    for xml in [
+        "\u{3000}<testsuites/>",
+        "\u{a0}<testsuites/>",
+        "<testsuites/>\u{a0}",
+        r#"<testsuites/><?xml version="1.0"?>"#,
+        r#"<testsuites><?xml version="1.0"?></testsuites>"#,
+        r#" <?xml version="1.0"?><testsuites/>"#,
+        r#"<?xml version="1.0"?><?xml version="1.0"?><testsuites/>"#,
+        r#"<?xml?><testsuites/>"#,
+        r#"<?XML version="1.0"?><testsuites/>"#,
+        r#"<testsuites/><!DOCTYPE x>"#,
+        r#"<!DOCTYPE x><!DOCTYPE x><testsuites/>"#,
+        r#"<testsuites><!-- a -- b --></testsuites>"#,
+        r#"<testsuites><!-- a ---></testsuites>"#,
+        r#"<testsuites>]]></testsuites>"#,
+        r#"<testsuites><1bad/></testsuites>"#,
+        r#"<testsuites><testcase 1bad="x" name="t"/></testsuites>"#,
+        r#"<testsuites><testcase name="t"time="1"/></testsuites>"#,
+    ] {
+        assert_xml_err(xml);
+    }
+}
+
+#[test]
+fn junit_well_formed_edge_cases_are_still_accepted() {
+    let run = import(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<!DOCTYPE testsuites>\n\
+         <!-- ok - comment --><?pi-target data?>\t\
+         <ns:testsuites xmlns:ns=\"urn:x\" ns:attr = 'v' >\
+         <testcase name=\"a&#9;b&#x10000;\" classname=\"c\"\n time=\"1\"/>\
+         <testcase name=\"t\"><failure message=\"]]&gt; &#xD7FF;\">]]&gt; x ] ]> &#10;</failure></testcase>\
+         <_x.y-z\u{b7}:w/>\
+         </ns:testsuites> \r\n",
+    );
+    assert_eq!(ids(&run), ["c::a\tb\u{10000}", "t"]);
+    assert_eq!(run.cases[1].status, CaseStatus::Fail);
+}
+
 #[test]
 fn junit_many_cases() {
     let cases: String = (0..5_000).map(|i| format!(r#"<testcase classname="c" name="t{i}" time="0.001"/>"#)).collect();

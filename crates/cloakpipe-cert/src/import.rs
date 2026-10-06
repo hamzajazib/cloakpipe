@@ -36,9 +36,8 @@
 use crate::model::{
     CaseResult, CaseStatus, EvaluationRun, EvaluatorRef, RunSource, SourceKind, SuiteRef, API_VERSION, RUN_KIND,
 };
-use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, XmlVersion};
+use quick_xml::Reader;
 use std::collections::BTreeMap;
 
 /// Run-level metadata a JUnit file does not carry.
@@ -196,8 +195,13 @@ struct JunitParser {
 
 impl JunitParser {
     fn parse(mut self, xml: &str) -> Result<Parsed, ImportError> {
+        if let Some((at, c)) = xml.char_indices().find(|&(_, c)| !is_xml_char(c)) {
+            return Err(ImportError::Xml(format!("character {c:?} is not allowed in XML at byte {at}")));
+        }
         let mut reader = Reader::from_str(xml);
+        let mut seen_doctype = false;
         loop {
+            let start = reader.buffer_position();
             let event = reader.read_event().map_err(|e| xml_error(&reader, e))?;
             match event {
                 Event::Start(e) => {
@@ -214,13 +218,44 @@ impl JunitParser {
                         self.close(frame);
                     }
                 }
-                Event::Text(t) if self.stack.is_empty() => {
-                    if !t.xml10_content().trim().is_empty() {
-                        return Err(ImportError::Xml("text outside the root element".into()));
+                Event::Text(t) => {
+                    let text = t.xml10_content();
+                    if self.stack.is_empty() {
+                        if !text.chars().all(is_xml_space) {
+                            return Err(ImportError::Xml("text outside the root element".into()));
+                        }
+                    } else if text.contains("]]>") {
+                        return Err(ImportError::Xml(format!("']]>' in character data at byte {start}")));
                     }
                 }
                 Event::CData(_) | Event::GeneralRef(_) if self.stack.is_empty() => {
                     return Err(ImportError::Xml("content outside the root element".into()));
+                }
+                Event::GeneralRef(r) => {
+                    resolve_reference(&r)?;
+                }
+                Event::Decl(d) => {
+                    // The XML declaration may only open the document.
+                    if start != 0 {
+                        return Err(ImportError::Xml(format!("XML declaration not at the start of the document (byte {start})")));
+                    }
+                    d.version().map_err(|err| ImportError::Xml(format!("XML declaration: {err}")))?;
+                }
+                Event::PI(pi) => {
+                    let target = pi.target();
+                    if !is_xml_name(target) || target.eq_ignore_ascii_case("xml") {
+                        return Err(ImportError::Xml(format!("invalid processing instruction target {target:?}")));
+                    }
+                }
+                Event::DocType(_) => {
+                    if self.seen_root || std::mem::replace(&mut seen_doctype, true) {
+                        return Err(ImportError::Xml(format!("misplaced document type declaration at byte {start}")));
+                    }
+                }
+                Event::Comment(c) => {
+                    if c.contains("--") || c.ends_with('-') {
+                        return Err(ImportError::Xml(format!("'--' in comment at byte {start}")));
+                    }
                 }
                 Event::Eof => break,
                 _ => {}
@@ -237,6 +272,12 @@ impl JunitParser {
 
     /// Handle an opening (or self-closing) tag; returns the frame it opens.
     fn open(&mut self, e: &BytesStart<'_>) -> Result<Frame, ImportError> {
+        let qname = e.name();
+        if !is_xml_name(qname.as_ref()) {
+            return Err(ImportError::Xml(format!("invalid element name {:?}", qname.as_ref())));
+        }
+        // Every element's attributes are checked, whether or not they are read.
+        let attrs = attributes(e)?;
         let name = e.local_name();
         let name = name.as_ref();
         let Some(&parent) = self.stack.last() else {
@@ -251,7 +292,7 @@ impl JunitParser {
         };
         Ok(match (parent, name) {
             (Frame::Container, "testcase") => {
-                self.start_case(e)?;
+                self.start_case(attrs);
                 Frame::Case
             }
             (Frame::Container, _) => Frame::Container,
@@ -273,7 +314,7 @@ impl JunitParser {
                 Frame::Opaque
             }
             (Frame::CaseProperties, "property") => {
-                self.read_property(e)?;
+                self.read_property(attrs);
                 Frame::Opaque
             }
             (Frame::CaseProperties | Frame::Opaque, _) => Frame::Opaque,
@@ -289,8 +330,7 @@ impl JunitParser {
         }
     }
 
-    fn start_case(&mut self, e: &BytesStart<'_>) -> Result<(), ImportError> {
-        let mut attrs = attributes(e)?;
+    fn start_case(&mut self, mut attrs: BTreeMap<String, String>) {
         let name = attrs.remove("name").unwrap_or_default();
         let classname = attrs.remove("classname").unwrap_or_default();
         let id = if classname.is_empty() { name.clone() } else { format!("{classname}::{name}") };
@@ -313,18 +353,15 @@ impl JunitParser {
             critical_set: false,
             score_set: false,
         });
-        Ok(())
     }
 
-    fn read_property(&mut self, e: &BytesStart<'_>) -> Result<(), ImportError> {
-        let mut attrs = attributes(e)?;
-        let Some(case) = self.pending.as_mut() else { return Ok(()) };
-        let Some(key) = attrs.remove("name") else { return Ok(()) };
+    fn read_property(&mut self, mut attrs: BTreeMap<String, String>) {
+        let Some(case) = self.pending.as_mut() else { return };
+        let Some(key) = attrs.remove("name") else { return };
         let value = attrs.remove("value");
         if let Err(problem) = apply_property(case, &key, value.as_deref()) {
             self.out.issues.push(format!("case {:?}: property {key}: {problem}", case.result.id));
         }
-        Ok(())
     }
 }
 
@@ -376,22 +413,149 @@ fn seconds_to_ms(time: &str) -> Option<u64> {
     (ms < u64::MAX as f64).then_some(ms as u64)
 }
 
-/// Decoded attributes of `e` by local name. Malformed or duplicate
-/// attributes and unknown entity references are XML errors.
+/// Decoded attributes of `e`, keyed by their full (qualified) name, so
+/// `xmlns:name` or `foo:classname` never stand in for `name` or `classname`.
+///
+/// The attribute list is parsed strictly per XML 1.0 (`(S Name S? '=' S?
+/// AttValue)* S?`): malformed or duplicate attributes, a raw `<` in a value,
+/// undefined entity references and character references to characters XML
+/// does not allow are all XML errors. Values are normalized as for CDATA
+/// attributes (each literal tab, newline or end-of-line becomes a space).
 fn attributes(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
+    let err = |what: &str| ImportError::Xml(format!("<{}>: {what}", e.name().as_ref()));
     let mut out = BTreeMap::new();
-    for attr in e.attributes() {
-        let attr = attr.map_err(|err| ImportError::Xml(err.to_string()))?;
-        // quick-xml accepts a raw `<` in attribute values; XML does not.
-        if attr.value.contains('<') {
-            return Err(ImportError::Xml(format!("'<' in the value of attribute {:?}", attr.key.as_ref())));
+    let mut rest = e.attributes_raw();
+    loop {
+        let trimmed = rest.trim_start_matches(is_xml_space);
+        let had_space = trimmed.len() != rest.len();
+        rest = trimmed;
+        if rest.is_empty() {
+            return Ok(out);
         }
-        let value = attr
-            .normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_predefined_entity)
-            .map_err(|err| ImportError::Xml(err.to_string()))?;
-        out.insert(attr.key.local_name().as_ref().to_string(), value.into_owned());
+        if !had_space {
+            return Err(err("attributes must be separated by whitespace"));
+        }
+        let name_end = rest.find(|c| is_xml_space(c) || c == '=').unwrap_or(rest.len());
+        let (key, after) = rest.split_at(name_end);
+        if !is_xml_name(key) {
+            return Err(err(&format!("invalid attribute name {key:?}")));
+        }
+        let after = after.trim_start_matches(is_xml_space);
+        let Some(after) = after.strip_prefix('=') else {
+            return Err(err(&format!("attribute {key:?} has no value")));
+        };
+        let after = after.trim_start_matches(is_xml_space);
+        let quote = match after.chars().next() {
+            Some(q @ ('"' | '\'')) => q,
+            _ => return Err(err(&format!("value of attribute {key:?} is not quoted"))),
+        };
+        let body = &after[1..];
+        let Some(close) = body.find(quote) else {
+            return Err(err(&format!("value of attribute {key:?} is not terminated")));
+        };
+        let value = decode_attribute_value(&body[..close]).map_err(|what| err(&format!("attribute {key:?}: {what}")))?;
+        if out.insert(key.to_string(), value).is_some() {
+            return Err(err(&format!("duplicate attribute {key:?}")));
+        }
+        rest = &body[close + 1..];
+    }
+}
+
+/// Decode and normalize a raw attribute value (without its quotes).
+fn decode_attribute_value(raw: &str) -> Result<String, ImportError> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        match c {
+            '<' => return Err(ImportError::Xml("'<' in attribute value".into())),
+            '&' => {
+                let Some(end) = rest.find(';') else {
+                    return Err(ImportError::Xml("unterminated reference in attribute value".into()));
+                };
+                out.push_str(&resolve(&rest[1..end])?);
+                rest = &rest[end + 1..];
+                continue;
+            }
+            '\r' => {
+                out.push(' ');
+                // `\r\n` is a single end-of-line.
+                if rest[1..].starts_with('\n') {
+                    rest = &rest[1..];
+                }
+            }
+            '\t' | '\n' => out.push(' '),
+            other => out.push(other),
+        }
+        rest = &rest[c.len_utf8()..];
     }
     Ok(out)
+}
+
+/// Check a reference in character data resolves (predefined entity or legal
+/// character reference). Its value is not needed: text is never interpreted.
+fn resolve_reference(r: &quick_xml::events::BytesRef<'_>) -> Result<(), ImportError> {
+    resolve(r).map(drop)
+}
+
+/// Resolve the reference `&{name};`. Only the five predefined entities are
+/// known (DTDs are not processed, so nothing else is declared), and a
+/// character reference must name a character XML allows.
+fn resolve(name: &str) -> Result<String, ImportError> {
+    let predefined = match name {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "quot" => Some('"'),
+        _ => None,
+    };
+    if let Some(c) = predefined {
+        return Ok(c.to_string());
+    }
+    let Some(num) = name.strip_prefix('#') else {
+        return Err(ImportError::Xml(format!("undefined entity &{name};")));
+    };
+    let (digits, radix) = match num.strip_prefix('x') {
+        Some(hex) => (hex, 16),
+        None => (num, 10),
+    };
+    let code = (!digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)))
+        .then(|| u32::from_str_radix(digits, radix).ok())
+        .flatten();
+    match code.and_then(char::from_u32).filter(|&c| is_xml_char(c)) {
+        Some(c) => Ok(c.to_string()),
+        None => Err(ImportError::Xml(format!("invalid character reference &{name};"))),
+    }
+}
+
+/// XML 1.0 `Char` (surrogates cannot occur in a Rust `char`).
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
+}
+
+/// XML 1.0 `S`.
+fn is_xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// XML 1.0 (fifth edition) `Name`.
+fn is_xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
+}
+
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        ':' | 'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
 fn xml_error(reader: &Reader<&[u8]>, err: quick_xml::Error) -> ImportError {
