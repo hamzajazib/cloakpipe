@@ -374,7 +374,15 @@ fn certify_inner(a: CertifyArgs) -> Res<i32> {
 
     let mut signed: Option<(Envelope, PathBuf)> = None;
     if let Some((key, id)) = key {
-        let valid_until = issued + chrono::Duration::days(i64::from(policy.validity_days));
+        let valid_until = chrono::Duration::try_days(i64::from(policy.validity_days))
+            .and_then(|d| issued.checked_add_signed(d))
+            .ok_or_else(|| {
+                invalid(format_args!(
+                    "{}: validityDays {} puts the certification's expiry out of range",
+                    a.policy.display(),
+                    policy.validity_days
+                ))
+            })?;
         let cert = Certification {
             release: release.clone(),
             agent: Some(candidate.metadata.agent.clone()),

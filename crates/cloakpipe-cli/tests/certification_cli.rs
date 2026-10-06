@@ -470,6 +470,25 @@ fn certify_rejects_invalid_inputs_with_exit_1() {
 }
 
 #[test]
+fn certify_with_a_validity_window_past_the_calendar_exits_1_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = keygen(&dir, "key.json");
+    let run_file = import(&dir, "passing.junit.xml", "run.json");
+    let policy = std::fs::read_to_string(fixture("policy.yaml")).unwrap();
+    assert!(policy.contains("validityDays: 30"));
+    let policy = write(&dir, "huge.yaml", &policy.replace("validityDays: 30", "validityDays: 4294967295"));
+    let m = manifest();
+    let out = path(&dir, "cert.dsse.json");
+    let (code, so, se) = run(&[
+        "release", "certify", &m, "--policy", &policy, "--run", &run_file, "--require", "privacy,functional",
+        "--environment", "production", "--issuer", "ci", "--key", &key, "--now", NOW, "--out", &out,
+    ]);
+    assert_eq!(code, 1, "{so}{se}");
+    assert!(se.contains("validityDays"), "{se}");
+    assert!(!Path::new(&out).exists());
+}
+
+#[test]
 fn certify_io_and_usage_errors_exit_2() {
     let dir = tempfile::tempdir().unwrap();
     let run_file = import(&dir, "passing.junit.xml", "run.json");
