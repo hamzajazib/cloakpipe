@@ -461,6 +461,7 @@ pub async fn mcp_proxy(config_path: &str, upstream: String) -> Result<()> {
                 vault,
                 ledger_db,
                 release,
+                gate: None,
             },
         )
     })

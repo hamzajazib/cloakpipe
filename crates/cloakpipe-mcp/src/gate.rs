@@ -92,6 +92,11 @@ impl ToolGate {
         &self.release
     }
 
+    /// The release's manifest hash as bytes, for ledger binding.
+    pub fn release_bytes(&self) -> [u8; 32] {
+        self.release.parse::<cloakpipe_release::ReleaseHash>().map(|h| h.0).unwrap_or_default()
+    }
+
     /// Check one call to `tool` at RFC 3339 time `now`.
     pub fn check(&self, tool: &str, now: &str) -> Result<(), Denial> {
         if !self.tools.contains(tool) {

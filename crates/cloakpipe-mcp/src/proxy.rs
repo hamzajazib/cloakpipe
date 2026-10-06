@@ -26,6 +26,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use crate::gate::{GateMode, ToolGate};
+
 /// Everything the interceptor needs beyond the upstream command.
 pub struct ProxyContext {
     pub detector: Detector,
@@ -35,7 +37,14 @@ pub struct ProxyContext {
     /// Agent Release manifest hash (`CLOAKPIPE_RELEASE`) every ledger hop is
     /// bound to; `None` records unbound hops.
     pub release: Option<[u8; 32]>,
+    /// Phase C tool gate: when set, each `tools/call` must pass
+    /// [`ToolGate::check`]. Refused calls (enforce mode) never reach the
+    /// upstream; the agent gets a JSON-RPC error instead.
+    pub gate: Option<ToolGate>,
 }
+
+/// JSON-RPC error code for a tool call the gate refused (server-defined range).
+pub const TOOL_REFUSED: i64 = -32001;
 
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
 
@@ -71,12 +80,17 @@ where
     let ledger: SharedLedger = ctx.ledger_db.as_deref().and_then(open_ledger);
     let (tenant, agent) = stable_ids();
     let release = ctx.release;
+    let gate = ctx.gate;
+    // Both directions answer the agent: ingress relays upstream replies and
+    // egress answers refused calls.
+    let agent_out = Arc::new(Mutex::new(agent_out));
 
     // Egress: agent stdin → mask tools/call → upstream stdin.
     {
         let detector = detector.clone();
         let vault = vault.clone();
         let ledger = ledger.clone();
+        let agent_out = agent_out.clone();
         std::thread::spawn(move || {
             let mut to_upstream = to_upstream; // owned: dropped (→ upstream stdin EOF) when this thread ends
             for line in BufReader::new(agent_in).lines() {
@@ -84,12 +98,41 @@ where
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
+                            let mut violation = None;
+                            if let Some(gate) = &gate {
+                                let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                                if let Err(denial) = gate.check(tool, &now) {
+                                    let code = denial.code();
+                                    if gate.mode == GateMode::Enforce {
+                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", code.clone())));
+                                        // A notification (no id) takes no response.
+                                        if let Some(id) = msg.get("id").filter(|id| !id.is_null()) {
+                                            let refusal = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "error": {
+                                                    "code": TOOL_REFUSED,
+                                                    "message": format!("tool call refused by CloakPipe: {code}"),
+                                                    "data": { "reason": code, "tool": tool, "release": gate.release() },
+                                                },
+                                            });
+                                            if write_line(&agent_out, &refusal.to_string()).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
+                                    violation = Some(("gate_violation", code));
+                                }
+                            }
                             let masked = {
                                 let mut v = vault.lock().expect("vault poisoned");
                                 mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
                             };
-                            if masked > 0 {
-                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked);
+                            if masked > 0 || violation.is_some() {
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, violation);
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -112,7 +155,6 @@ where
         let ledger = ledger.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(from_upstream);
-            let mut w = agent_out;
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let out = match serde_json::from_str::<Value>(&line) {
@@ -122,16 +164,13 @@ where
                                 let v = vault.lock().expect("vault poisoned");
                                 rehydrate_value(msg.pointer_mut("/result/content"), &v);
                             }
-                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0);
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, None);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
                     }
                     Err(_) => line,
                 };
-                if w.write_all(out.as_bytes()).is_err()
-                    || w.write_all(b"\n").is_err()
-                    || w.flush().is_err()
-                {
+                if write_line(&agent_out, &out).is_err() {
                     break;
                 }
             }
@@ -146,6 +185,14 @@ where
     // exiting cleans it up.
     let _ = ingress.join();
     Ok(())
+}
+
+/// Write one JSON-RPC line to the agent.
+fn write_line<W: Write>(out: &Mutex<W>, line: &str) -> std::io::Result<()> {
+    let mut w = out.lock().map_err(|_| std::io::Error::other("agent writer poisoned"))?;
+    w.write_all(line.as_bytes())?;
+    w.write_all(b"\n")?;
+    w.flush()
 }
 
 /// Pseudonymize every string leaf under `v`, returning the number of entities
@@ -212,6 +259,8 @@ pub fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
 }
 
 /// Append a no-PII hop record (categories/count only, never text). Best-effort.
+/// `gate` adds one metadata entry with a gate reason code.
+#[allow(clippy::too_many_arguments)]
 fn record_hop(
     ledger: &SharedLedger,
     tenant: uuid::Uuid,
@@ -219,6 +268,8 @@ fn record_hop(
     release: Option<[u8; 32]>,
     hop: Hop,
     count: usize,
+    kind: ActionKind,
+    gate: Option<(&str, String)>,
 ) {
     let Some(ledger) = ledger else { return };
     let Ok(mut store) = ledger.lock() else {
@@ -243,7 +294,7 @@ fn record_hop(
         })
         .action(Action {
             entity_type: "mcp".to_string(),
-            kind: ActionKind::Pseudonymize,
+            kind,
             token_ref: Some(uuid::Uuid::new_v4().to_string()),
         })
         .identities(Identity {
@@ -254,6 +305,9 @@ fn record_hop(
         });
     if let Some(release) = release {
         builder = builder.release(release);
+    }
+    if let Some((key, code)) = gate {
+        builder = builder.metadata(key, cloakpipe_ledger::MetadataValue::OpaqueId(code));
     }
     let appended = builder
         .build()
