@@ -51,8 +51,8 @@
 //! empty.
 
 use crate::model::{
-    Aggregate, CaseStatus, CertificationPolicy, Comparison, Decision, EvaluationRun, MetricRule,
-    Outcome, PolicyRef, Reason, ReasonCode, RunRef, SuiteSummary,
+    Aggregate, CaseResult, CaseStatus, CertificationPolicy, Comparison, Decision, EvaluationRun,
+    MetricRule, Outcome, PolicyRef, Reason, ReasonCode, RunRef, SuiteSummary,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -267,12 +267,19 @@ pub fn decide(input: &DecisionInput<'_>) -> Decision {
     }
 }
 
-/// Runs paired with their `RunRef`, in canonical (suite, runId, hash) order.
-struct Indexed<'a>(Vec<(RunRef, &'a EvaluationRun)>);
+/// Canonical copies of the runs paired with their `RunRef`, in canonical
+/// (suite, runId, hash) order.
+struct Indexed(Vec<(RunRef, EvaluationRun)>);
 
-impl<'a> Indexed<'a> {
-    fn new(runs: &'a [EvaluationRun]) -> Self {
-        let mut indexed: Vec<_> = runs.iter().map(|run| (RunRef::from(run), run)).collect();
+impl Indexed {
+    fn new(runs: &[EvaluationRun]) -> Self {
+        let mut indexed: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                let run = canonical(run);
+                (RunRef::from(&run), run)
+            })
+            .collect();
         indexed.sort_by(|(a, _), (b, _)| {
             (&a.suite, &a.run_id, &a.hash).cmp(&(&b.suite, &b.run_id, &b.hash))
         });
@@ -284,10 +291,42 @@ impl<'a> Indexed<'a> {
     }
 }
 
+/// A copy of `run` with its cases in a total order (id, then every other
+/// field) and `covers` / `evaluators` sorted. Everything `decide` derives
+/// from a run (its hash, the positional `cases[i]` in validation messages)
+/// is computed from this copy, so the order of cases in the input cannot
+/// change the decision, even when case ids are duplicated.
+fn canonical(run: &EvaluationRun) -> EvaluationRun {
+    let mut run = run.clone();
+    run.cases.sort_by(compare_cases);
+    run.covers.sort();
+    run.evaluators.sort();
+    run
+}
+
+/// A total order on cases: id first, then all remaining fields.
+fn compare_cases(a: &CaseResult, b: &CaseResult) -> Ordering {
+    let score = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (x, y) => x.is_some().cmp(&y.is_some()),
+    };
+    a.id.cmp(&b.id)
+        .then_with(|| a.status.cmp(&b.status))
+        .then_with(|| a.critical.cmp(&b.critical))
+        .then_with(|| score(a.score, b.score))
+        .then_with(|| a.duration_ms.cmp(&b.duration_ms))
+        .then_with(|| {
+            a.metrics
+                .iter()
+                .map(|(k, v)| (k, v.to_bits()))
+                .cmp(b.metrics.iter().map(|(k, v)| (k, v.to_bits())))
+        })
+}
+
 /// The structurally valid runs, in canonical order; each problem of the
 /// others becomes an `InvalidInput` reason.
 fn valid_runs<'a>(
-    runs: &Indexed<'a>,
+    runs: &'a Indexed,
     what: &str,
     reasons: &mut Vec<Reason>,
 ) -> Vec<&'a EvaluationRun> {
@@ -295,7 +334,7 @@ fn valid_runs<'a>(
     for (_, run) in &runs.0 {
         let issues = run.validate();
         if issues.is_empty() {
-            valid.push(*run);
+            valid.push(run);
         }
         for issue in issues {
             reasons.push(reason(
@@ -401,15 +440,40 @@ fn check_metric(rule: &MetricRule, runs: &[&EvaluationRun]) -> Option<Reason> {
 /// Aggregate ascending-sorted values; `None` when there are none.
 fn aggregate(sorted: &[f64], aggregate: Aggregate) -> Option<f64> {
     match aggregate {
-        Aggregate::Mean if !sorted.is_empty() => {
-            Some(sorted.iter().sum::<f64>() / sorted.len() as f64)
-        }
-        Aggregate::Mean => None,
+        Aggregate::Mean => mean(sorted),
         Aggregate::P50 => nearest_rank(sorted, 50),
         Aggregate::P95 => nearest_rank(sorted, 95),
         Aggregate::Min => sorted.first().copied(),
         Aggregate::Max => sorted.last().copied(),
     }
+}
+
+/// Arithmetic mean of ascending-sorted finite values, without overflow.
+///
+/// The plain sum is used when it is finite; otherwise the values are scaled
+/// down by an exact power of two so the partial sums cannot overflow. The
+/// result is clamped to `[min, max]`, where the true mean always lies.
+fn mean(sorted: &[f64]) -> Option<f64> {
+    let (&lo, &hi) = (sorted.first()?, sorted.last()?);
+    let n = sorted.len() as f64;
+    let sum: f64 = sorted.iter().sum();
+    let mean = if sum.is_finite() {
+        sum / n
+    } else {
+        // 2^-k with 2^k >= n keeps |sum of scaled values| <= f64::MAX.
+        let k = sorted.len().next_power_of_two().trailing_zeros() as i32;
+        let scale = 2f64.powi(k);
+        let scaled: f64 = sorted.iter().map(|v| v / scale).sum();
+        scaled / n * scale
+    };
+    // NaN inputs (rejected by validation) propagate rather than clamp.
+    Some(if mean < lo {
+        lo
+    } else if mean > hi {
+        hi
+    } else {
+        mean
+    })
 }
 
 fn aggregate_name(aggregate: Aggregate) -> &'static str {

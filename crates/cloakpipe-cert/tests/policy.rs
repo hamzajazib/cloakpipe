@@ -1579,3 +1579,117 @@ proptest! {
         assert_outcome_consistent(&d);
     }
 }
+
+// ── Regressions: overflow-safe mean and case-order independence ─────────
+
+fn metric_run(values: &[f64]) -> EvaluationRun {
+    let cs = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| with_metric(case(&format!("c{i}"), CaseStatus::Pass), "m", *v))
+        .collect();
+    run("r", "s", &["functional"], cs)
+}
+
+fn mean_rule(op: Comparison, value: f64) -> CertificationPolicy {
+    policy(Rules {
+        metrics: vec![MetricRule {
+            metric: "m".into(),
+            aggregate: Aggregate::Mean,
+            op,
+            value,
+            suite: None,
+        }],
+        ..rules()
+    })
+}
+
+#[test]
+fn mean_of_huge_values_does_not_overflow_to_negative_infinity() {
+    // True mean is 0.0 > -1.0: the rule is violated and must block.
+    let r = metric_run(&[-1e308, -1e308, 1e308, 1e308]);
+    let d = go(&suites(&[]), &[r], &[], &mean_rule(Comparison::Lte, -1.0));
+    assert_eq!(d.outcome, Outcome::Blocked, "{:?}", d.reasons);
+    let m = reasons_with(&d, ReasonCode::MetricThreshold);
+    assert_eq!(m.len(), 1);
+    assert_eq!(m[0].observed, Some(0.0));
+}
+
+#[test]
+fn mean_of_huge_values_does_not_overflow_to_positive_infinity() {
+    // True mean 1e308 <= 1.5e308: certified.
+    let r = metric_run(&[1e308, 1e308]);
+    let d = go(
+        &suites(&[]),
+        &[r],
+        &[],
+        &mean_rule(Comparison::Lte, 1.5e308),
+    );
+    assert_eq!(d.outcome, Outcome::Certified, "{:?}", d.reasons);
+}
+
+#[test]
+fn mean_observed_is_finite_and_round_trips_when_violated() {
+    let r = metric_run(&[f64::MAX, f64::MAX, f64::MAX]);
+    let d = go(&suites(&[]), &[r], &[], &mean_rule(Comparison::Lte, 1.0));
+    assert_eq!(d.outcome, Outcome::Blocked);
+    let m = reasons_with(&d, ReasonCode::MetricThreshold);
+    assert_eq!(m[0].observed, Some(f64::MAX));
+    let json = serde_json::to_string(&d).unwrap();
+    let back: Decision = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, d);
+}
+
+#[test]
+fn invalid_input_messages_do_not_depend_on_case_order() {
+    let bad = with_metric(case("b", CaseStatus::Pass), "m", f64::NAN);
+    let a = run(
+        "r",
+        "s",
+        &["functional"],
+        vec![case("a", CaseStatus::Pass), bad.clone()],
+    );
+    let b = run(
+        "r",
+        "s",
+        &["functional"],
+        vec![bad, case("a", CaseStatus::Pass)],
+    );
+    let p = policy(rules());
+    let da = go(&suites(&[]), &[a], &[], &p);
+    assert_eq!(da.outcome, Outcome::Blocked);
+    assert_eq!(da, go(&suites(&[]), &[b], &[], &p));
+}
+
+#[test]
+fn run_hash_does_not_depend_on_order_of_duplicate_case_ids() {
+    let a = run(
+        "r",
+        "s",
+        &["functional"],
+        vec![case("a", CaseStatus::Pass), case("a", CaseStatus::Fail)],
+    );
+    let b = run(
+        "r",
+        "s",
+        &["functional"],
+        vec![case("a", CaseStatus::Fail), case("a", CaseStatus::Pass)],
+    );
+    let p = policy(rules());
+    let da = go(
+        &suites(&[]),
+        std::slice::from_ref(&a),
+        std::slice::from_ref(&a),
+        &p,
+    );
+    assert_eq!(da.outcome, Outcome::Blocked);
+    assert_eq!(
+        da,
+        go(
+            &suites(&[]),
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&b),
+            &p
+        )
+    );
+}
