@@ -488,6 +488,38 @@ fn certify_with_a_validity_window_past_the_calendar_exits_1_instead_of_panicking
     assert!(!Path::new(&out).exists());
 }
 
+/// The composite action's default envelope name must be the manifest's file
+/// stem (as the CLI computes it), even when a directory contains a dot.
+#[test]
+fn certify_action_default_envelope_is_the_manifest_file_stem() {
+    let action = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/actions/certify/action.yml"),
+    )
+    .unwrap();
+    // The shell lines that compute the default (the envelope assignment and
+    // any helper assignments immediately before it).
+    let lines: Vec<&str> = action.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("envelope=\"${OUT:-"))
+        .expect("default envelope assignment in action.yml");
+    let start = (0..at).rev().take_while(|&i| lines[i].starts_with("manifest_name=")).last().unwrap_or(at);
+    let line = lines[start..=at].join("; ");
+    for (manifest, expected) in [
+        ("releases/v1.2/release", "release.cert.dsse.json"),
+        ("releases/v1.2/support-agent.yaml", "support-agent.cert.dsse.json"),
+        ("support-agent.yaml", "support-agent.cert.dsse.json"),
+    ] {
+        let o = Command::new("bash")
+            .args(["-c", &format!("set -eu; OUT=''; {line}; printf %s \"$envelope\"")])
+            .env("MANIFEST", manifest)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(String::from_utf8_lossy(&o.stdout), expected, "manifest {manifest}");
+    }
+}
+
 #[test]
 fn certify_io_and_usage_errors_exit_2() {
     let dir = tempfile::tempdir().unwrap();

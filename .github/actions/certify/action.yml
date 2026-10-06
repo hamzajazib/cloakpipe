@@ -127,7 +127,8 @@ runs:
           trap 'rm -f "$keyfile"' EXIT
           chmod 600 "$keyfile"
           printf '%s' "$SIGNING_KEY" > "$keyfile"
-          envelope="${OUT:-$(basename "${MANIFEST%.*}").cert.dsse.json}"
+          manifest_name="$(basename "$MANIFEST")"
+          envelope="${OUT:-${manifest_name%.*}.cert.dsse.json}"
           args+=(--key "$keyfile" --out "$envelope")
         fi
 
