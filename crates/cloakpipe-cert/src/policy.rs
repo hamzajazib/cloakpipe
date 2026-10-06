@@ -50,9 +50,14 @@
 //! by (code, suite, case, message). `outcome = Certified` iff `reasons` is
 //! empty.
 
-use crate::model::{CertificationPolicy, Decision, EvaluationRun};
-use std::collections::BTreeSet;
+use crate::model::{
+    Aggregate, CaseStatus, CertificationPolicy, Comparison, Decision, EvaluationRun, MetricRule,
+    Outcome, PolicyRef, Reason, ReasonCode, RunRef, SuiteSummary,
+};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
+/// Everything a certification decision is made from.
 #[derive(Debug, Clone, Copy)]
 pub struct DecisionInput<'a> {
     /// `sha256:<hex>` manifest hash of the candidate release.
@@ -60,11 +65,410 @@ pub struct DecisionInput<'a> {
     /// Assurance suites the release must have evidence for (from
     /// `cloakpipe_release::diff` and/or policy).
     pub required_suites: &'a BTreeSet<String>,
+    /// Candidate evaluation runs of `release`.
     pub runs: &'a [EvaluationRun],
+    /// Runs of a previously certified release to compare against.
     pub baseline_runs: &'a [EvaluationRun],
+    /// The policy to apply.
     pub policy: &'a CertificationPolicy,
 }
 
-pub fn decide(_input: &DecisionInput<'_>) -> Decision {
-    todo!("implement per the module contract")
+/// Apply `input.policy` to the evidence in `input` (see the module contract).
+///
+/// Pure and deterministic: the result does not depend on the order of runs,
+/// cases or covers in the input, and no input makes it panic.
+pub fn decide(input: &DecisionInput<'_>) -> Decision {
+    let policy = input.policy;
+    let rules = &policy.rules;
+    let mut reasons = Vec::new();
+
+    // 1. Input validity.
+    for issue in policy.validate() {
+        reasons.push(reason(
+            ReasonCode::InvalidInput,
+            None,
+            format!("policy: {issue}"),
+        ));
+    }
+    let runs = Indexed::new(input.runs);
+    let baseline_runs = Indexed::new(input.baseline_runs);
+    let candidates = valid_runs(&runs, "run", &mut reasons);
+    let baselines = valid_runs(&baseline_runs, "baseline run", &mut reasons);
+
+    // 2. Release binding.
+    let candidates: Vec<&EvaluationRun> = candidates
+        .into_iter()
+        .filter(|run| {
+            let bound = run.release == input.release;
+            if !bound {
+                reasons.push(reason(
+                    ReasonCode::ReleaseMismatch,
+                    Some(&run.suite.name),
+                    format!(
+                        "run {:?} evaluated release {}, not {}",
+                        run.run_id, run.release, input.release
+                    ),
+                ));
+            }
+            bound
+        })
+        .collect();
+
+    // 3. Required assurance.
+    let covered: BTreeSet<&str> = candidates
+        .iter()
+        .flat_map(|run| run.covers.iter().map(String::as_str))
+        .collect();
+    for suite in input.required_suites {
+        if !covered.contains(suite.as_str()) {
+            reasons.push(reason(
+                ReasonCode::MissingSuite,
+                Some(suite),
+                format!("no run covers required assurance suite {suite:?}"),
+            ));
+        }
+    }
+
+    // 4. Per-run checks. The baseline for a suite is the first valid
+    // baseline run with that suite name in canonical order.
+    let mut baseline_by_suite: BTreeMap<&str, &EvaluationRun> = BTreeMap::new();
+    for run in &baselines {
+        baseline_by_suite
+            .entry(run.suite.name.as_str())
+            .or_insert(run);
+    }
+    let mut summaries = Vec::with_capacity(candidates.len());
+    let mut new_critical = Vec::new();
+    for run in &candidates {
+        let suite = run.suite.name.as_str();
+        let baseline = baseline_by_suite.get(suite).copied();
+        let summary = summarize(run);
+        let label = format!("run {:?}", run.run_id);
+
+        if summary.executed == 0 {
+            reasons.push(reason(
+                ReasonCode::NoCases,
+                Some(suite),
+                format!("{label}: no executed cases"),
+            ));
+        }
+        if !at_least(summary.coverage, rules.min_coverage) {
+            reasons.push(measured(
+                reason(
+                    ReasonCode::CoverageBelowMinimum,
+                    Some(suite),
+                    format!(
+                        "{label}: coverage {} is below the minimum {}",
+                        summary.coverage, rules.min_coverage
+                    ),
+                ),
+                summary.coverage,
+                rules.min_coverage,
+            ));
+        }
+        if let Some(min) = rules.min_pass_rate {
+            if !at_least(summary.pass_rate, min) {
+                reasons.push(measured(
+                    reason(
+                        ReasonCode::PassRateBelowMinimum,
+                        Some(suite),
+                        format!(
+                            "{label}: pass rate {} is below the minimum {min}",
+                            summary.pass_rate
+                        ),
+                    ),
+                    summary.pass_rate,
+                    min,
+                ));
+            }
+        }
+        if let (Some(max), Some(baseline)) = (rules.max_pass_rate_regression, baseline) {
+            let base_rate = summarize(baseline).pass_rate;
+            let regression = base_rate - summary.pass_rate;
+            if !at_most(regression, max) {
+                reasons.push(measured(
+                    reason(
+                        ReasonCode::PassRateRegression,
+                        Some(suite),
+                        format!(
+                            "{label}: pass rate fell by {regression} from baseline {:?} \
+                             ({base_rate} -> {}), more than the allowed {max}",
+                            baseline.run_id, summary.pass_rate
+                        ),
+                    ),
+                    regression,
+                    max,
+                ));
+            }
+        }
+        for case in run
+            .cases
+            .iter()
+            .filter(|c| c.critical && c.status.is_failure())
+        {
+            let persisting = baseline.is_some_and(|b| {
+                b.cases
+                    .iter()
+                    .any(|bc| bc.id == case.id && bc.status.is_failure())
+            });
+            if !persisting {
+                new_critical.push((suite, &run.run_id, case.id.as_str()));
+            } else if rules.block_persisting_critical_failures {
+                reasons.push(Reason {
+                    case: Some(case.id.clone()),
+                    ..reason(
+                        ReasonCode::PersistingCriticalFailure,
+                        Some(suite),
+                        format!(
+                            "{label}: critical case {:?} also fails in the baseline",
+                            case.id
+                        ),
+                    )
+                });
+            }
+        }
+        summaries.push(summary.into_summary(suite));
+    }
+    let allowed = usize::try_from(rules.max_new_critical_failures).unwrap_or(usize::MAX);
+    if new_critical.len() > allowed {
+        for (suite, run_id, case) in new_critical {
+            reasons.push(Reason {
+                case: Some(case.to_owned()),
+                ..reason(
+                    ReasonCode::NewCriticalFailure,
+                    Some(suite),
+                    format!("run {run_id:?}: critical case {case:?} fails (new failure)"),
+                )
+            });
+        }
+    }
+
+    // 5. Metrics.
+    for rule in &rules.metrics {
+        if let Some(r) = check_metric(rule, &candidates) {
+            reasons.push(r);
+        }
+    }
+
+    reasons.sort_by(compare_reasons);
+    Decision {
+        outcome: if reasons.is_empty() {
+            Outcome::Certified
+        } else {
+            Outcome::Blocked
+        },
+        release: input.release.to_owned(),
+        policy: PolicyRef::from(policy),
+        required_suites: input.required_suites.iter().cloned().collect(),
+        runs: runs.refs(),
+        baseline_runs: baseline_runs.refs(),
+        summaries,
+        reasons,
+    }
+}
+
+/// Runs paired with their `RunRef`, in canonical (suite, runId, hash) order.
+struct Indexed<'a>(Vec<(RunRef, &'a EvaluationRun)>);
+
+impl<'a> Indexed<'a> {
+    fn new(runs: &'a [EvaluationRun]) -> Self {
+        let mut indexed: Vec<_> = runs.iter().map(|run| (RunRef::from(run), run)).collect();
+        indexed.sort_by(|(a, _), (b, _)| {
+            (&a.suite, &a.run_id, &a.hash).cmp(&(&b.suite, &b.run_id, &b.hash))
+        });
+        Indexed(indexed)
+    }
+
+    fn refs(&self) -> Vec<RunRef> {
+        self.0.iter().map(|(r, _)| r.clone()).collect()
+    }
+}
+
+/// The structurally valid runs, in canonical order; each problem of the
+/// others becomes an `InvalidInput` reason.
+fn valid_runs<'a>(
+    runs: &Indexed<'a>,
+    what: &str,
+    reasons: &mut Vec<Reason>,
+) -> Vec<&'a EvaluationRun> {
+    let mut valid = Vec::with_capacity(runs.0.len());
+    for (_, run) in &runs.0 {
+        let issues = run.validate();
+        if issues.is_empty() {
+            valid.push(*run);
+        }
+        for issue in issues {
+            reasons.push(reason(
+                ReasonCode::InvalidInput,
+                Some(&run.suite.name),
+                format!("{what} {:?}: {issue}", run.run_id),
+            ));
+        }
+    }
+    valid
+}
+
+/// Case counts and rates of one run.
+struct Stats {
+    cases: usize,
+    passed: usize,
+    failed: usize,
+    errored: usize,
+    skipped: usize,
+    executed: usize,
+    pass_rate: f64,
+    coverage: f64,
+}
+
+impl Stats {
+    fn into_summary(self, suite: &str) -> SuiteSummary {
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        SuiteSummary {
+            suite: suite.to_owned(),
+            cases: count(self.cases),
+            passed: count(self.passed),
+            failed: count(self.failed),
+            errored: count(self.errored),
+            skipped: count(self.skipped),
+            pass_rate: self.pass_rate,
+            coverage: self.coverage,
+        }
+    }
+}
+
+fn summarize(run: &EvaluationRun) -> Stats {
+    let count = |status: CaseStatus| run.cases.iter().filter(|c| c.status == status).count();
+    let (passed, failed, errored, skipped) = (
+        count(CaseStatus::Pass),
+        count(CaseStatus::Fail),
+        count(CaseStatus::Error),
+        count(CaseStatus::Skipped),
+    );
+    let cases = run.cases.len();
+    let executed = cases - skipped;
+    let ratio = |n: usize, d: usize| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+    Stats {
+        cases,
+        passed,
+        failed,
+        errored,
+        skipped,
+        executed,
+        pass_rate: ratio(passed, executed),
+        coverage: ratio(executed, cases),
+    }
+}
+
+/// Evaluate one metric rule over the executed cases of the matching runs.
+fn check_metric(rule: &MetricRule, runs: &[&EvaluationRun]) -> Option<Reason> {
+    let mut values: Vec<f64> = runs
+        .iter()
+        .filter(|run| rule.suite.as_ref().is_none_or(|s| *s == run.suite.name))
+        .flat_map(|run| &run.cases)
+        .filter(|case| case.status != CaseStatus::Skipped)
+        .filter_map(|case| case.metrics.get(&rule.metric).copied())
+        .collect();
+    // Sorting first also makes the mean independent of input order.
+    values.sort_by(f64::total_cmp);
+    let observed = aggregate(&values, rule.aggregate)?;
+    let (holds, symbol) = match rule.op {
+        Comparison::Lte => (at_most(observed, rule.value), "<="),
+        Comparison::Gte => (at_least(observed, rule.value), ">="),
+    };
+    if holds {
+        return None;
+    }
+    let scope = rule
+        .suite
+        .as_ref()
+        .map_or_else(|| "all runs".to_owned(), |s| format!("suite {s:?}"));
+    Some(measured(
+        reason(
+            ReasonCode::MetricThreshold,
+            rule.suite.as_deref(),
+            format!(
+                "{}({}) over {scope} is {observed}, required {symbol} {}",
+                aggregate_name(rule.aggregate),
+                rule.metric,
+                rule.value
+            ),
+        ),
+        observed,
+        rule.value,
+    ))
+}
+
+/// Aggregate ascending-sorted values; `None` when there are none.
+fn aggregate(sorted: &[f64], aggregate: Aggregate) -> Option<f64> {
+    match aggregate {
+        Aggregate::Mean if !sorted.is_empty() => {
+            Some(sorted.iter().sum::<f64>() / sorted.len() as f64)
+        }
+        Aggregate::Mean => None,
+        Aggregate::P50 => nearest_rank(sorted, 50),
+        Aggregate::P95 => nearest_rank(sorted, 95),
+        Aggregate::Min => sorted.first().copied(),
+        Aggregate::Max => sorted.last().copied(),
+    }
+}
+
+fn aggregate_name(aggregate: Aggregate) -> &'static str {
+    match aggregate {
+        Aggregate::Mean => "mean",
+        Aggregate::P50 => "p50",
+        Aggregate::P95 => "p95",
+        Aggregate::Min => "min",
+        Aggregate::Max => "max",
+    }
+}
+
+/// Nearest-rank percentile: the value at 1-based rank `ceil(pct / 100 * n)`.
+fn nearest_rank(sorted: &[f64], pct: usize) -> Option<f64> {
+    let rank = pct.saturating_mul(sorted.len()).div_ceil(100).max(1);
+    sorted.get(rank - 1).copied()
+}
+
+/// `x >= min`; false when either is NaN, so a check fails closed.
+fn at_least(x: f64, min: f64) -> bool {
+    matches!(
+        x.partial_cmp(&min),
+        Some(Ordering::Greater | Ordering::Equal)
+    )
+}
+
+/// `x <= max`; false when either is NaN, so a check fails closed.
+fn at_most(x: f64, max: f64) -> bool {
+    matches!(x.partial_cmp(&max), Some(Ordering::Less | Ordering::Equal))
+}
+
+fn reason(code: ReasonCode, suite: Option<&str>, message: String) -> Reason {
+    Reason {
+        code,
+        message,
+        suite: suite.map(str::to_owned),
+        case: None,
+        observed: None,
+        required: None,
+    }
+}
+
+fn measured(reason: Reason, observed: f64, required: f64) -> Reason {
+    Reason {
+        observed: Some(observed),
+        required: Some(required),
+        ..reason
+    }
+}
+
+/// Contract order (code, suite, case, message); the measured values break
+/// any remaining tie so the order never depends on the input order.
+fn compare_reasons(a: &Reason, b: &Reason) -> Ordering {
+    let num = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (x, y) => x.is_some().cmp(&y.is_some()),
+    };
+    (a.code, &a.suite, &a.case, &a.message)
+        .cmp(&(b.code, &b.suite, &b.case, &b.message))
+        .then_with(|| num(a.observed, b.observed))
+        .then_with(|| num(a.required, b.required))
 }
