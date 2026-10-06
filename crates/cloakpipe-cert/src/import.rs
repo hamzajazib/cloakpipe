@@ -33,17 +33,28 @@
 //! (camelCase, unknown fields rejected), validated with
 //! [`EvaluationRun::validate`].
 
-use crate::model::{EvaluationRun, EvaluatorRef, SuiteRef};
+use crate::model::{
+    CaseResult, CaseStatus, EvaluationRun, EvaluatorRef, RunSource, SourceKind, SuiteRef, API_VERSION, RUN_KIND,
+};
+use quick_xml::escape::resolve_predefined_entity;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
+use std::collections::BTreeMap;
 
 /// Run-level metadata a JUnit file does not carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportMeta {
+    /// Becomes [`EvaluationRun::run_id`].
     pub run_id: String,
     /// `sha256:<hex>` manifest hash of the evaluated release.
     pub release: String,
+    /// The evaluation suite that produced the report.
     pub suite: SuiteRef,
+    /// Assurance suites the run provides evidence for, e.g. `privacy`.
     pub covers: Vec<String>,
+    /// Dataset the suite ran against, if any.
     pub dataset: Option<String>,
+    /// Evaluators (judges, scorers) used by the suite.
     pub evaluators: Vec<EvaluatorRef>,
     /// Name of the producing tool, e.g. `pytest`.
     pub tool: Option<String>,
@@ -51,20 +62,338 @@ pub struct ImportMeta {
     pub critical: Vec<String>,
 }
 
+impl ImportMeta {
+    /// Whether `id` matches any of the [`ImportMeta::critical`] patterns.
+    fn is_critical(&self, id: &str) -> bool {
+        self.critical.iter().any(|pattern| match pattern.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => id == pattern,
+        })
+    }
+}
+
+/// Why an import was rejected.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
+    /// The input is not well-formed XML.
     #[error("malformed XML: {0}")]
     Xml(String),
+    /// The input is not valid JSON for an [`EvaluationRun`].
     #[error("malformed JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// The input parsed, but does not yield a valid [`EvaluationRun`]; one
+    /// message per problem.
     #[error("invalid evaluation run: {}", .0.join("; "))]
     Invalid(Vec<String>),
 }
 
-pub fn from_junit(_xml: &str, _meta: &ImportMeta) -> Result<EvaluationRun, ImportError> {
-    todo!("implement per the module contract")
+/// Import a JUnit XML report as an [`EvaluationRun`] (see the module docs).
+pub fn from_junit(xml: &str, meta: &ImportMeta) -> Result<EvaluationRun, ImportError> {
+    let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
+    let parsed = JunitParser::default().parse(xml)?;
+    let mut issues = parsed.issues;
+
+    let cases = parsed
+        .cases
+        .into_iter()
+        .map(|case| {
+            let critical = case.critical || meta.is_critical(&case.id);
+            CaseResult { critical, ..case }
+        })
+        .collect();
+
+    let run = EvaluationRun {
+        api_version: API_VERSION.to_string(),
+        kind: RUN_KIND.to_string(),
+        run_id: meta.run_id.clone(),
+        release: meta.release.clone(),
+        suite: meta.suite.clone(),
+        covers: meta.covers.clone(),
+        dataset: meta.dataset.clone(),
+        evaluators: meta.evaluators.clone(),
+        source: RunSource { kind: SourceKind::Junit, tool: meta.tool.clone() },
+        cases,
+    };
+    issues.extend(run.validate());
+    if issues.is_empty() {
+        Ok(run)
+    } else {
+        Err(ImportError::Invalid(issues))
+    }
 }
 
-pub fn from_json(_json: &str) -> Result<EvaluationRun, ImportError> {
-    todo!("implement per the module contract")
+/// Import an [`EvaluationRun`] from its native JSON form (see the module docs).
+pub fn from_json(json: &str) -> Result<EvaluationRun, ImportError> {
+    let run: EvaluationRun = serde_json::from_str(json)?;
+    let issues = run.validate();
+    if issues.is_empty() {
+        Ok(run)
+    } else {
+        Err(ImportError::Invalid(issues))
+    }
+}
+
+// ── JUnit parsing ───────────────────────────────────────────────────────
+
+const PROP_CRITICAL: &str = "cloakpipe.critical";
+const PROP_SCORE: &str = "cloakpipe.score";
+const PROP_METRIC_PREFIX: &str = "cloakpipe.metric.";
+
+/// Where an open element sits, which decides how its children are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// `<testsuites>`, `<testsuite>` or any other element outside a test
+    /// case: a `<testcase>` child starts a new case.
+    Container,
+    /// An open `<testcase>`: status markers and `<properties>` apply to it.
+    Case,
+    /// `<properties>` directly inside a `<testcase>`.
+    CaseProperties,
+    /// Anything else inside a test case; its content is not interpreted.
+    Opaque,
+}
+
+/// The test case currently being read.
+#[derive(Debug)]
+struct PendingCase {
+    result: CaseResult,
+    failure: bool,
+    error: bool,
+    skipped: bool,
+    critical_set: bool,
+    score_set: bool,
+}
+
+impl PendingCase {
+    fn finish(self) -> CaseResult {
+        let status = if self.error {
+            CaseStatus::Error
+        } else if self.failure {
+            CaseStatus::Fail
+        } else if self.skipped {
+            CaseStatus::Skipped
+        } else {
+            CaseStatus::Pass
+        };
+        CaseResult { status, ..self.result }
+    }
+}
+
+/// Cases read from a well-formed JUnit document, plus content problems.
+#[derive(Debug, Default)]
+struct Parsed {
+    cases: Vec<CaseResult>,
+    issues: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct JunitParser {
+    stack: Vec<Frame>,
+    seen_root: bool,
+    pending: Option<PendingCase>,
+    out: Parsed,
+}
+
+impl JunitParser {
+    fn parse(mut self, xml: &str) -> Result<Parsed, ImportError> {
+        let mut reader = Reader::from_str(xml);
+        loop {
+            let event = reader.read_event().map_err(|e| xml_error(&reader, e))?;
+            match event {
+                Event::Start(e) => {
+                    let frame = self.open(&e)?;
+                    self.stack.push(frame);
+                }
+                Event::Empty(e) => {
+                    let frame = self.open(&e)?;
+                    self.close(frame);
+                }
+                Event::End(_) => {
+                    // quick-xml has already checked the name matches.
+                    if let Some(frame) = self.stack.pop() {
+                        self.close(frame);
+                    }
+                }
+                Event::Text(t) if self.stack.is_empty() => {
+                    if !t.xml10_content().trim().is_empty() {
+                        return Err(ImportError::Xml("text outside the root element".into()));
+                    }
+                }
+                Event::CData(_) | Event::GeneralRef(_) if self.stack.is_empty() => {
+                    return Err(ImportError::Xml("content outside the root element".into()));
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        if !self.seen_root {
+            return Err(ImportError::Xml("no root element".into()));
+        }
+        if !self.stack.is_empty() {
+            return Err(ImportError::Xml(format!("unexpected end of input: {} unclosed element(s)", self.stack.len())));
+        }
+        Ok(self.out)
+    }
+
+    /// Handle an opening (or self-closing) tag; returns the frame it opens.
+    fn open(&mut self, e: &BytesStart<'_>) -> Result<Frame, ImportError> {
+        let name = e.local_name();
+        let name = name.as_ref();
+        let Some(&parent) = self.stack.last() else {
+            if self.seen_root {
+                return Err(ImportError::Xml("more than one root element".into()));
+            }
+            self.seen_root = true;
+            if name != "testsuites" && name != "testsuite" {
+                self.out.issues.push(format!("root element must be <testsuites> or <testsuite>, found <{name}>"));
+            }
+            return Ok(Frame::Container);
+        };
+        Ok(match (parent, name) {
+            (Frame::Container, "testcase") => {
+                self.start_case(e)?;
+                Frame::Case
+            }
+            (Frame::Container, _) => Frame::Container,
+            (Frame::Case, "testcase") => {
+                let id = self.pending.as_ref().map(|c| c.result.id.as_str()).unwrap_or_default();
+                self.out.issues.push(format!("case {id:?}: nested <testcase> elements are not allowed"));
+                Frame::Opaque
+            }
+            (Frame::Case, "properties") => Frame::CaseProperties,
+            (Frame::Case, marker) => {
+                if let Some(case) = self.pending.as_mut() {
+                    match marker {
+                        "failure" => case.failure = true,
+                        "error" => case.error = true,
+                        "skipped" => case.skipped = true,
+                        _ => {}
+                    }
+                }
+                Frame::Opaque
+            }
+            (Frame::CaseProperties, "property") => {
+                self.read_property(e)?;
+                Frame::Opaque
+            }
+            (Frame::CaseProperties | Frame::Opaque, _) => Frame::Opaque,
+        })
+    }
+
+    /// Handle the end of an element opened with `frame`.
+    fn close(&mut self, frame: Frame) {
+        if frame == Frame::Case {
+            if let Some(case) = self.pending.take() {
+                self.out.cases.push(case.finish());
+            }
+        }
+    }
+
+    fn start_case(&mut self, e: &BytesStart<'_>) -> Result<(), ImportError> {
+        let mut attrs = attributes(e)?;
+        let name = attrs.remove("name").unwrap_or_default();
+        let classname = attrs.remove("classname").unwrap_or_default();
+        let id = if classname.is_empty() { name.clone() } else { format!("{classname}::{name}") };
+        if name.trim().is_empty() {
+            self.out.issues.push(format!("cases[{}]: <testcase> has no name", self.out.cases.len()));
+        }
+        let duration_ms = attrs.get("time").and_then(|t| seconds_to_ms(t));
+        self.pending = Some(PendingCase {
+            result: CaseResult {
+                id,
+                critical: false,
+                status: CaseStatus::Pass,
+                score: None,
+                metrics: BTreeMap::new(),
+                duration_ms,
+            },
+            failure: false,
+            error: false,
+            skipped: false,
+            critical_set: false,
+            score_set: false,
+        });
+        Ok(())
+    }
+
+    fn read_property(&mut self, e: &BytesStart<'_>) -> Result<(), ImportError> {
+        let mut attrs = attributes(e)?;
+        let Some(case) = self.pending.as_mut() else { return Ok(()) };
+        let Some(key) = attrs.remove("name") else { return Ok(()) };
+        let value = attrs.remove("value");
+        if let Err(problem) = apply_property(case, &key, value.as_deref()) {
+            self.out.issues.push(format!("case {:?}: property {key}: {problem}", case.result.id));
+        }
+        Ok(())
+    }
+}
+
+/// Apply one case-level property; unknown keys are ignored.
+fn apply_property(case: &mut PendingCase, key: &str, value: Option<&str>) -> Result<(), String> {
+    let is_known = key == PROP_CRITICAL || key == PROP_SCORE || key.starts_with(PROP_METRIC_PREFIX);
+    if !is_known {
+        return Ok(());
+    }
+    let value = value.ok_or("missing value attribute")?.trim();
+    if key == PROP_CRITICAL {
+        if std::mem::replace(&mut case.critical_set, true) {
+            return Err("given more than once".into());
+        }
+        case.result.critical = match value {
+            "true" => true,
+            "false" => false,
+            other => return Err(format!("{other:?} is not true or false")),
+        };
+    } else if key == PROP_SCORE {
+        if std::mem::replace(&mut case.score_set, true) {
+            return Err("given more than once".into());
+        }
+        case.result.score = Some(finite(value)?);
+    } else if let Some(metric) = key.strip_prefix(PROP_METRIC_PREFIX) {
+        if metric.is_empty() {
+            return Err("metric name is empty".into());
+        }
+        let v = finite(value)?;
+        if case.result.metrics.insert(metric.to_string(), v).is_some() {
+            return Err("given more than once".into());
+        }
+    }
+    Ok(())
+}
+
+fn finite(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        _ => Err(format!("{value:?} is not a finite number")),
+    }
+}
+
+/// `time` in seconds to whole milliseconds; `None` if not a usable duration.
+fn seconds_to_ms(time: &str) -> Option<u64> {
+    let secs = time.trim().parse::<f64>().ok().filter(|s| s.is_finite() && s.is_sign_positive())?;
+    let ms = (secs * 1000.0).round();
+    // `u64::MAX as f64` rounds up to 2^64, so `<` excludes every overflow.
+    (ms < u64::MAX as f64).then_some(ms as u64)
+}
+
+/// Decoded attributes of `e` by local name. Malformed or duplicate
+/// attributes and unknown entity references are XML errors.
+fn attributes(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
+    let mut out = BTreeMap::new();
+    for attr in e.attributes() {
+        let attr = attr.map_err(|err| ImportError::Xml(err.to_string()))?;
+        // quick-xml accepts a raw `<` in attribute values; XML does not.
+        if attr.value.contains('<') {
+            return Err(ImportError::Xml(format!("'<' in the value of attribute {:?}", attr.key.as_ref())));
+        }
+        let value = attr
+            .normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_predefined_entity)
+            .map_err(|err| ImportError::Xml(err.to_string()))?;
+        out.insert(attr.key.local_name().as_ref().to_string(), value.into_owned());
+    }
+    Ok(out)
+}
+
+fn xml_error(reader: &Reader<&[u8]>, err: quick_xml::Error) -> ImportError {
+    ImportError::Xml(format!("{err} at byte {}", reader.error_position()))
 }

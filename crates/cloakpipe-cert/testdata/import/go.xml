@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="4" failures="1" skipped="1">
+	<testsuite name="github.com/acme/agent/evals" tests="4" failures="1" errors="0" id="0" hostname="ci" skipped="1" time="0.512" timestamp="2026-10-05T14:07:41Z">
+		<properties>
+			<property name="go.version" value="go1.23.2 linux/amd64"></property>
+			<property name="cloakpipe.critical" value="true"></property>
+		</properties>
+		<testcase name="TestAuthorization" classname="github.com/acme/agent/evals" time="0.000"></testcase>
+		<testcase name="TestAuthorization/denies_cross_tenant" classname="github.com/acme/agent/evals" time="0.000"></testcase>
+		<testcase name="TestAuthorization/allows_owner" classname="github.com/acme/agent/evals" time="0.010">
+			<failure message="Failed" type="">    authz_test.go:88: owner was denied</failure>
+		</testcase>
+		<testcase name="TestSideEffects" classname="github.com/acme/agent/evals" time="0.000">
+			<skipped message="authz_test.go:120: no sandbox"></skipped>
+		</testcase>
+	</testsuite>
+</testsuites>
