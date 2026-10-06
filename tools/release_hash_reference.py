@@ -48,11 +48,40 @@ def nfc(v):
     return v
 
 
+def es_number(x):
+    """ECMAScript Number::toString, as RFC 8785 requires for every number."""
+    x = float(x)
+    if x != x or x in (float("inf"), float("-inf")):
+        raise ValueError("NaN and Infinity are not valid JSON numbers")
+    if x == 0:
+        return "0"
+    sign = "-" if x < 0 else ""
+    mantissa, _, exp = repr(abs(x)).partition("e")  # repr is shortest round-trip
+    int_part, _, frac_part = mantissa.partition(".")
+    digits = int_part + frac_part
+    point = len(int_part) + int(exp or 0)  # decimal point sits after `point` digits
+    lead = len(digits) - len(digits.lstrip("0"))
+    digits = digits.strip("0")
+    k, n = len(digits), point - lead  # value = 0.<digits> * 10^n
+    if k <= n <= 21:
+        out = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        out = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        out = "0." + "0" * -n + digits
+    else:
+        e = n - 1
+        out = digits[0] + ("." + digits[1:] if k > 1 else "") + "e" + ("+" if e >= 0 else "-") + str(abs(e))
+    return sign + out
+
+
 def jcs(v):
-    """RFC 8785 subset: sorted keys, no whitespace, UTF-8. Integral floats are
-    written as integers, matching ECMAScript number serialisation."""
-    if isinstance(v, float) and v.is_integer():
-        v = int(v)
+    """RFC 8785: sorted keys (UTF-16 order), no whitespace, UTF-8 strings,
+    ECMAScript number formatting."""
+    if isinstance(v, bool) or v is None:
+        return json.dumps(v)
+    if isinstance(v, (int, float)):
+        return es_number(v)
     if isinstance(v, dict):
         items = sorted(v.items(), key=lambda kv: kv[0].encode("utf-16-be"))
         return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + jcs(x) for k, x in items) + "}"
