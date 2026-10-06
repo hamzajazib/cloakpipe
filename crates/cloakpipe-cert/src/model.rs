@@ -324,6 +324,8 @@ pub enum ReasonCode {
     InvalidInput,
     /// A candidate run evaluated a different release.
     ReleaseMismatch,
+    /// No valid candidate run of this release remains: nothing to certify on.
+    NoEvidence,
     /// A required assurance suite has no run covering it.
     MissingSuite,
     /// A covering run has no executed cases.

@@ -305,6 +305,10 @@ pub struct CertifyArgs {
     /// Declared limitation of the certification; repeatable
     #[arg(long = "limitation", value_name = "TEXT")]
     limitations: Vec<String>,
+    /// Certification id (unique per issuance; default: random). Pin it only
+    /// for reproducible output: two issuances must never share an id.
+    #[arg(long)]
+    id: Option<String>,
     /// Envelope output (default: <manifest stem>.cert.dsse.json)
     #[arg(long)]
     out: Option<PathBuf>,
@@ -384,6 +388,7 @@ fn certify_inner(a: CertifyArgs) -> Res<i32> {
                 ))
             })?;
         let cert = Certification {
+            id: a.id.clone().unwrap_or_else(|| format!("cert_{}", hex::encode(rand::random::<[u8; 16]>()))),
             release: release.clone(),
             agent: Some(candidate.metadata.agent.clone()),
             environment: a.environment.clone(),

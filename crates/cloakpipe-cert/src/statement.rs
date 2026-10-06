@@ -25,7 +25,8 @@
 //! ValidWithLimitations > Valid, plus every reason found:
 //! - **Invalid**: wrong payloadType; undecodable base64/JSON; no signature
 //!   that verifies under a *trusted* key whose `keyid` matches; wrong
-//!   `_type`/`predicateType`; malformed predicate; subject digest ≠
+//!   `_type`/`predicateType`; malformed predicate; empty `certification.id`;
+//!   subject digest ≠
 //!   `certification.release` hex or ≠ `decision.release`; `expected_release`
 //!   given and ≠ subject; `issuedAt`/`validUntil` not RFC 3339, or
 //!   `validUntil` ≤ `issuedAt`; `now` < `issuedAt` (not yet valid).
@@ -65,6 +66,10 @@ pub const PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Certification {
+    /// Unique per issuance (e.g. a UUID). It is signed, so two otherwise
+    /// identical certifications never share a statement digest and revoking
+    /// one never revokes another.
+    pub id: String,
     /// `sha256:<hex>` manifest hash of the certified release.
     pub release: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +429,9 @@ fn parse_subject(subject: Option<&Value>) -> Result<Subject, String> {
 }
 
 fn check_certification(c: &Certification, subject: Option<&Subject>, ctx: &VerifyContext, f: &mut Findings) {
+    if c.id.trim().is_empty() {
+        f.invalid("certification.id: must not be empty");
+    }
     if c.release.parse::<ReleaseHash>().is_err() {
         f.invalid(format!("certification.release: {:?} is not a sha256:<hex> manifest hash", c.release));
     }

@@ -280,9 +280,10 @@ fn summaries_only_for_remaining_candidate_runs_sorted() {
 }
 
 #[test]
-fn empty_input_with_no_requirements_is_certified() {
+fn empty_input_with_no_requirements_is_blocked_for_lack_of_evidence() {
     let d = go(&suites(&[]), &[], &[], &policy(rules()));
-    assert_eq!(d.outcome, Outcome::Certified);
+    assert_eq!(d.outcome, Outcome::Blocked);
+    assert_eq!(codes(&d), vec![ReasonCode::NoEvidence]);
     assert!(d.runs.is_empty() && d.summaries.is_empty());
 }
 
@@ -300,7 +301,7 @@ fn invalid_candidate_run_is_reported_and_ignored() {
     let d = go(&suites(&["privacy"]), &[bad], &[], &policy(rules()));
     assert_eq!(
         codes(&d),
-        vec![ReasonCode::InvalidInput, ReasonCode::MissingSuite]
+        vec![ReasonCode::InvalidInput, ReasonCode::NoEvidence, ReasonCode::MissingSuite]
     );
     assert!(d.summaries.is_empty());
     assert!(
@@ -408,7 +409,7 @@ fn non_finite_metrics_in_runs_are_invalid_not_panics() {
         ..rules()
     });
     let d = go(&suites(&[]), &[r], &[], &p);
-    assert_eq!(codes(&d), vec![ReasonCode::InvalidInput]);
+    assert_eq!(codes(&d), vec![ReasonCode::InvalidInput, ReasonCode::NoEvidence]);
 }
 
 // ── 2. Release binding ──────────────────────────────────────────────────
@@ -427,20 +428,20 @@ fn candidate_for_other_release_is_mismatch_and_ignored() {
     let d = go(&suites(&["privacy"]), &[r], &[], &policy(rules()));
     assert_eq!(
         codes(&d),
-        vec![ReasonCode::ReleaseMismatch, ReasonCode::MissingSuite]
+        vec![ReasonCode::ReleaseMismatch, ReasonCode::NoEvidence, ReasonCode::MissingSuite]
     );
     assert_eq!(d.reasons[0].suite.as_deref(), Some("support"));
     assert!(d.summaries.is_empty());
 }
 
 #[test]
-fn invalid_run_with_wrong_release_is_only_invalid() {
+fn invalid_run_with_wrong_release_is_invalid_not_mismatch() {
     let r = EvaluationRun {
         release: "garbage".into(),
         ..run("r1", "s", &["functional"], cases(1, 0))
     };
     let d = go(&suites(&[]), &[r], &[], &policy(rules()));
-    assert_eq!(codes(&d), vec![ReasonCode::InvalidInput]);
+    assert_eq!(codes(&d), vec![ReasonCode::InvalidInput, ReasonCode::NoEvidence]);
 }
 
 #[test]
@@ -500,7 +501,7 @@ fn coverage_from_baseline_runs_does_not_count() {
         ..baseline("b", "s", cases(1, 0))
     };
     let d = go(&suites(&["privacy"]), &[], &[base], &policy(rules()));
-    assert_eq!(codes(&d), vec![ReasonCode::MissingSuite]);
+    assert_eq!(codes(&d), vec![ReasonCode::NoEvidence, ReasonCode::MissingSuite]);
 }
 
 #[test]
@@ -1692,4 +1693,24 @@ fn run_hash_does_not_depend_on_order_of_duplicate_case_ids() {
             &p
         )
     );
+}
+
+
+// ── Evidence is required ────────────────────────────────────────────────
+
+#[test]
+fn no_runs_is_blocked_for_lack_of_evidence_even_with_no_required_suites() {
+    let d = go(&suites(&[]), &[], &[], &policy(rules()));
+    assert_eq!(d.outcome, Outcome::Blocked);
+    assert_eq!(codes(&d), vec![ReasonCode::NoEvidence]);
+}
+
+#[test]
+fn runs_for_another_release_are_not_evidence() {
+    let mut r = run("r1", "s", &["functional"], cases(3, 0));
+    r.release = other_release();
+    let d = go(&suites(&[]), &[r], &[], &policy(rules()));
+    assert_eq!(d.outcome, Outcome::Blocked);
+    let c = codes(&d);
+    assert!(c.contains(&ReasonCode::ReleaseMismatch) && c.contains(&ReasonCode::NoEvidence), "{c:?}");
 }

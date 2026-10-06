@@ -23,6 +23,7 @@ fn release() -> String {
 
 fn cert_json() -> Value {
     json!({
+        "id": "cert-0001",
         "release": release(),
         "agent": "support-agent",
         "environment": "production",
@@ -818,4 +819,40 @@ fn duplicate_keys_in_signed_payload_are_invalid() {
     assert_status(&verify(&sign_raw(top.as_bytes()), &ctx()), Status::Invalid, "duplicate");
     let nested = canon.replacen("\"issuer\":", "\"issuer\":\"evil\",\"issuer\":", 1);
     assert_status(&verify(&sign_raw(nested.as_bytes()), &ctx()), Status::Invalid, "duplicate");
+}
+
+
+// ── Certification identity ──────────────────────────────────────────────
+
+#[test]
+fn certifications_differing_only_by_id_have_distinct_digests_and_revoke_independently() {
+    // Two otherwise identical issuances (same release, decision, second and
+    // issuer) must not share a statement digest, or revoking one would revoke
+    // the other, including across tenants.
+    let a = envelope(&cert());
+    let mut other = cert();
+    other.id = "cert-0002".into();
+    let b = envelope(&other);
+    let (da, db) = (sha256_hex(&payload_bytes(&a)), sha256_hex(&payload_bytes(&b)));
+    assert_ne!(da, db);
+
+    let revoke_a = VerifyContext { revoked_statements: [da].into(), ..ctx() };
+    assert_eq!(verify(&a, &revoke_a).status, Status::Revoked);
+    assert_eq!(verify(&b, &revoke_a).status, Status::Valid);
+}
+
+#[test]
+fn a_certification_without_an_id_is_invalid() {
+    let mut c = cert();
+    c.id = "  ".into();
+    let r = verify(&envelope(&c), &ctx());
+    assert_eq!(r.status, Status::Invalid, "{:?}", r.reasons);
+    assert!(r.reasons.iter().any(|x| x.contains("id")), "{:?}", r.reasons);
+}
+
+#[test]
+fn the_certification_id_is_required_in_json() {
+    let mut v = cert_json();
+    v.as_object_mut().unwrap().remove("id");
+    assert!(serde_json::from_value::<Certification>(v).is_err());
 }

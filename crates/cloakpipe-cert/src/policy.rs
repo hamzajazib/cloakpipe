@@ -14,6 +14,9 @@
 //! 2. **Release binding** — a candidate run whose `release` ≠ input `release`
 //!    → `ReleaseMismatch` (and the run is ignored by the remaining checks).
 //!    Baseline runs may be for any release.
+//!    If no valid candidate run of the release remains after checks 1–2 →
+//!    `NoEvidence` (a release is never certified on zero runs, even when no
+//!    assurance suite is required).
 //! 3. **Required assurance** — each name in `required_suites` must appear in
 //!    the `covers` of at least one remaining candidate run, else
 //!    `MissingSuite` (reason.suite = the assurance suite name).
@@ -113,6 +116,14 @@ pub fn decide(input: &DecisionInput<'_>) -> Decision {
             bound
         })
         .collect();
+
+    if candidates.is_empty() {
+        reasons.push(reason(
+            ReasonCode::NoEvidence,
+            None,
+            format!("no valid evaluation run of release {} to certify on", input.release),
+        ));
+    }
 
     // 3. Required assurance.
     let covered: BTreeSet<&str> = candidates
