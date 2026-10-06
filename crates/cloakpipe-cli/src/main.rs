@@ -42,12 +42,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server, masking PII in tool-call
     /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
-    McpProxy {
-        /// Upstream MCP server command + args, e.g.
-        /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-        #[arg(long, required = true)]
-        upstream: String,
-    },
+    McpProxy(cert::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
     Tree {
         #[command(subcommand)]
@@ -206,7 +201,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&config).await,
-        Commands::McpProxy { upstream } => commands::mcp_proxy(&config, upstream).await,
+        Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
         Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&config, action).await,

@@ -515,3 +515,83 @@ fn verify_inner(a: VerifyCertArgs) -> Res<i32> {
     }
     Ok(if report.certified { EXIT_OK } else { EXIT_INVALID })
 }
+
+// ── MCP tool gate (`mcp-proxy`) ─────────────────────────────────────────
+
+/// Transparently proxy an upstream MCP server, masking PII in tool-call
+/// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
+/// With `--manifest`, only a certified release may call the tools its
+/// manifest declares (Phase C tool gate).
+#[derive(Debug, Args)]
+pub struct McpProxyArgs {
+    /// Upstream MCP server command + args, e.g.
+    /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
+    #[arg(long, required = true)]
+    pub upstream: String,
+    /// Agent Release manifest the agent runs as. Enables the tool gate:
+    /// tools/call must name a tool the manifest declares.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// DSSE certification envelope of the release. Without one, every
+    /// tools/call is refused (enforce) or reported (warn).
+    #[arg(long)]
+    pub certification: Option<PathBuf>,
+    /// Trusted signer key file (from `release keygen`; public part only).
+    #[arg(long)]
+    pub trust: Vec<PathBuf>,
+    /// Trusted signer as KEYID=PUBHEX.
+    #[arg(long = "trust-key")]
+    pub trust_keys: Vec<String>,
+    /// sha256 hex of a revoked certification statement.
+    #[arg(long = "revoked-statement")]
+    pub revoked_statements: Vec<String>,
+    /// Environment the agent runs in; the certification must cover it.
+    #[arg(long, default_value = "production")]
+    pub environment: String,
+    /// enforce: refuse calls that fail the gate; warn: forward and report.
+    #[arg(long, default_value = "enforce", value_parser = ["enforce", "warn"])]
+    pub gate: String,
+}
+
+/// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
+/// Problems are reported on stderr.
+pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::ToolGate>> {
+    let Some(manifest_path) = &a.manifest else {
+        if a.certification.is_some() || !a.trust.is_empty() || !a.trust_keys.is_empty() {
+            return Err(usage("--certification and --trust need --manifest (the release they are about)"));
+        }
+        return Ok(None);
+    };
+    let manifest = load_valid(manifest_path)?;
+    let mut trusted = a.trust_keys.iter().map(|k| inline_key(k)).collect::<Res<Vec<_>>>()?;
+    for p in &a.trust {
+        trusted.push(trusted_key(p)?);
+    }
+    let certification = match &a.certification {
+        None => {
+            eprintln!("warning: no --certification: every tools/call fails the release gate");
+            None
+        }
+        Some(p) => {
+            if trusted.is_empty() {
+                eprintln!("warning: no trusted keys (--trust / --trust-key); the certification cannot verify");
+            }
+            let src = read(p)?;
+            Some(
+                serde_json::from_str::<Envelope>(&src)
+                    .map_err(|e| invalid(format_args!("{}: not a DSSE envelope: {e}", p.display())))?,
+            )
+        }
+    };
+    let verify = VerifyContext {
+        trusted,
+        revoked_statements: a
+            .revoked_statements
+            .iter()
+            .map(|d| d.trim().trim_start_matches("sha256:").to_ascii_lowercase())
+            .collect(),
+        ..Default::default()
+    };
+    let mode = if a.gate == "warn" { cloakpipe_mcp::GateMode::Warn } else { cloakpipe_mcp::GateMode::Enforce };
+    Ok(Some(cloakpipe_mcp::ToolGate::new(mode, &manifest, &a.environment, certification, verify)))
+}

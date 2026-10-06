@@ -133,6 +133,40 @@ See the action's [README](../.github/actions/certify/README.md) for all
 inputs. The `certification-gate` CI job exercises the CLI and the action on
 the fixtures in `crates/cloakpipe-cli/tests/fixtures/certification/`.
 
+## Runtime: the MCP tool gate
+
+`cloakpipe mcp-proxy` enforces certification where an agent acts: its tool
+calls. With `--manifest`, each `tools/call` passes only if
+
+1. the tool is declared in the manifest's `spec.tools` (`tool:refund@4`
+   declares `refund`), and
+2. `--certification` verifies offline at the moment of the call: trusted
+   signer (`--trust` / `--trust-key`), not revoked (`--revoked-statement`),
+   inside its validity window, about this manifest's release, a `certified`
+   decision, for `--environment` (default `production`).
+
+```
+cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
+  --manifest release.yaml --certification release.cert.dsse.json \
+  --trust-key "$KEYID=$PUBHEX" --environment production
+```
+
+`--gate enforce` (default): a refused call never reaches the upstream tool.
+The agent receives JSON-RPC error `-32001` with
+`data: {reason, tool, release}` (notifications get no reply). Reasons:
+`undeclared_tool`, `uncertified` (no `--certification`), `wrong_environment`,
+`blocked`, or the verification status (`expired`, `revoked`, `invalid`, …).
+The refusal is recorded as a release-bound `mcp_tool_call` hop with action
+`block` and `gate_denial=<reason>`. `--gate warn` forwards the call, logs the
+violation and marks the hop `gate_violation=<reason>`.
+
+The gate fails closed: `--manifest` without a certification refuses every
+call, and `--certification` without `--manifest`, an unreadable envelope or a
+`CLOAKPIPE_RELEASE` that names another release refuse to start. The manifest
+also binds every evidence hop to its release. MCP server identity
+(`spec.mcpServers`) is not checked: the gate fronts the one upstream it was
+started with.
+
 ## What a certification does not claim
 
 A valid certification proves that a named issuer applied a named policy to

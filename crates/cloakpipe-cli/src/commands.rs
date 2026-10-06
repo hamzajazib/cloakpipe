@@ -434,7 +434,11 @@ fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8;
 /// to record a no-PII evidence hop per call/result, and `CLOAKPIPE_RELEASE`
 /// (`sha256:<hex>` from `cloakpipe release hash`) to bind each hop to the
 /// Agent Release being run.
-pub async fn mcp_proxy(config_path: &str, upstream: String) -> Result<()> {
+pub async fn mcp_proxy(config_path: &str, args: crate::cert::McpProxyArgs) -> Result<()> {
+    // Configuration errors are already on stderr; fail before spawning anything.
+    let gate = crate::cert::gate_from_args(&args)
+        .map_err(|code| anyhow::anyhow!("invalid mcp-proxy release gate configuration (exit {code})"))?;
+    let upstream = args.upstream;
     let config = if std::path::Path::new(config_path).exists() {
         load_config(config_path)?
     } else {
@@ -450,7 +454,15 @@ pub async fn mcp_proxy(config_path: &str, upstream: String) -> Result<()> {
     let vault = cloakpipe_core::vault::Vault::open(&config.vault.path, key)?;
     let detector = cloakpipe_core::detector::Detector::from_config(&config.detection)?;
     let ledger_db = std::env::var("CLOAKPIPE_LEDGER_DB").ok();
-    let release = release_from_var(std::env::var("CLOAKPIPE_RELEASE"))?;
+    let mut release = release_from_var(std::env::var("CLOAKPIPE_RELEASE"))?;
+    if let Some(gate) = &gate {
+        let manifest = gate.release_bytes();
+        if release.is_some_and(|r| r != manifest) {
+            bail!("CLOAKPIPE_RELEASE names a different release than --manifest ({})", gate.release());
+        }
+        release = Some(manifest);
+        tracing::info!(release = gate.release(), mode = ?gate.mode, "MCP release gate enabled");
+    }
 
     tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
     tokio::task::spawn_blocking(move || {
@@ -461,7 +473,7 @@ pub async fn mcp_proxy(config_path: &str, upstream: String) -> Result<()> {
                 vault,
                 ledger_db,
                 release,
-                gate: None,
+                gate,
             },
         )
     })
