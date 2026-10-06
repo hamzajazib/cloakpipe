@@ -35,6 +35,10 @@ pub enum Hop {
     /// An environment pointer (staging, production, rollback, ...) moved to a
     /// release (control plane).
     ReleasePromoted,
+    /// A certification decision was issued for a release (control plane).
+    ReleaseCertified,
+    /// An issued certification was revoked (control plane).
+    CertificationRevoked,
 }
 
 impl Hop {
@@ -51,6 +55,8 @@ impl Hop {
             Hop::Unmask => "unmask",
             Hop::ReleaseRegistered => "release_registered",
             Hop::ReleasePromoted => "release_promoted",
+            Hop::ReleaseCertified => "release_certified",
+            Hop::CertificationRevoked => "certification_revoked",
         }
     }
 }
