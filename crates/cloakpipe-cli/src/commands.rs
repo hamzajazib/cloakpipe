@@ -413,6 +413,21 @@ pub async fn mcp(config_path: &str) -> Result<()> {
     cloakpipe_mcp::serve_stdio(config, detector, vault).await
 }
 
+/// Interpret `CLOAKPIPE_RELEASE`. Only an absent variable means "no release":
+/// a malformed or non-Unicode value is an error, because either would
+/// otherwise silently produce evidence that is not bound to a release.
+fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8; 32]>> {
+    match v {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("CLOAKPIPE_RELEASE: {e}")),
+        Ok(v) => Ok(Some(
+            v.parse::<cloakpipe_release::ReleaseHash>()
+                .map_err(|e| anyhow::anyhow!("CLOAKPIPE_RELEASE: {e}"))?
+                .0,
+        )),
+    }
+}
+
 /// Transparent MCP interceptor (M8) — proxy an upstream MCP server, masking PII
 /// in tool-call arguments before they reach the tool and rehydrating pseudonym
 /// tokens in the results before the agent sees them. Set `CLOAKPIPE_LEDGER_DB`
@@ -435,15 +450,7 @@ pub async fn mcp_proxy(config_path: &str, upstream: String) -> Result<()> {
     let vault = cloakpipe_core::vault::Vault::open(&config.vault.path, key)?;
     let detector = cloakpipe_core::detector::Detector::from_config(&config.detection)?;
     let ledger_db = std::env::var("CLOAKPIPE_LEDGER_DB").ok();
-    // A malformed release id must not silently produce unbound evidence.
-    let release = match std::env::var("CLOAKPIPE_RELEASE") {
-        Ok(v) => Some(
-            v.parse::<cloakpipe_release::ReleaseHash>()
-                .map_err(|e| anyhow::anyhow!("CLOAKPIPE_RELEASE: {e}"))?
-                .0,
-        ),
-        Err(_) => None,
-    };
+    let release = release_from_var(std::env::var("CLOAKPIPE_RELEASE"))?;
 
     tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
     tokio::task::spawn_blocking(move || {
@@ -1063,4 +1070,28 @@ pub async fn sessions(config_path: &str, action: crate::SessionCommands) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_from_var;
+    use std::env::VarError;
+
+    #[test]
+    fn unset_release_is_none() {
+        assert_eq!(release_from_var(Err(VarError::NotPresent)).unwrap(), None);
+    }
+
+    #[test]
+    fn release_hash_is_parsed() {
+        let v = format!("sha256:{}", "ae".repeat(32));
+        assert_eq!(release_from_var(Ok(v)).unwrap(), Some([0xae; 32]));
+    }
+
+    #[test]
+    fn malformed_or_non_unicode_release_is_an_error() {
+        // Either would otherwise silently produce evidence not bound to a release.
+        assert!(release_from_var(Ok("support-agent@184".into())).is_err());
+        assert!(release_from_var(Err(VarError::NotUnicode("\u{fffd}".into()))).is_err());
+    }
 }
