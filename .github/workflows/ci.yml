@@ -1,10 +1,12 @@
 name: CI
 
 on:
+  # Every pushed branch is tested, so stacked feature branches get CI before
+  # their base merges; PRs into main are tested as merge commits too.
   push:
-    branches: [main, feat/v2-ledger]
+    branches: ["**"]
   pull_request:
-    branches: [main, feat/v2-ledger]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
