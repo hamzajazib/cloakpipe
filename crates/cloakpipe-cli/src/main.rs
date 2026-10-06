@@ -1,5 +1,6 @@
 //! CloakPipe CLI — entrypoint for the privacy proxy.
 
+mod cert;
 mod commands;
 mod release;
 
@@ -62,10 +63,15 @@ enum Commands {
         #[command(subcommand)]
         action: SessionCommands,
     },
-    /// Agent Release manifests: validate, hash, diff, inspect
+    /// Agent Release manifests: validate, hash, diff, inspect, certify, verify-cert
     Release {
         #[command(subcommand)]
         action: release::ReleaseCommands,
+    },
+    /// Evaluation runs: import external results as certification evidence
+    Eval {
+        #[command(subcommand)]
+        action: cert::EvalCommands,
     },
     /// Scan files/directories for PII (RAG pre-indexing pipeline)
     Scan {
@@ -170,11 +176,12 @@ pub enum VectorCommands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Release tooling is synchronous (including blocking HTTP for `register`),
+    // Release and eval tooling is synchronous (including blocking HTTP for `register`),
     // prints machine-readable output and uses distinct exit codes, so it runs
     // before logging setup and outside the async runtime.
     let command = match cli.command {
         Commands::Release { action } => std::process::exit(release::run(action)),
+        Commands::Eval { action } => std::process::exit(cert::eval(action)),
         other => other,
     };
 
@@ -203,7 +210,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&config, action).await,
-        Commands::Release { .. } => unreachable!("handled above"),
+        Commands::Release { .. } | Commands::Eval { .. } => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }
