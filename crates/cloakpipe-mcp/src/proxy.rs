@@ -221,10 +221,16 @@ fn record_hop(
     count: usize,
 ) {
     let Some(ledger) = ledger else { return };
-    let Ok(mut store) = ledger.lock() else { return };
+    let Ok(mut store) = ledger.lock() else {
+        tracing::warn!(hop = ?hop, "evidence ledger: lock poisoned; MCP hop not recorded");
+        return;
+    };
     let next_seq = match store.head(&tenant) {
         Ok((head, _)) => head.map(|s| s + 1).unwrap_or(0),
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!(hop = ?hop, "evidence ledger: cannot read chain head; MCP hop not recorded: {e}");
+            return;
+        }
     };
     let mut builder = RecordBuilder::new()
         .seq(next_seq)
@@ -249,8 +255,13 @@ fn record_hop(
     if let Some(release) = release {
         builder = builder.release(release);
     }
-    if let Ok(mut record) = builder.build() {
-        let _ = store.append(&tenant, &mut record);
+    let appended = builder
+        .build()
+        .map_err(|e| e.to_string())
+        .and_then(|mut record| store.append(&tenant, &mut record).map(|_| ()).map_err(|e| e.to_string()));
+    if let Err(e) = appended {
+        // Payload-free: the hop kind and error only, never message content.
+        tracing::warn!(hop = ?hop, "evidence ledger: failed to record MCP hop: {e}");
     }
 }
 
