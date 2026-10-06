@@ -610,12 +610,18 @@ name = "cloakpipe-mcp"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
+ "cloakpipe-cert",
  "cloakpipe-core",
  "cloakpipe-ledger",
+ "cloakpipe-release",
  "cloakpipe-verify",
+ "ed25519-dalek",
+ "hex",
  "rmcp",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
