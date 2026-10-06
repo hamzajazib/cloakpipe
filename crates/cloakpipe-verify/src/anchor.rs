@@ -96,6 +96,8 @@ struct UnsignedManifest<'a> {
     policy_pack_versions: &'a [String],
     operator: &'a str,
     created_at: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_tip: &'a Option<String>,
 }
 
 impl<'a> From<&'a Manifest> for UnsignedManifest<'a> {
@@ -112,6 +114,7 @@ impl<'a> From<&'a Manifest> for UnsignedManifest<'a> {
             policy_pack_versions: &m.policy_pack_versions,
             operator: &m.operator,
             created_at: &m.created_at,
+            chain_tip: &m.chain_tip,
         }
     }
 }/// Compute the canonical subject hash for a batch head — the bytes
@@ -797,6 +800,19 @@ pub fn verify_manifest(bundle: &Bundle) -> Result<(), ManifestError> {
             expected: last_seq,
         });
     }
+    // 3b. v4+: the signed chain tip must be the tip of these records, so a
+    // different (even internally consistent) chain cannot reuse the signature.
+    if bundle.format_version >= crate::bundle::MIN_BUNDLE_VERSION_FOR_CHAIN_TIP {
+        let signed = m.chain_tip.as_deref().ok_or(ManifestError::MissingChainTip)?;
+        let actual = bundle
+            .records
+            .last()
+            .map(|r| r.record_hash.to_ascii_lowercase())
+            .unwrap_or_else(|| "0".repeat(64));
+        if signed != actual {
+            return Err(ManifestError::ChainTipMismatch { signed: signed.to_string(), actual });
+        }
+    }
     // 4. Manifest batch_head_ids must all exist in the bundle.
     let known_heads: std::collections::BTreeSet<&str> = bundle
         .batch_heads
@@ -889,4 +905,32 @@ pub enum ManifestError {
     UnknownAnchor(String),
     #[error("record #{seq} references policy pack version `{version}` not in manifest")]
     UnknownPolicyPack { seq: u64, version: String },
+    #[error("v4+ manifest does not sign the chain tip")]
+    MissingChainTip,
+    #[error("signed chain tip `{signed}` does not match the records' tip `{actual}`")]
+    ChainTipMismatch { signed: String, actual: String },
+    #[error("signer `{0}` is not a trusted key")]
+    UntrustedSigner(String),
+}
+
+/// Pin the signer: the manifest's key id must be in `trusted` and the bundle's
+/// declared public key for it must be that trusted key. Without this, a
+/// bundle verifies under whatever key it carries.
+pub fn check_trusted_signer(
+    bundle: &Bundle,
+    trusted: &std::collections::BTreeMap<String, [u8; 32]>,
+) -> Result<(), ManifestError> {
+    let m = bundle.manifest.as_ref().ok_or(ManifestError::Missing)?;
+    let key_id = &m.signature.key_id;
+    let expected = trusted.get(key_id).ok_or_else(|| ManifestError::UntrustedSigner(key_id.clone()))?;
+    let declared = bundle
+        .signer_public_keys
+        .iter()
+        .find(|k| &k.key_id == key_id)
+        .and_then(|k| decode_hex_32(&k.public_key))
+        .ok_or_else(|| ManifestError::UnknownKey(key_id.clone()))?;
+    if &declared != expected {
+        return Err(ManifestError::UntrustedSigner(key_id.clone()));
+    }
+    Ok(())
 }

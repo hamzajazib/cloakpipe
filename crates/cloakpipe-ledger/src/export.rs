@@ -34,7 +34,7 @@ pub mod bundle_format {
     use serde::{Deserialize, Serialize};
 
     pub const BUNDLE_MAGIC: &str = "cloakpipe.bundle";
-    pub const BUNDLE_FORMAT_VERSION: u32 = 3;
+    pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 
     pub type Hex32 = String;
     pub type Hex64 = String;
@@ -149,6 +149,10 @@ pub mod bundle_format {
         pub policy_pack_versions: Vec<String>,
         pub operator: String,
         pub created_at: String,
+        /// v4+: hex `record_hash` of the last record (genesis when empty).
+        /// Signing it checkpoints every record through the hash chain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub chain_tip: Option<Hex32>,
         pub signature: ManifestSignature,
     }
 
@@ -302,6 +306,11 @@ fn build_manifest<S: Signer>(
     let first_seq = bundle.records.first().map(|r| r.seq).unwrap_or(0);
     let last_seq = bundle.records.last().map(|r| r.seq).unwrap_or(0);
     let record_count = bundle.records.len() as u64;
+    let chain_tip = bundle
+        .records
+        .last()
+        .map(|r| r.record_hash.clone())
+        .unwrap_or_else(|| hex_lower(&crate::chain::GENESIS_HASH));
     // range_start / range_end come from the caller (export_range sets
     // them). For export_bundle (no date filter), use the bundle
     // created_at for both so the manifest has well-formed RFC3339
@@ -343,6 +352,7 @@ fn build_manifest<S: Signer>(
         policy_pack_versions: policy_pack_versions.clone(),
         operator: operator_key_id.to_string(),
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        chain_tip: Some(chain_tip.clone()),
     };
     let payload = serde_json::to_vec(&unsigned)
         .map_err(ExportError::Json)?;
@@ -362,6 +372,7 @@ fn build_manifest<S: Signer>(
         policy_pack_versions,
         operator: operator_key_id.to_string(),
         created_at: unsigned.created_at,
+        chain_tip: Some(chain_tip),
         signature: ManifestSignature {
             key_id: operator_key_id.to_string(),
             algorithm: signer.algorithm().to_string(),
@@ -383,6 +394,8 @@ struct UnsignedManifest {
     policy_pack_versions: Vec<String>,
     operator: String,
     created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_tip: Option<String>,
 }
 
 /// Default policy pack refs (no packs registered yet — the verifier
@@ -450,7 +463,7 @@ mod format_compat {
         // Structural invariants the verifier relies on. If any of
         // these drift, `cloakpipe-verify` will reject every bundle.
         assert_eq!(bundle.format, "cloakpipe.bundle");
-        assert_eq!(bundle.format_version, 3);
+        assert_eq!(bundle.format_version, BUNDLE_FORMAT_VERSION);
         assert!(!bundle.records.is_empty());
         let rec = &bundle.records[0];
         assert!(!rec.canonical_bytes.is_empty());
@@ -486,7 +499,7 @@ mod tests {
         let bundle = export_bundle(&store, &t, &signer).unwrap();
         assert_eq!(bundle.records.len(), 3);
         assert_eq!(bundle.format, "cloakpipe.bundle");
-        assert_eq!(bundle.format_version, 3);
+        assert_eq!(bundle.format_version, BUNDLE_FORMAT_VERSION);
         // Record 0's prev_hash is all zeros (genesis).
         assert!(bundle.records[0].prev_hash.chars().all(|c| c == '0'));
         // Each record's record_hash matches SHA-256 of its canonical bytes.

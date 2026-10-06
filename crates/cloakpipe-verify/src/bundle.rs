@@ -45,7 +45,7 @@ pub const BUNDLE_MAGIC: &str = "cloakpipe.bundle";
 /// - v2: + Merkle inclusion proofs per record + anchor receipts (M3)
 /// - v3: + signed manifest, policy pack refs, date range, signed-tree-
 ///   head index (M4 — auditor pack)
-pub const BUNDLE_FORMAT_VERSION: u32 = 3;
+pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 
 /// The version that introduced Merkle proofs and anchor receipts.
 /// Bundles with version < 2 cannot have these fields; the verifier
@@ -56,6 +56,10 @@ pub const MIN_BUNDLE_VERSION_FOR_ANCHORS: u32 = 2;
 /// have a [`Manifest`]; v2 bundles may be promoted to v3 by re-
 /// running `export` with `with_manifest = true`.
 pub const MIN_BUNDLE_VERSION_FOR_MANIFEST: u32 = 3;
+
+/// The version whose signed manifest commits to the chain tip, so the
+/// signature checkpoints every record (not just the count and seq range).
+pub const MIN_BUNDLE_VERSION_FOR_CHAIN_TIP: u32 = 4;
 
 /// A tenant identifier. Lowercase hyphenated UUID.
 pub type TenantId = String;
@@ -207,6 +211,9 @@ pub struct Manifest {
     pub policy_pack_versions: Vec<String>, // git shas
     pub operator: String, // key_id of the signer
     pub created_at: String,
+    /// v4+: hex `record_hash` of the last record (genesis when empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tip: Option<String>,
     pub signature: ManifestSignature,
 }
 
@@ -276,7 +283,7 @@ mod tests {
     #[test]
     fn magic_and_version_are_stable() {
         assert_eq!(BUNDLE_MAGIC, "cloakpipe.bundle");
-        assert_eq!(BUNDLE_FORMAT_VERSION, 3);
+        assert_eq!(BUNDLE_FORMAT_VERSION, 4);
     }
 
     #[test]

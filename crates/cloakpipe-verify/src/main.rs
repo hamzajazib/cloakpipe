@@ -6,8 +6,13 @@
 //! cloakpipe-verify chain   <bundle.json>   # hash chain unbroken, no seq gaps
 //! cloakpipe-verify sigs    <bundle.json>   # Ed25519 batch-head signatures valid
 //! cloakpipe-verify anchors <bundle.json>   # TSA + log receipts valid offline
-//! cloakpipe-verify all     <bundle.json>   # everything; exit 0 / nonzero for CI
+//! cloakpipe-verify all     <bundle.json> [--trust-key KEYID=HEX]...
+//!                                          # everything; exit 0 / nonzero for CI
 //! ```
+//!
+//! `--trust-key` pins the signer: the manifest must be signed by one of the
+//! given keys. Without it the bundle is checked against the key it carries,
+//! which proves integrity but not who produced it.
 //!
 //! ## Why standalone
 //!
@@ -39,6 +44,8 @@ fn run(args: &[String]) -> Result<ExitCode> {
     if path.is_empty() && cmd != "help" && cmd != "--help" && cmd != "-h" {
         anyhow::bail!("missing bundle path");
     }
+
+    let trusted = parse_trust_keys(&args[3.min(args.len())..])?;
 
     match cmd {
         "chain" => {
@@ -75,10 +82,13 @@ fn run(args: &[String]) -> Result<ExitCode> {
             let b = load_bundle(&path)?;
             // v2 bundles get full anchor + inclusion-proof checks.
             if b.format_version >= 2 {
-                match run_all_v2(&b) {
-                    Ok(s) => {
+                match run_all_v2(&b).and_then(|s| {
+                    let signer = signer_status(&b, &trusted)?;
+                    Ok((s, signer))
+                }) {
+                    Ok((s, signer)) => {
                         println!(
-                            "OK  records={} signatures={} anchors={} inclusion_proofs={} chain_tip={}",
+                            "OK  records={} batch_signatures={} anchors={} inclusion_proofs={} chain_tip={} {signer}",
                             s.records, s.signatures, s.anchors, s.proofs, s.chain_tip
                         );
                         Ok(ExitCode::from(0))
@@ -92,7 +102,7 @@ fn run(args: &[String]) -> Result<ExitCode> {
                 match verify::verify_all(&b) {
                     Ok(s) => {
                         println!(
-                            "OK  records={} signatures={} chain_tip={}",
+                            "OK  records={} batch_signatures={} chain_tip={}",
                             s.records, s.signatures, s.chain_tip
                         );
                         Ok(ExitCode::from(0))
@@ -151,6 +161,38 @@ fn run(args: &[String]) -> Result<ExitCode> {
     }
 }
 
+/// `--trust-key KEYID=HEX` pairs (64 hex chars = Ed25519 public key).
+fn parse_trust_keys(rest: &[String]) -> Result<std::collections::BTreeMap<String, [u8; 32]>> {
+    let mut keys = std::collections::BTreeMap::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        if arg != "--trust-key" {
+            anyhow::bail!("unexpected argument `{arg}`");
+        }
+        let spec = it.next().context("--trust-key needs KEYID=HEX")?;
+        let (id, hex_key) = spec.split_once('=').context("--trust-key needs KEYID=HEX")?;
+        let bytes = hex::decode(hex_key).ok().filter(|b| b.len() == 32).context("--trust-key: HEX must be 64 hex chars")?;
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        keys.insert(id.to_string(), key);
+    }
+    Ok(keys)
+}
+
+/// "signer trusted" when pinned keys were given and match; an explicit
+/// warning when none were given, so an unpinned pass is never mistaken for
+/// proof of origin.
+fn signer_status(b: &bundle::Bundle, trusted: &std::collections::BTreeMap<String, [u8; 32]>) -> Result<&'static str> {
+    if b.manifest.is_none() {
+        return Ok("signer=none");
+    }
+    if trusted.is_empty() {
+        return Ok("WARNING signer not pinned (pass --trust-key to verify who signed)");
+    }
+    anchor::check_trusted_signer(b, trusted).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok("signer trusted")
+}
+
 fn load_bundle(path: &str) -> Result<bundle::Bundle> {
     let p = PathBuf::from(path);
     let bytes = std::fs::read(&p).with_context(|| format!("reading {path}"))?;
@@ -193,7 +235,7 @@ USAGE:
   cloakpipe-verify anchors  <bundle.json>
   cloakpipe-verify proofs   <bundle.json>
   cloakpipe-verify manifest <bundle.json>
-  cloakpipe-verify all      <bundle.json>
+  cloakpipe-verify all      <bundle.json> [--trust-key KEYID=HEX]...
 
 EXITS:
   0   bundle verified
