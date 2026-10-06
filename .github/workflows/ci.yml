@@ -143,10 +143,115 @@ jobs:
             | tee diff.json \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["requires_approval"] and "trajectory" in d["required_suites"], d'
 
+  certification-gate:
+    name: agent release certification
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      FIXTURES: crates/cloakpipe-cli/tests/fixtures/certification
+      MANIFEST: crates/cloakpipe-release/testdata/support-agent-184.yaml
+      CP: ./target/debug/cloakpipe
+      WORK: cert-work
+      NOW: "2026-10-01T12:00:00Z"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build -p cloakpipe-cli
+      - name: Generate a throwaway signing key
+        run: |
+          mkdir -p "$WORK"
+          $CP release keygen --out "$WORK/key.json"
+          test "$(stat -c %a "$WORK/key.json")" = 600
+      - name: Import JUnit reports as evaluation runs
+        run: |
+          for r in passing failing; do
+            $CP eval import --junit "$FIXTURES/$r.junit.xml" --release "$MANIFEST" \
+              --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' \
+              --tool pytest --out "$WORK/$r.run.json"
+          done
+      - name: Certify the passing run (must exit 0)
+        run: |
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/passing.run.json" \
+            --require privacy,functional --environment production --issuer "ci:${GITHUB_REPOSITORY}" \
+            --key "$WORK/key.json" --now "$NOW" --out "$WORK/passing.cert.dsse.json"
+      - name: Certify the failing run (must exit 1, BLOCKED)
+        run: |
+          set +e
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/failing.run.json" \
+            --require privacy,functional --environment production --issuer "ci:${GITHUB_REPOSITORY}" \
+            --key "$WORK/key.json" --now "$NOW" --out "$WORK/failing.cert.dsse.json" | tee "$WORK/failing.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit $code"
+          test "$code" -eq 1
+          grep -q '^BLOCKED' "$WORK/failing.txt"
+          grep -q 'new_critical_failure' "$WORK/failing.txt"
+      - name: Verify the certification (must exit 0)
+        run: |
+          $CP release verify-cert "$WORK/passing.cert.dsse.json" --trust "$WORK/key.json" \
+            --release "$MANIFEST" --now "2026-10-02T00:00:00Z"
+      - name: A blocked decision and a tampered envelope must not verify
+        run: |
+          if $CP release verify-cert "$WORK/failing.cert.dsse.json" --trust "$WORK/key.json" --now "2026-10-02T00:00:00Z"; then
+            echo "a BLOCKED decision must not verify as certified"; exit 1
+          fi
+          python3 - "$WORK/passing.cert.dsse.json" "$WORK/tampered.cert.dsse.json" <<'PY'
+          import base64, json, sys
+          env = json.load(open(sys.argv[1]))
+          st = json.loads(base64.b64decode(env["payload"]))
+          st["predicate"]["certification"]["environment"] = "anything"
+          env["payload"] = base64.b64encode(json.dumps(st).encode()).decode()
+          json.dump(env, open(sys.argv[2], "w"))
+          PY
+          set +e
+          $CP release verify-cert "$WORK/tampered.cert.dsse.json" --trust "$WORK/key.json" --now "2026-10-02T00:00:00Z" | tee "$WORK/tampered.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          test "$code" -eq 1
+          grep -q '^INVALID' "$WORK/tampered.txt"
+      - name: Expose the key to the composite action
+        id: key
+        run: |
+          echo "::add-mask::$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["privateKey"])' "$WORK/key.json")"
+          {
+            echo "json<<CLOAKPIPE_KEY_EOF"
+            cat "$WORK/key.json"
+            echo "CLOAKPIPE_KEY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+      - name: Certify through the composite action
+        id: action
+        uses: ./.github/actions/certify
+        with:
+          install: "false"
+          manifest: ${{ env.MANIFEST }}
+          policy: ${{ env.FIXTURES }}/policy.yaml
+          runs: |
+            ${{ env.WORK }}/passing.run.json
+          require: privacy,functional
+          environment: production
+          signing-key: ${{ steps.key.outputs.json }}
+          out: ${{ env.WORK }}/action.cert.dsse.json
+      - name: Check the action's outputs
+        env:
+          OUTCOME: ${{ steps.action.outputs.outcome }}
+          ENVELOPE: ${{ steps.action.outputs.envelope }}
+        run: |
+          test "$OUTCOME" = certified
+          $CP release verify-cert "$ENVELOPE" --trust "$WORK/key.json" --release "$MANIFEST"
+      - name: Upload certification envelopes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: certification-envelopes
+          path: ${{ env.WORK }}/*.cert.dsse.json
+
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, cloakleak-gate, verifier-e2e, release-gate]
+    needs: [test, cloakleak-gate, verifier-e2e, release-gate, certification-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -162,6 +267,7 @@ jobs:
             - [x] cloakleak zero-leak gate (prose + tool_json)
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
             - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)
+            - [x] agent release certification (keygen, eval import, certify pass/block, verify-cert, tamper rejection, composite action)
 
             See PR artifacts for the scoreboards.`;
             await github.rest.issues.createComment({
