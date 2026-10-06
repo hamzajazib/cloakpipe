@@ -758,3 +758,64 @@ proptest! {
         prop_assert!(r.certified);
     }
 }
+
+// ── Review findings ─────────────────────────────────────────────────────
+
+#[test]
+fn revoked_verifying_key_is_revoked_even_when_another_trusted_key_signed() {
+    let s = statement(&cert());
+    let a = sign(&s, &key(), "k1");
+    let b = sign(&s, &other_key(), "k2");
+    let env = Envelope { signatures: vec![a.signatures[0].clone(), b.signatures[0].clone()], ..a };
+    let ctx = VerifyContext {
+        trusted: vec![trusted("k1", &key()), trusted("k2", &other_key())],
+        revoked_keys: ["k1".to_string()].into(),
+        ..ctx()
+    };
+    assert_status(&verify(&env, &ctx), Status::Revoked, "k1");
+}
+
+#[test]
+fn space_separated_timestamps_are_not_rfc3339() {
+    for (field, value) in [("issuedAt", "2026-10-01 00:00:00Z"), ("validUntil", "2026-10-31 00:00:00Z")] {
+        let mut v = cert_json();
+        v[field] = json!(value);
+        let c: Certification = serde_json::from_value(v).unwrap();
+        assert_status(&verify(&envelope(&c), &ctx()), Status::Invalid, field);
+    }
+    assert_status(&verify(&envelope(&cert()), &ctx_at("2026-10-06 12:00:00Z")), Status::Invalid, "now");
+}
+
+#[test]
+fn lowercase_t_and_z_timestamps_are_rfc3339() {
+    let mut v = cert_json();
+    v["issuedAt"] = json!("2026-10-01t00:00:00z");
+    let c: Certification = serde_json::from_value(v).unwrap();
+    assert_eq!(verify(&envelope(&c), &ctx()).status, Status::Valid);
+}
+
+#[test]
+fn subject_name_mismatch_is_not_in_the_invalid_list() {
+    let mut s = statement(&cert());
+    s["subject"][0]["name"] = json!("agent-release:other-agent");
+    let r = verify(&sign_value(&s), &ctx());
+    assert_eq!(r.status, Status::Valid, "{:?}", r.reasons);
+}
+
+#[test]
+fn non_finite_float_certification_is_invalid_not_panicking() {
+    // JSON cannot represent NaN; the statement carries `null`, which is a
+    // malformed certification. Documented, not a round-trip.
+    let mut c = cert();
+    c.decision.summaries[0].pass_rate = f64::NAN;
+    assert_status(&verify(&envelope(&c), &ctx()), Status::Invalid, "predicate");
+}
+
+#[test]
+fn duplicate_keys_in_signed_payload_are_invalid() {
+    let canon = String::from_utf8(serde_json_canonicalizer::to_vec(&statement(&cert())).unwrap()).unwrap();
+    let top = canon.replacen('{', "{\"_type\":\"evil\",", 1);
+    assert_status(&verify(&sign_raw(top.as_bytes()), &ctx()), Status::Invalid, "duplicate");
+    let nested = canon.replacen("\"issuer\":", "\"issuer\":\"evil\",\"issuer\":", 1);
+    assert_status(&verify(&sign_raw(nested.as_bytes()), &ctx()), Status::Invalid, "duplicate");
+}

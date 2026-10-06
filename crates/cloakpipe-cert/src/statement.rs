@@ -153,7 +153,9 @@ pub struct Report {
 ///
 /// The subject digest is `c.release` without its `sha256:` prefix. This does
 /// not check `c`: [`verify`] rejects a statement whose release is not a
-/// manifest hash or whose `decision.release` differs from it.
+/// manifest hash or whose `decision.release` differs from it. Non-finite
+/// floats have no JSON form and become `null`, which [`verify`] rejects as a
+/// malformed certification.
 pub fn statement(c: &Certification) -> Value {
     // Serialising into a `Value` cannot fail for `Certification`: every map
     // key is a string (non-finite floats become `null`).
@@ -230,11 +232,66 @@ pub fn verify(envelope: &Envelope, ctx: &VerifyContext) -> Report {
     }
     report.statement_digest = Some(digest);
 
-    match serde_json::from_slice::<Value>(&payload) {
+    match serde_json::from_slice::<NoDuplicateKeys>(&payload).and_then(|_| serde_json::from_slice::<Value>(&payload)) {
         Ok(value) => check_statement(&value, ctx, &mut f, &mut report),
         Err(e) => f.invalid(format!("payload: not JSON: {e}")),
     }
     f.finish(report)
+}
+
+/// Accepts any JSON document whose objects have no duplicate member names.
+///
+/// `serde_json::Value` silently keeps the last duplicate, so a payload with
+/// duplicate keys could be read differently by another verifier; it is
+/// treated as undecodable JSON.
+struct NoDuplicateKeys;
+
+impl<'de> Deserialize<'de> for NoDuplicateKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(NoDuplicateKeysVisitor)
+    }
+}
+
+struct NoDuplicateKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NoDuplicateKeysVisitor {
+    type Value = NoDuplicateKeys;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<NoDuplicateKeys>()?.is_some() {}
+        Ok(NoDuplicateKeys)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut seen = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!("duplicate key {key:?}")));
+            }
+            map.next_value::<NoDuplicateKeys>()?;
+        }
+        Ok(NoDuplicateKeys)
+    }
 }
 
 /// Reasons found so far, each with the status it implies.
@@ -261,7 +318,7 @@ impl Findings {
 }
 
 /// Invalid unless some signature verifies under a trusted key with a
-/// matching keyid; Revoked when every such signature's keyid is revoked.
+/// matching keyid; Revoked when any verifying signature's keyid is revoked.
 fn check_signatures(envelope: &Envelope, payload: &[u8], ctx: &VerifyContext, f: &mut Findings) {
     let message = pae(&envelope.payload_type, payload);
     let mut verified = BTreeSet::new();
@@ -278,8 +335,8 @@ fn check_signatures(envelope: &Envelope, payload: &[u8], ctx: &VerifyContext, f:
     if verified.is_empty() {
         f.invalid("signature: no signature verifies under a trusted key with a matching keyid");
         problems.into_iter().for_each(|p| f.invalid(p));
-    } else if verified.iter().all(|k| ctx.revoked_keys.contains(*k)) {
-        for keyid in verified {
+    } else {
+        for keyid in verified.into_iter().filter(|k| ctx.revoked_keys.contains(*k)) {
             f.push(Status::Revoked, format!("signing key {keyid:?} is revoked"));
         }
     }
@@ -342,8 +399,9 @@ fn check_statement(value: &Value, ctx: &VerifyContext, f: &mut Findings, report:
     check_certification(&certification, subject.as_ref(), ctx, f);
 }
 
+/// The subject's name is not checked against the certification: the
+/// contract's Invalid list covers the subject digest only.
 struct Subject {
-    name: String,
     release: ReleaseHash,
 }
 
@@ -353,7 +411,7 @@ fn parse_subject(subject: Option<&Value>) -> Result<Subject, String> {
     let [entry] = entries.as_slice() else {
         return Err(format!("subject: expected exactly one entry, got {}", entries.len()));
     };
-    let name = entry.get("name").and_then(Value::as_str).ok_or("subject.name: expected a string")?;
+    entry.get("name").and_then(Value::as_str).ok_or("subject.name: expected a string")?;
     let hex = entry
         .get("digest")
         .and_then(|d| d.get("sha256"))
@@ -362,7 +420,7 @@ fn parse_subject(subject: Option<&Value>) -> Result<Subject, String> {
     let release = format!("sha256:{hex}")
         .parse()
         .map_err(|_| format!("subject.digest.sha256: {hex:?} is not 64 lowercase hex"))?;
-    Ok(Subject { name: name.to_string(), release })
+    Ok(Subject { release })
 }
 
 fn check_certification(c: &Certification, subject: Option<&Subject>, ctx: &VerifyContext, f: &mut Findings) {
@@ -375,10 +433,6 @@ fn check_certification(c: &Certification, subject: Option<&Subject>, ctx: &Verif
                 "subject: digest {} does not match certification.release {:?}",
                 subject.release, c.release
             ));
-        }
-        let expected_name = subject_name(c.agent.as_deref());
-        if subject.name != expected_name {
-            f.invalid(format!("subject.name: expected {expected_name:?}, got {:?}", subject.name));
         }
     }
     if c.decision.release != c.release {
@@ -403,9 +457,9 @@ fn check_certification(c: &Certification, subject: Option<&Subject>, ctx: &Verif
 }
 
 fn check_validity_window(c: &Certification, ctx: &VerifyContext, f: &mut Findings) {
-    let mut parse = |field: &str, value: &str| match DateTime::parse_from_rfc3339(value) {
-        Ok(t) => Some(t),
-        Err(_) => {
+    let mut parse = |field: &str, value: &str| match parse_rfc3339(value) {
+        Some(t) => Some(t),
+        None => {
             f.invalid(format!("{field}: {value:?} is not an RFC 3339 timestamp"));
             None
         }
@@ -426,4 +480,14 @@ fn check_validity_window(c: &Certification, ctx: &VerifyContext, f: &mut Finding
     if valid_until.is_some_and(|t| now >= t) {
         f.push(Status::Expired, format!("validUntil: expired at {} (now {})", c.valid_until, ctx.now));
     }
+}
+
+/// RFC 3339 `date-time`. chrono also accepts a space between date and time,
+/// which the RFC 3339 ABNF does not (it requires `T` or `t`), so the
+/// separator is checked first.
+fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
+    if !matches!(value.as_bytes().get(10), Some(b'T' | b't')) {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(value).ok()
 }
