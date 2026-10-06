@@ -27,7 +27,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 rand.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 dialoguer.workspace = true
 shell-words = "1"
 

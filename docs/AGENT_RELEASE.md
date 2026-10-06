@@ -60,7 +60,15 @@ cloakpipe release validate release.yaml        # exit 1 with field paths if not 
 cloakpipe release hash release.yaml            # prints sha256:… ; refuses invalid manifests
 cloakpipe release diff old.yaml new.yaml       # material changes + required assurance (--json)
 cloakpipe release inspect release.yaml --json  # in-toto v1 Statement for signing
+cloakpipe release register release.yaml        # register with CloakPipe Cloud (CI)
 ```
+
+`register` validates locally first, then POSTs to
+`$CLOAKPIPE_API_URL/v1/agents/<agent>/releases` with `$CLOAKPIPE_API_KEY`. It
+prints the release hash, the baseline it was compared against, the required
+assurance and the evidence ledger sequence (`--json` for the raw response).
+Exit codes: 0 registered or already registered, 1 manifest rejected, 2
+configuration, network or server error.
 
 `diff` maps each changed component to the minimum assurance it needs before
 certification (e.g. a model change requires functional, tool-use, safety,

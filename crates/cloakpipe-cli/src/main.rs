@@ -167,17 +167,21 @@ pub enum VectorCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Release tooling is synchronous, prints machine-readable output and uses
-    // distinct exit codes, so it runs before logging/runtime setup.
+    // Release tooling is synchronous (including blocking HTTP for `register`),
+    // prints machine-readable output and uses distinct exit codes, so it runs
+    // before logging setup and outside the async runtime.
     let command = match cli.command {
         Commands::Release { action } => std::process::exit(release::run(action)),
         other => other,
     };
 
+    tokio::runtime::Runtime::new()?.block_on(run(command, cli.config))
+}
+
+async fn run(command: Commands, config: String) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         // Diagnostics go to stderr — stdout is reserved for program output and,
         // for the `mcp`/`mcp-proxy` stdio servers, the JSON-RPC stream itself.
@@ -189,19 +193,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match command {
-        Commands::Start => commands::start(&cli.config).await,
-        Commands::Test { text, file } => commands::test(&cli.config, text, file).await,
-        Commands::Stats => commands::stats(&cli.config).await,
+        Commands::Start => commands::start(&config).await,
+        Commands::Test { text, file } => commands::test(&config, text, file).await,
+        Commands::Stats => commands::stats(&config).await,
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
-        Commands::Mcp => commands::mcp(&cli.config).await,
-        Commands::McpProxy { upstream } => commands::mcp_proxy(&cli.config, upstream).await,
-        Commands::Tree { action } => commands::tree(&cli.config, action).await,
+        Commands::Mcp => commands::mcp(&config).await,
+        Commands::McpProxy { upstream } => commands::mcp_proxy(&config, upstream).await,
+        Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
-        Commands::Sessions { action } => commands::sessions(&cli.config, action).await,
+        Commands::Sessions { action } => commands::sessions(&config, action).await,
         Commands::Release { .. } => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
-            commands::scan(&cli.config, input, output, strategy, detect_only, min_confidence).await
+            commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }
     }
 }

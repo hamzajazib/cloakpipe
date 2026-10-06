@@ -1,6 +1,7 @@
 //! `cloakpipe release …` — Agent Release manifest tooling.
 //!
-//! Exit codes: 0 ok, 1 manifest invalid / not certifiable, 2 usage or I/O error.
+//! Exit codes: 0 ok, 1 manifest invalid / not certifiable (locally or by the
+//! API), 2 usage, I/O, network or server error.
 
 use clap::Subcommand;
 use cloakpipe_release::{diff, parse_path, AgentRelease, ChangeKind, ParseError};
@@ -25,6 +26,13 @@ pub enum ReleaseCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Register a release with CloakPipe Cloud (CLOAKPIPE_API_URL, CLOAKPIPE_API_KEY)
+    Register {
+        manifest: PathBuf,
+        /// Print the API response as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Summarise a release; with --json, emit its in-toto Statement
     Inspect {
         manifest: PathBuf,
@@ -38,6 +46,7 @@ pub fn run(cmd: ReleaseCommands) -> i32 {
         ReleaseCommands::Validate { manifest } => validate(&manifest),
         ReleaseCommands::Hash { manifest } => hash(&manifest),
         ReleaseCommands::Diff { baseline, candidate, json } => diff_cmd(&baseline, &candidate, json),
+        ReleaseCommands::Register { manifest, json } => register(&manifest, json),
         ReleaseCommands::Inspect { manifest, json } => inspect(&manifest, json),
     }
 }
@@ -188,4 +197,94 @@ fn inspect(path: &Path, as_json: bool) -> i32 {
         println!("certifiable no ({} issue(s); run `cloakpipe release validate`)", issues.len());
     }
     EXIT_OK
+}
+
+fn register(path: &Path, as_json: bool) -> i32 {
+    // Validate locally first: an uncertifiable manifest is never sent.
+    let r = match load_valid(path) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let Ok(base) = std::env::var("CLOAKPIPE_API_URL") else {
+        eprintln!("error: set CLOAKPIPE_API_URL to your CloakPipe Cloud API, e.g. https://api.cloakpipe.co");
+        return EXIT_IO;
+    };
+    let Ok(key) = std::env::var("CLOAKPIPE_API_KEY") else {
+        eprintln!("error: set CLOAKPIPE_API_KEY to a CloakPipe API key");
+        return EXIT_IO;
+    };
+    // Agent names may contain '/', which must not split the path segment.
+    let url = format!(
+        "{}/v1/agents/{}/releases",
+        base.trim_end_matches('/'),
+        r.metadata.agent.replace('/', "%2F")
+    );
+
+    let client = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30)).build() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return EXIT_IO;
+        }
+    };
+    let resp = match client.post(&url).header("x-cloakpipe-key", key).json(&r).send() {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("error: request failed: {e}");
+            return EXIT_IO;
+        }
+    };
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+
+    match status {
+        200 | 201 => {
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&body).expect("serialisable"));
+                return EXIT_OK;
+            }
+            let rel = &body["release"];
+            let verb = if body["created"] == true { "registered" } else { "already registered" };
+            println!(
+                "{verb}  {}  {}@{}",
+                rel["manifest_hash"].as_str().unwrap_or("?"),
+                rel["agent"].as_str().unwrap_or("?"),
+                rel["version"].as_str().unwrap_or("?")
+            );
+            if let Some(b) = body["baseline"].as_object() {
+                println!(
+                    "baseline    {}  @{} ({})",
+                    b.get("manifest_hash").and_then(|v| v.as_str()).unwrap_or("?"),
+                    b.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
+                    b.get("source").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+            }
+            if let Some(suites) = body["diff"]["required_suites"].as_array().filter(|s| !s.is_empty()) {
+                let names: Vec<&str> = suites.iter().filter_map(|s| s.as_str()).collect();
+                println!("required assurance: {}", names.join(", "));
+            }
+            if body["diff"]["requires_approval"] == true {
+                println!("approval required: change expands or alters tool, MCP or policy authority");
+            }
+            if let Some(seq) = body["evidence"]["seq"].as_u64() {
+                println!("evidence    ledger seq {seq}");
+            }
+            EXIT_OK
+        }
+        400 | 409 | 422 => {
+            eprintln!("error: rejected ({status}): {}", body["error"].as_str().unwrap_or("manifest rejected"));
+            for issue in body["issues"].as_array().into_iter().flatten() {
+                eprintln!(
+                    "  {}: {}",
+                    issue["path"].as_str().unwrap_or("?"),
+                    issue["message"].as_str().unwrap_or("?")
+                );
+            }
+            EXIT_INVALID
+        }
+        _ => {
+            eprintln!("error: CloakPipe API returned {status}: {}", body["error"].as_str().unwrap_or("unexpected response"));
+            EXIT_IO
+        }
+    }
 }
