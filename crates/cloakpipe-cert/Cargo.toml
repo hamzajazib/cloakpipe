@@ -1,0 +1,23 @@
+[package]
+name = "cloakpipe-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent Release certification: evaluation runs, deterministic certification decisions, signed attestations"
+
+[dependencies]
+cloakpipe-release = { path = "../cloakpipe-release", version = "0.10.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = { workspace = true }
+chrono = { workspace = true }
+quick-xml = "0.42"
+base64 = "0.23"
+ed25519-dalek = { version = "2" }
+
+[dev-dependencies]
+proptest = "1"

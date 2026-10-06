@@ -118,6 +118,29 @@ pub enum Suite {
 }
 
 impl Suite {
+    pub const ALL: &'static [Suite] = &[
+        Suite::PromptContract,
+        Suite::Functional,
+        Suite::Regression,
+        Suite::Safety,
+        Suite::Privacy,
+        Suite::ToolUse,
+        Suite::Performance,
+        Suite::Cost,
+        Suite::Trajectory,
+        Suite::Authorization,
+        Suite::SideEffect,
+        Suite::PublisherTrust,
+        Suite::CapabilityDiff,
+        Suite::Adversarial,
+        Suite::Grounding,
+        Suite::AccessControl,
+        Suite::Freshness,
+        Suite::Representative,
+        Suite::PolicyStaticAnalysis,
+        Suite::DecisionReplay,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Suite::PromptContract => "prompt_contract",
@@ -141,6 +164,18 @@ impl Suite {
             Suite::PolicyStaticAnalysis => "policy_static_analysis",
             Suite::DecisionReplay => "decision_replay",
         }
+    }
+}
+
+impl std::str::FromStr for Suite {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Suite::ALL
+            .iter()
+            .copied()
+            .find(|suite| suite.as_str() == s)
+            .ok_or_else(|| format!("unknown assurance suite {s:?}"))
     }
 }
 

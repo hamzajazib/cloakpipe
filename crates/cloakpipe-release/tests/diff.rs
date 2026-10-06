@@ -147,3 +147,11 @@ fn different_agents_are_not_comparable() {
     let d = diff(&a, &rel(&v));
     assert!(!d.comparable);
 }
+
+#[test]
+fn suite_names_round_trip() {
+    for s in Suite::ALL {
+        assert_eq!(s.as_str().parse::<Suite>().unwrap(), *s);
+    }
+    assert!("not_a_suite".parse::<Suite>().is_err());
+}
