@@ -160,9 +160,20 @@ The refusal is recorded as a release-bound `mcp_tool_call` hop with action
 `block` and `gate_denial=<reason>`. `--gate warn` forwards the call, logs the
 violation and marks the hop `gate_violation=<reason>`.
 
-The gate fails closed: `--manifest` without a certification refuses every
-call, and `--certification` without `--manifest`, an unreadable envelope or a
-`CLOAKPIPE_RELEASE` that names another release refuse to start. The manifest
+The gate fails closed:
+
+- With a gate, only a message it can read in full is forwarded, re-serialized
+  (never the raw line). In both modes it refuses, with a JSON-RPC error
+  (`id: null`) and a `block` hop: lines that do not parse
+  (`unreadable`, -32700; e.g. out-of-range numbers, lone surrogates, deep
+  nesting that laxer upstream parsers accept), batches (`batch`), non-objects
+  (`not_an_object`) and case variants of JSON-RPC member names such as
+  `"Method"` or `"Name"` (`noncanonical`; some decoders match keys
+  case-insensitively).
+- `--manifest` without a certification refuses every call. Any gate flag
+  without `--manifest`, a malformed `--revoked-statement`, an unreadable
+  envelope, or a `CLOAKPIPE_RELEASE` naming another release refuse to start.
+- `--revoked-key KEYID` revokes a signer. The manifest
 also binds every evidence hop to its release. MCP server identity
 (`spec.mcpServers`) is not checked: the gate fronts the one upstream it was
 started with.

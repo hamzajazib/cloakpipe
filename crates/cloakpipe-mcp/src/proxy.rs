@@ -95,6 +95,26 @@ where
             let mut to_upstream = to_upstream; // owned: dropped (→ upstream stdin EOF) when this thread ends
             for line in BufReader::new(agent_in).lines() {
                 let Ok(line) = line else { break };
+                // With a gate, only a message the gate can read in full is
+                // forwarded — as re-serialized here, never the raw line.
+                if let Some(gate) = &gate {
+                    if let Err((reason, code)) = screen(&line) {
+                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", reason.to_string())));
+                        let refusal = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": Value::Null,
+                            "error": {
+                                "code": code,
+                                "message": format!("message refused by CloakPipe: {reason}"),
+                                "data": { "reason": reason, "release": gate.release() },
+                            },
+                        });
+                        if write_line(&agent_out, &refusal.to_string()).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
@@ -106,8 +126,9 @@ where
                                     let code = denial.code();
                                     if gate.mode == GateMode::Enforce {
                                         record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", code.clone())));
-                                        // A notification (no id) takes no response.
-                                        if let Some(id) = msg.get("id").filter(|id| !id.is_null()) {
+                                        // A notification (no id member) takes no response;
+                                        // `"id": null` is a request and is answered.
+                                        if let Some(id) = msg.get("id") {
                                             let refusal = serde_json::json!({
                                                 "jsonrpc": "2.0",
                                                 "id": id,
@@ -185,6 +206,55 @@ where
     // exiting cleans it up.
     let _ = ingress.join();
     Ok(())
+}
+
+/// JSON-RPC members whose spelling must be exact. Some JSON decoders (Go's
+/// `encoding/json`) match keys case-insensitively, so `"Method"` could reach
+/// the upstream as a method the gate never saw.
+const CANONICAL_KEYS: [&str; 6] = ["jsonrpc", "id", "method", "params", "result", "error"];
+const CANONICAL_PARAMS: [&str; 2] = ["name", "arguments"];
+
+/// Can the gate read this agent message in full? Refuses (reason, JSON-RPC
+/// code) anything else: text serde_json rejects but a laxer upstream might
+/// accept (out-of-range numbers, lone surrogates, deep nesting), batches,
+/// non-objects, and case variants of JSON-RPC member names.
+fn screen(line: &str) -> Result<(), (&'static str, i64)> {
+    const PARSE_ERROR: i64 = -32700;
+    const INVALID_REQUEST: i64 = -32600;
+    let msg: Value = serde_json::from_str(line).map_err(|_| ("unreadable", PARSE_ERROR))?;
+    let obj = match &msg {
+        Value::Object(o) => o,
+        Value::Array(_) => return Err(("batch", INVALID_REQUEST)),
+        _ => return Err(("not_an_object", INVALID_REQUEST)),
+    };
+    fn noncanonical(map: &serde_json::Map<String, Value>, canonical: &[&str]) -> bool {
+        map.keys().any(|k| {
+            let folded = fold(k);
+            canonical.iter().any(|c| folded == *c && k.as_str() != *c)
+        })
+    }
+    if noncanonical(obj, &CANONICAL_KEYS) {
+        return Err(("noncanonical", INVALID_REQUEST));
+    }
+    if let Some(Value::Object(params)) = obj.get("params") {
+        if noncanonical(params, &CANONICAL_PARAMS) {
+            return Err(("noncanonical", INVALID_REQUEST));
+        }
+    }
+    Ok(())
+}
+
+/// Case-fold as lax decoders do (ASCII plus the two non-ASCII letters that
+/// fold to ASCII: U+017F long s and U+212A Kelvin sign).
+fn fold(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            c => c,
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Write one JSON-RPC line to the agent.

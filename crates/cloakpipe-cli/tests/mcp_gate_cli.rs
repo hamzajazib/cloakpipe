@@ -128,7 +128,7 @@ fn warn_mode_forwards() {
     let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest(), "--gate", "warn"], &[], &[call(1, "refund")]);
     assert!(seen.contains("refund"), "{seen}");
     assert_eq!(refusal(&msgs, 1), None);
-    assert!(err.contains("release gate"), "the violation is reported: {err}");
+    assert!(err.contains("warn mode: forwarded") && err.contains("uncertified"), "the call's violation is reported: {err}");
 }
 
 #[test]
@@ -147,4 +147,42 @@ fn misconfiguration_refuses_to_start() {
     // An unreadable certification.
     let (code, _, _, err) = proxy(dir.path(), &["--manifest", &manifest(), "--certification", "/nonexistent.json"], &[], &[]);
     assert_ne!(code, 0, "{err}");
+}
+
+#[test]
+fn gate_flags_without_a_manifest_refuse_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    for flags in [
+        vec!["--gate", "warn"],
+        vec!["--environment", "staging"],
+        vec!["--revoked-statement", &"ab".repeat(32)],
+        vec!["--revoked-key", "ed25519:0011223344556677"],
+    ] {
+        let (code, _, _, err) = proxy(dir.path(), &flags, &[], &[]);
+        assert_ne!(code, 0, "{flags:?} must not run ungated");
+        assert!(err.contains("--manifest"), "{flags:?}: {err}");
+    }
+}
+
+#[test]
+fn malformed_revocations_refuse_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, _, err) = proxy(dir.path(), &["--manifest", &manifest(), "--revoked-statement", "not-a-digest"], &[], &[]);
+    assert_ne!(code, 0, "a typo must not silently disable revocation");
+    assert!(err.contains("--revoked-statement"), "{err}");
+}
+
+#[test]
+fn a_revoked_signer_key_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = certify(dir.path(), "production");
+    let keyid = serde_json::from_str::<Value>(&std::fs::read_to_string(&key).unwrap()).unwrap()["keyid"].as_str().unwrap().to_string();
+    let (_, msgs, seen, err) = proxy(
+        dir.path(),
+        &["--manifest", &manifest(), "--certification", &cert, "--trust", &key, "--revoked-key", &keyid],
+        &[],
+        &[call(1, "refund")],
+    );
+    assert!(!seen.contains("refund"), "{seen}");
+    assert_eq!(refusal(&msgs, 1).as_deref(), Some("revoked"), "{msgs:?} {err}");
 }

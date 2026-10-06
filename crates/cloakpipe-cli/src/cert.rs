@@ -545,23 +545,44 @@ pub struct McpProxyArgs {
     /// sha256 hex of a revoked certification statement.
     #[arg(long = "revoked-statement")]
     pub revoked_statements: Vec<String>,
-    /// Environment the agent runs in; the certification must cover it.
-    #[arg(long, default_value = "production")]
-    pub environment: String,
-    /// enforce: refuse calls that fail the gate; warn: forward and report.
-    #[arg(long, default_value = "enforce", value_parser = ["enforce", "warn"])]
-    pub gate: String,
+    /// Key id of a revoked signer.
+    #[arg(long = "revoked-key")]
+    pub revoked_keys: Vec<String>,
+    /// Environment the agent runs in; the certification must cover it
+    /// (default: production).
+    #[arg(long)]
+    pub environment: Option<String>,
+    /// enforce (default): refuse calls that fail the gate; warn: forward and
+    /// report.
+    #[arg(long, value_parser = ["enforce", "warn"])]
+    pub gate: Option<String>,
 }
 
 /// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
 /// Problems are reported on stderr.
 pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::ToolGate>> {
     let Some(manifest_path) = &a.manifest else {
-        if a.certification.is_some() || !a.trust.is_empty() || !a.trust_keys.is_empty() {
-            return Err(usage("--certification and --trust need --manifest (the release they are about)"));
+        // Any gate flag without a manifest would silently run ungated.
+        let gate_flags = a.certification.is_some()
+            || !a.trust.is_empty()
+            || !a.trust_keys.is_empty()
+            || !a.revoked_statements.is_empty()
+            || !a.revoked_keys.is_empty()
+            || a.environment.is_some()
+            || a.gate.is_some();
+        if gate_flags {
+            return Err(usage("release gate flags need --manifest (the release they are about)"));
         }
         return Ok(None);
     };
+    let mut revoked_statements = BTreeSet::new();
+    for d in &a.revoked_statements {
+        let hex = d.trim().trim_start_matches("sha256:").to_ascii_lowercase();
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(usage(format_args!("--revoked-statement {d:?}: expected a sha256 hex digest")));
+        }
+        revoked_statements.insert(hex);
+    }
     let manifest = load_valid(manifest_path)?;
     let mut trusted = a.trust_keys.iter().map(|k| inline_key(k)).collect::<Res<Vec<_>>>()?;
     for p in &a.trust {
@@ -585,13 +606,14 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
     };
     let verify = VerifyContext {
         trusted,
-        revoked_statements: a
-            .revoked_statements
-            .iter()
-            .map(|d| d.trim().trim_start_matches("sha256:").to_ascii_lowercase())
-            .collect(),
+        revoked_statements,
+        revoked_keys: a.revoked_keys.iter().cloned().collect(),
         ..Default::default()
     };
-    let mode = if a.gate == "warn" { cloakpipe_mcp::GateMode::Warn } else { cloakpipe_mcp::GateMode::Enforce };
-    Ok(Some(cloakpipe_mcp::ToolGate::new(mode, &manifest, &a.environment, certification, verify)))
+    let mode = match a.gate.as_deref() {
+        Some("warn") => cloakpipe_mcp::GateMode::Warn,
+        _ => cloakpipe_mcp::GateMode::Enforce,
+    };
+    let environment = a.environment.as_deref().unwrap_or("production");
+    Ok(Some(cloakpipe_mcp::ToolGate::new(mode, &manifest, environment, certification, verify)))
 }

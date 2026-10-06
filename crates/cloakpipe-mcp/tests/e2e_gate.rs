@@ -156,3 +156,69 @@ fn a_refused_call_without_an_id_gets_no_reply() {
     assert!(!seen.contains("delete_customer"));
     assert!(out.messages().is_empty());
 }
+
+// ── fail closed on anything the gate cannot read (review findings) ──────
+
+/// Lines an agent could use to slip a refused call past a gate that only
+/// understands well-formed, canonical JSON objects. Each must be refused,
+/// never forwarded.
+fn smuggling_attempts() -> Vec<(&'static str, String)> {
+    let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+    vec![
+        ("batch", format!("[{}]", call(9, "delete_customer"))),
+        ("number out of range", r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"delete_customer","arguments":{"x":1e400}}}"#.into()),
+        ("lone surrogate", r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"delete_customer","arguments":{"x":"\ud800"}}}"#.into()),
+        ("deep nesting", format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"delete_customer","arguments":{{"x":{deep}}}}}}}"#)),
+        ("carriage return", format!("{}\r{}", json!({"jsonrpc": "2.0", "id": 8, "method": "ping"}), call(9, "delete_customer"))),
+        ("case-variant method key", r#"{"jsonrpc":"2.0","id":9,"Method":"tools/call","params":{"name":"delete_customer","arguments":{}}}"#.into()),
+        ("case-variant name key", r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"Name":"delete_customer","arguments":{}}}"#.into()),
+        ("not an object", r#""tools/call delete_customer""#.into()),
+        ("unicode-folded key", "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"param\u{17F}\":{\"name\":\"delete_customer\"}}".into()),
+    ]
+}
+
+#[test]
+fn unreadable_or_noncanonical_messages_are_refused_not_forwarded() {
+    for (what, line) in smuggling_attempts() {
+        let (out, seen, records, _) = run(certified_gate(GateMode::Enforce), std::slice::from_ref(&line));
+        assert!(!seen.contains("delete_customer"), "{what}: forwarded to the tool: {seen}");
+        let msgs = out.messages();
+        assert_eq!(msgs.len(), 1, "{what}: one error back to the agent: {msgs:?}");
+        assert!(msgs[0]["error"]["code"].as_i64().is_some(), "{what}: {msgs:?}");
+        assert!(
+            records.iter().any(|r| r.actions.iter().any(|a| a.kind == ActionKind::Block)),
+            "{what}: the refusal is evidence"
+        );
+    }
+}
+
+#[test]
+fn warn_mode_does_not_forward_what_it_cannot_read_either() {
+    // Warn mode reports policy violations, but a message the gate cannot
+    // check is never forwarded unchecked.
+    let (_, seen, _, _) = run(certified_gate(GateMode::Warn), &[format!("[{}]", call(9, "delete_customer"))]);
+    assert!(!seen.contains("delete_customer"), "{seen}");
+}
+
+#[test]
+fn a_refused_request_with_a_null_id_is_answered() {
+    let line = json!({"jsonrpc": "2.0", "id": null, "method": "tools/call", "params": {"name": "delete_customer"}}).to_string();
+    let (out, seen, _, _) = run(certified_gate(GateMode::Enforce), &[line]);
+    assert!(!seen.contains("delete_customer"));
+    let msgs = out.messages();
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0]["id"].is_null() && msgs[0]["error"]["data"]["reason"] == "undeclared_tool", "{msgs:?}");
+}
+
+#[test]
+fn ordinary_messages_still_flow_with_a_gate() {
+    let lines = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}).to_string(),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+        call(2, "refund"),
+    ];
+    let (_, seen, _, _) = run(certified_gate(GateMode::Enforce), &lines);
+    for needle in ["initialize", "notifications/initialized", "\"refund\""] {
+        assert!(seen.contains(needle), "{needle}: {seen}");
+    }
+}
