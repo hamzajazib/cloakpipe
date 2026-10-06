@@ -44,6 +44,7 @@ fn schema_rejects_structural_errors() {
         ("wrong apiVersion", Box::new(|m| m["apiVersion"] = json!("cloakpipe.dev/v9"))),
         ("malformed ref", Box::new(|m| m["spec"]["tools"][0]["ref"] = json!("refund@4"))),
         ("unversioned ref", Box::new(|m| m["spec"]["model"]["ref"] = json!("model:openai/gpt-5"))),
+        ("moving label", Box::new(|m| m["spec"]["model"]["ref"] = json!("model:openai/gpt-5@nightly"))),
         ("wrong ref kind", Box::new(|m| m["spec"]["tools"][0]["ref"] = json!("prompt:refund@4"))),
         ("bad commit", Box::new(|m| m["spec"]["code"]["commit"] = json!("main"))),
         ("unpinned image", Box::new(|m| m["spec"]["runtime"]["image"] = json!("acme/agent:latest"))),

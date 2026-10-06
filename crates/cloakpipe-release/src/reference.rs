@@ -1,9 +1,10 @@
 //! Artifact reference grammar: `<kind>:<name>@<version>`.
 //!
 //! `name` is lowercase `[a-z0-9][a-z0-9._/-]*`. `version` is either a content
-//! digest (`sha256:<64 hex>`) or an immutable version token such as `31`,
-//! `2.4.1` or `2026-08-01`. Environment-style aliases (`latest`, `production`,
-//! ...) and unversioned references are mutable and cannot be certified.
+//! digest (`sha256:<64 hex>`) or an immutable version: an optional `v`, then a
+//! digit, e.g. `31`, `v2`, `2.4.1`, `2.0.1-rc.1`, `2026-08-01`, `20250514`.
+//! Anything else (`latest`, `production`, `nightly`, `beta`, ...) is treated
+//! as a moving label, as is an unversioned reference; neither can be certified.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RefKind {
@@ -53,12 +54,6 @@ pub enum RefError {
     Mutable,
 }
 
-/// Labels that resolve to different versions over time.
-const MUTABLE_ALIASES: &[&str] = &[
-    "latest", "production", "prod", "staging", "candidate", "draft", "dev", "development", "main",
-    "master", "head", "stable", "current", "rollback", "next", "canary",
-];
-
 impl Reference {
     pub fn parse(s: &str) -> Result<Reference, RefError> {
         let (kind, rest) = s.split_once(':').ok_or(RefError::Malformed)?;
@@ -70,7 +65,7 @@ impl Reference {
         if !is_valid_name(name) || !is_valid_version(version) {
             return Err(RefError::Malformed);
         }
-        if MUTABLE_ALIASES.contains(&version.to_ascii_lowercase().as_str()) {
+        if !is_immutable_version(version) {
             return Err(RefError::Mutable);
         }
         Ok(Reference { kind, name: name.to_string(), version: version.to_string() })
@@ -94,6 +89,15 @@ fn is_valid_version(s: &str) -> bool {
         return is_lower_hex(hex, 64..=64);
     }
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+}
+
+/// Allowlist of immutable version shapes: a digest, or `v?` followed by a
+/// digit. Words are labels that can be re-pointed, so they are never accepted.
+fn is_immutable_version(s: &str) -> bool {
+    if s.starts_with("sha256:") {
+        return true; // already shape-checked by is_valid_version
+    }
+    s.strip_prefix('v').unwrap_or(s).starts_with(|c: char| c.is_ascii_digit())
 }
 
 pub(crate) fn is_lower_hex(s: &str, len: std::ops::RangeInclusive<usize>) -> bool {

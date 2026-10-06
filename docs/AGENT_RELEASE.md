@@ -32,17 +32,23 @@ spec:
   featureFlags: {}
 ```
 
-References are `<kind>:<name>@<version>`, where `version` is an immutable token
-(`31`, `2.4.1`, `2026-08-01`) or a digest (`sha256:<64 hex>`). A release is
-**certifiable** only if every reference is immutable: unversioned references
-and environment aliases (`@latest`, `@production`, `@staging`, …) are rejected,
-the commit must be a hex SHA, and the runtime image must be pinned by digest.
+References are `<kind>:<name>@<version>`, where `version` is a digest
+(`sha256:<64 hex>`) or an immutable version: an optional `v` followed by a
+digit (`31`, `v2`, `2.4.1`, `2.0.1-rc.1`, `2026-08-01`). This is an allowlist,
+so moving labels (`@latest`, `@production`, `@nightly`, `@beta`, …) and
+unversioned references are rejected. A release is **certifiable** only if
+every reference is immutable, the commit is a hex SHA, the runtime image is
+pinned by digest, and no two object keys in `parameters` or `featureFlags`
+collide after Unicode NFC normalisation.
 
 ## Hash
 
 ```
 manifest_hash = "sha256:" + hex(SHA-256("cloakpipe.dev/agent-release/v1" || "\n" || JCS(view)))
 ```
+
+Numbers are written as RFC 8785 requires (ECMAScript `Number::toString`, e.g.
+`1e-7`, `100000000000000000000`, `1e+21`).
 
 `view` contains `apiVersion`, `kind`, `metadata.agent` and the full `spec`,
 with every string NFC-normalised, references flattened to strings, unordered

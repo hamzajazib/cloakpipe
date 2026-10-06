@@ -120,3 +120,43 @@ fn issue_codes_have_stable_snake_case_names() {
     assert_eq!(IssueCode::UnpinnedImage.as_str(), "unpinned_image");
     assert_eq!(IssueCode::UnsupportedApiVersion.as_str(), "unsupported_api_version");
 }
+
+#[test]
+fn moving_labels_are_not_immutable_versions() {
+    // Immutability is an allowlist: a digest or a version starting with a digit.
+    for label in ["nightly", "beta", "qa", "edge", "lts", "stable", "release", "v", "x1"] {
+        let mut v = base_json();
+        v["spec"]["prompts"][0]["ref"] = json!(format!("prompt:support-answer@{label}"));
+        assert!(codes(&v).contains(&IssueCode::MutableReference), "@{label} must be rejected");
+    }
+}
+
+#[test]
+fn immutable_version_shapes_are_accepted() {
+    for version in ["31", "2.4.1", "v2", "v2.4.1", "2026-08-01", "20250514", "2.0.1-rc.1", "1.0.0+build.7"] {
+        let mut v = base_json();
+        v["spec"]["prompts"][0]["ref"] = json!(format!("prompt:support-answer@{version}"));
+        assert_eq!(codes(&v), vec![], "@{version} should be accepted");
+    }
+}
+
+#[test]
+fn keys_that_collide_after_unicode_normalisation_are_rejected() {
+    // Precomposed and decomposed "café" normalise to the same key; accepting
+    // both would silently drop one value from the hash.
+    for field in ["parameters", "featureFlags"] {
+        let mut v = base_json();
+        v["spec"][field] = json!({ "caf\u{00e9}": 1, "cafe\u{0301}": 2 });
+        let r = parse_str(&v.to_string(), Format::Json).unwrap();
+        let issues = r.validate();
+        assert!(
+            issues.iter().any(|i| i.code == IssueCode::NormalizationCollision && i.path.starts_with(&format!("spec.{field}"))),
+            "{field}: {issues:?}"
+        );
+    }
+    // Nested objects too.
+    let mut v = base_json();
+    v["spec"]["featureFlags"] = json!({ "router": { "caf\u{00e9}": 1, "cafe\u{0301}": 2 } });
+    assert!(codes(&v).contains(&IssueCode::NormalizationCollision));
+    assert_eq!(IssueCode::NormalizationCollision.as_str(), "normalization_collision");
+}

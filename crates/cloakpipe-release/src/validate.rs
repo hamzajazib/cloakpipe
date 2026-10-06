@@ -3,7 +3,9 @@
 
 use crate::manifest::{AgentRelease, ArtifactRef, API_VERSION, KIND};
 use crate::reference::{is_lower_hex, is_valid_name, RefError, RefKind, Reference};
-use std::collections::BTreeSet;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueCode {
@@ -17,6 +19,9 @@ pub enum IssueCode {
     UnpinnedImage,
     EmptyField,
     InvalidName,
+    /// Two object keys become identical after Unicode NFC normalisation, so
+    /// the manifest hash could not distinguish their values.
+    NormalizationCollision,
 }
 
 impl IssueCode {
@@ -33,6 +38,7 @@ impl IssueCode {
             IssueCode::UnpinnedImage => "unpinned_image",
             IssueCode::EmptyField => "empty_field",
             IssueCode::InvalidName => "invalid_name",
+            IssueCode::NormalizationCollision => "normalization_collision",
         }
     }
 }
@@ -99,6 +105,11 @@ impl AgentRelease {
             v.push(IssueCode::EmptyField, "spec.runtime.region", "must not be empty".into());
         }
 
+        for (field, map) in [("spec.parameters", &s.parameters), ("spec.featureFlags", &s.feature_flags)] {
+            let obj: serde_json::Map<String, Value> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            v.nfc_collisions(field, &Value::Object(obj));
+        }
+
         let mut seen = BTreeSet::new();
         for (i, d) in s.dependencies.iter().enumerate() {
             if d.name.trim().is_empty() || d.version.trim().is_empty() {
@@ -138,6 +149,32 @@ impl Validator {
                 self.push(IssueCode::MalformedReference, path, format!("{:?} is not `<kind>:<name>@<version>`", r.reference));
                 None
             }
+        }
+    }
+
+    /// Report object keys that collide after NFC normalisation, recursively.
+    fn nfc_collisions(&mut self, path: &str, value: &Value) {
+        match value {
+            Value::Object(o) => {
+                let mut normalised: BTreeMap<String, &str> = BTreeMap::new();
+                for (k, child) in o {
+                    let n: String = k.nfc().collect();
+                    if let Some(other) = normalised.insert(n, k) {
+                        self.push(
+                            IssueCode::NormalizationCollision,
+                            &format!("{path}.{k}"),
+                            format!("key {k:?} is the same as {other:?} after Unicode normalisation"),
+                        );
+                    }
+                    self.nfc_collisions(&format!("{path}.{k}"), child);
+                }
+            }
+            Value::Array(a) => {
+                for (i, child) in a.iter().enumerate() {
+                    self.nfc_collisions(&format!("{path}[{i}]"), child);
+                }
+            }
+            _ => {}
         }
     }
 
