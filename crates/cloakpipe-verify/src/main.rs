@@ -86,8 +86,14 @@ fn run(args: &[String]) -> Result<ExitCode> {
         }
         "all" => {
             let b = load_bundle(&path)?;
-            // v2 bundles get full anchor + inclusion-proof checks.
-            if b.format_version >= 2 {
+            // v2 bundles get full anchor + inclusion-proof checks. So does
+            // any bundle once a trust input is given or receipts are present:
+            // format_version is unsigned, so a lowered version must never
+            // turn anchor checks off.
+            let anchored = anchor_trust.tsa_roots.is_some()
+                || anchor_trust.rekor_key.is_some()
+                || !b.anchor_receipts.is_empty();
+            if b.format_version >= 2 || anchored {
                 match run_all_v2(&b, &anchor_trust).and_then(|s| {
                     let signer = signer_status(&b, &trusted)?;
                     Ok((s, signer))

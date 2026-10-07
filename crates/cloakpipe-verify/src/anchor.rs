@@ -75,6 +75,12 @@ pub enum AnchorVerifyError {
     Rfc3161 { batch_id: String, error: crate::rfc3161::Rfc3161Error },
     #[error("Rekor receipt for batch `{batch_id}`: {error}")]
     Rekor { batch_id: String, error: crate::rekor::RekorError },
+    #[error("batch id `{0}` is used by more than one batch head")]
+    DuplicateBatchId(String),
+    #[error("batch head `{batch_id}` has an empty or inverted range {first_seq}..={last_seq}")]
+    BadBatchRange { batch_id: String, first_seq: u64, last_seq: u64 },
+    #[error("batch heads `{a}` and `{b}` cover overlapping record ranges")]
+    OverlappingBatches { a: String, b: String },
 }
 
 /// Trust inputs for external anchors. Each is supplied by the verifying
@@ -302,6 +308,11 @@ pub fn verify_anchors_with_trust(bundle: &Bundle, trust: &AnchorTrust) -> Result
 
     let mut verified = 0usize;
 
+    // Unique ids and disjoint ranges: a receipt names exactly one head and
+    // every record is covered by at most one, so a second head cannot reuse
+    // an anchored id to cover records the anchor never saw.
+    check_head_structure(bundle)?;
+
     // Build a quick lookup: batch_id -> BatchHead.
     let heads_by_id: std::collections::HashMap<&str, &BatchHead> = bundle
         .batch_heads
@@ -486,6 +497,33 @@ pub fn verify_anchors_with_trust(bundle: &Bundle, trust: &AnchorTrust) -> Result
     Ok(verified)
 }
 
+/// Batch ids are unique, every head's range is non-empty and no two heads
+/// cover the same sequence number.
+fn check_head_structure(bundle: &Bundle) -> Result<(), AnchorVerifyError> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut ranges: Vec<&BatchHead> = Vec::with_capacity(bundle.batch_heads.len());
+    for h in &bundle.batch_heads {
+        if !ids.insert(h.batch_id.as_str()) {
+            return Err(AnchorVerifyError::DuplicateBatchId(h.batch_id.clone()));
+        }
+        if h.first_seq > h.last_seq {
+            return Err(AnchorVerifyError::BadBatchRange {
+                batch_id: h.batch_id.clone(),
+                first_seq: h.first_seq,
+                last_seq: h.last_seq,
+            });
+        }
+        ranges.push(h);
+    }
+    ranges.sort_by_key(|h| h.first_seq);
+    for w in ranges.windows(2) {
+        if w[1].first_seq <= w[0].last_seq {
+            return Err(AnchorVerifyError::OverlappingBatches { a: w[0].batch_id.clone(), b: w[1].batch_id.clone() });
+        }
+    }
+    Ok(())
+}
+
 fn check_subject(batch_id: &str, got: &str, expected: &[u8; 32]) -> Result<(), AnchorVerifyError> {
     let expected = hex_lower(expected);
     if got != expected {
@@ -588,6 +626,7 @@ pub fn verify_inclusion_proofs(bundle: &Bundle) -> Result<usize, AnchorVerifyErr
     if bundle.format_version < 2 {
         return Ok(0);
     }
+    check_head_structure(bundle)?;
     let mut verified = 0usize;
     // Build a lookup of batch heads by their seq range.
     let mut heads_by_first: std::collections::BTreeMap<u64, &BatchHead> =
@@ -663,6 +702,10 @@ fn check_no_back_dating(
 /// `YYYY-MM-DDTHH:MM:SS+HH:MM` (or `-HH:MM`). Returns a unix
 /// timestamp in seconds. No subsecond precision.
 fn parse_rfc3339(s: &str) -> Result<i64, ()> {
+    // Byte offsets below assume ASCII; anything else is not RFC 3339.
+    if !s.is_ascii() {
+        return Err(());
+    }
     // Accept "...Z" as the trailing byte.
     let (datetime, offset_secs) = if let Some(rest) = s.strip_suffix('Z') {
         (rest, 0i64)
@@ -848,6 +891,13 @@ mod tests {
     #[test]
     fn parse_rfc3339_rejects_garbage() {
         assert!(parse_rfc3339("not-a-date").is_err());
+    }
+
+    #[test]
+    fn parse_rfc3339_rejects_non_ascii_without_panicking() {
+        // A multibyte char straddling the offset split must not panic.
+        assert!(parse_rfc3339("2026-07-02T12:00:00+0é:00").is_err());
+        assert!(parse_rfc3339("2026-07-02T12:00:00é+0:00").is_err());
     }
 
     #[test]

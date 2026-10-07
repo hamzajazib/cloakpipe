@@ -232,6 +232,11 @@ pub fn verify_rekor_entry(
 
     // 4. The UUID names this leaf: [16 hex tree ID] + 64 hex leaf hash.
     let leaf = leaf_hash(&body_bytes);
+    // ASCII first: the UUID is not covered by the SET, and slicing a
+    // multibyte character would panic.
+    if !uuid.is_ascii() {
+        return Err(RekorError::UuidMismatch);
+    }
     let uuid_leaf = match uuid.len() {
         64 => uuid,
         80 if uuid[..16].bytes().all(|c| c.is_ascii_hexdigit()) => &uuid[16..],

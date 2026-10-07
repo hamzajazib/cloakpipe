@@ -144,3 +144,32 @@ fn bad_trust_inputs_are_usage_errors() {
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", stdout(&o));
     }
 }
+
+#[test]
+fn all_never_ignores_trust_inputs_on_a_downgraded_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = trust_args();
+    // Receipts stripped and the version lowered to 1: trust inputs were
+    // given, so the bundle must be anchored.
+    let mut stripped = bundle_for(&HONEST);
+    stripped.format_version = 1;
+    stripped.inclusion_proofs.clear();
+    let p = write(dir.path(), "v1.json", &stripped);
+    let o = run(&with(&["all", p.to_str().unwrap()], &t));
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stdout(&o).starts_with("FAIL"), "{}", stdout(&o));
+    // Without trust inputs a plain v1 bundle still verifies as before.
+    let o = run(&["all", p.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+
+    // External receipts left in a v1 bundle are checked, never ignored.
+    let mut v1 = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    v1.format_version = 1;
+    let p = write(dir.path(), "v1-receipts.json", &v1);
+    let o = run(&["all", p.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stdout(&o).contains("--tsa-root"), "{}", stdout(&o));
+    let o = run(&with(&["all", p.to_str().unwrap()], &t));
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("anchors=2"), "{}", stdout(&o));
+}

@@ -154,3 +154,75 @@ pub fn bundle_for(s: &Scenario) -> Bundle {
 pub fn head_bytes(s: &Scenario) -> Vec<u8> {
     serde_json::to_vec(&bundle_for(s).batch_heads[0]).unwrap()
 }
+
+/// Append `n` records stamped `ts`, chained to the bundle's last record,
+/// sealed under a new operator-signed head `batch_id` (signed at
+/// `signed_time`) with per-record inclusion proofs. No anchor is added:
+/// this is what an operator holding the key can forge after the fact.
+pub fn append_batch(b: &mut Bundle, batch_id: &str, n: u64, ts: &str, signed_time: &str) {
+    let first = b.records.last().map_or(0, |r| r.seq + 1);
+    let mut prev = b.records.last().map(|r| r.record_hash.clone()).unwrap_or_else(|| "0".repeat(64));
+    let mut hashes = Vec::new();
+    for seq in first..first + n {
+        let canonical = format!("seq={seq}\nts={ts}\ntenant_id={TENANT}\nhop=llm_prompt");
+        let hash: [u8; 32] = Sha256::digest(canonical.as_bytes()).into();
+        b.records.push(Record {
+            seq,
+            tenant_id: TENANT.into(),
+            canonical_bytes: canonical,
+            record_hash: hex_lower(&hash),
+            prev_hash: prev,
+        });
+        prev = hex_lower(&hash);
+        hashes.push(hash);
+    }
+    let tree = MerkleTree::from_hashed_leaves(hashes);
+    let mut head = BatchHead {
+        batch_id: batch_id.into(),
+        first_seq: first,
+        last_seq: first + n - 1,
+        merkle_root: hex_lower(&tree.root()),
+        algorithm: "ed25519".into(),
+        signed_time: Some(signed_time.into()),
+        signature: SignedBatchHead { key_id: OPERATOR_KEY_ID.into(), algorithm: "ed25519".into(), value: String::new() },
+    };
+    #[derive(serde::Serialize)]
+    struct Unsigned<'a> {
+        batch_id: &'a str,
+        first_seq: u64,
+        last_seq: u64,
+        merkle_root: &'a str,
+        algorithm: &'a str,
+        signed_time: &'a Option<String>,
+    }
+    let payload = serde_json::to_vec(&Unsigned {
+        batch_id: &head.batch_id,
+        first_seq: head.first_seq,
+        last_seq: head.last_seq,
+        merkle_root: &head.merkle_root,
+        algorithm: &head.algorithm,
+        signed_time: &head.signed_time,
+    })
+    .unwrap();
+    head.signature.value = hex_lower(&operator_key().sign(&payload).to_bytes());
+    for i in 0..n as usize {
+        let p = tree.inclusion_proof(i);
+        b.inclusion_proofs.push(Some(InclusionProofRef {
+            batch_id: batch_id.into(),
+            leaf_index: i as u64,
+            total_leaves: n,
+            steps: p
+                .steps
+                .into_iter()
+                .map(|st| ProofStepRef {
+                    position: match st.position {
+                        ProofPosition::Left => "left".into(),
+                        ProofPosition::Right => "right".into(),
+                    },
+                    hash: hex_lower(&st.hash),
+                })
+                .collect(),
+        }));
+    }
+    b.batch_heads.push(head);
+}

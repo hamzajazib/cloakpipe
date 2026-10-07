@@ -484,11 +484,16 @@ fn a_record_stamped_after_the_anchor_is_detected() {
 #[test]
 fn a_head_without_an_anchor_fails() {
     let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    append_batch(&mut b, "batch-unanchored", 3, HONEST.record_ts, HONEST.signed_time);
+    let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
+    assert!(matches!(e, AnchorVerifyError::HeadNotAnchored { ref batch_id, .. } if batch_id == "batch-unanchored"), "{e}");
+    // A copy of the anchored head under another id overlaps it.
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
     let mut extra = b.batch_heads[0].clone();
     extra.batch_id = "batch-unanchored".into();
     b.batch_heads.push(extra);
     let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
-    assert!(matches!(e, AnchorVerifyError::HeadNotAnchored { ref batch_id, .. } if batch_id == "batch-unanchored"), "{e}");
+    assert!(matches!(e, AnchorVerifyError::OverlappingBatches { .. }), "{e}");
 }
 
 #[test]
@@ -571,4 +576,70 @@ fn receipts_round_trip_through_bundle_json() {
     assert!(j.contains("\"kind\":\"rfc3161\"") && j.contains("\"kind\":\"rekor\""));
     let back: Bundle = serde_json::from_str(&j).unwrap();
     assert_eq!(verify_anchors_with_trust(&back, &full_trust()).unwrap(), 2);
+}
+
+// ── Batch-head structure ────────────────────────────────────────────────
+
+/// The operator (who holds the key) adds records stamped years after the
+/// anchor under a second head that reuses the anchored head's batch id.
+fn forged_second_head(at_front: bool) -> Bundle {
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    append_batch(&mut b, HONEST.batch_id, 5, "2030-01-01T00:00:00Z", "2030-01-01T00:05:00Z");
+    if at_front {
+        b.batch_heads.rotate_right(1);
+    }
+    b
+}
+
+#[test]
+fn a_reused_batch_id_cannot_smuggle_unanchored_records() {
+    for at_front in [true, false] {
+        let b = forged_second_head(at_front);
+        // The forgery is internally consistent: chain and signatures hold.
+        cloakpipe_verify::verify::verify_all(&b).expect("chain and head signatures hold");
+        let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
+        assert!(matches!(e, AnchorVerifyError::DuplicateBatchId(ref id) if id == HONEST.batch_id), "{e}");
+        let e = cloakpipe_verify::anchor::verify_inclusion_proofs(&b).unwrap_err();
+        assert!(matches!(e, AnchorVerifyError::DuplicateBatchId(_)), "{e}");
+    }
+}
+
+#[test]
+fn overlapping_batch_heads_are_rejected() {
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    append_batch(&mut b, "batch-later", 5, "2026-10-07T10:00:00Z", "2026-10-07T10:05:00Z");
+    // A head over seq 3..=7 overlaps the anchored head (0..=4).
+    b.batch_heads[1].first_seq = 3;
+    let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
+    assert!(matches!(e, AnchorVerifyError::OverlappingBatches { .. }), "{e}");
+    // An inverted range is malformed too.
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    b.batch_heads[0].first_seq = 9;
+    let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
+    assert!(matches!(e, AnchorVerifyError::BadBatchRange { .. }), "{e}");
+}
+
+#[test]
+fn a_later_unanchored_batch_with_its_own_id_fails() {
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    append_batch(&mut b, "batch-later", 5, "2030-01-01T00:00:00Z", "2030-01-01T00:05:00Z");
+    cloakpipe_verify::verify::verify_all(&b).expect("chain and head signatures hold");
+    let e = verify_anchors_with_trust(&b, &full_trust()).unwrap_err();
+    assert!(matches!(e, AnchorVerifyError::HeadNotAnchored { ref batch_id, .. } if batch_id == "batch-later"), "{e}");
+}
+
+#[test]
+fn a_non_ascii_rekor_uuid_fails_without_panicking() {
+    let (_, entry) = rekor_entry("rekor-honest");
+    // 80 bytes, with a two-byte char straddling byte 16.
+    let uuid = format!("{}é{}", "a".repeat(15), "b".repeat(63));
+    assert_eq!(uuid.len(), 80);
+    let e = verify_rekor_entry(&uuid, &entry, &rekor_key(), &head_bytes(&HONEST), &operator_pub()).unwrap_err();
+    assert!(matches!(e, RekorError::UuidMismatch), "{e}");
+    // Same through a bundle.
+    let mut b = anchored(&HONEST, "freetsa-honest", "rekor-honest");
+    if let AnchorReceiptRef::Rekor { entry_uuid, .. } = &mut b.anchor_receipts[1] {
+        *entry_uuid = uuid;
+    }
+    assert!(verify_anchors_with_trust(&b, &full_trust()).is_err());
 }
