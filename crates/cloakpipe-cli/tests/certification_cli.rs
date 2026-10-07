@@ -259,6 +259,250 @@ fn eval_import_usage_and_io_errors_exit_2() {
     assert!(err.contains("NAME@VERSION"), "{err}");
 }
 
+// ── eval import: score-based sources ────────────────────────────────────
+
+/// A fixture shared with `cloakpipe-cert`'s importer tests.
+fn import_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../cloakpipe-cert/testdata/import")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn case_of<'a>(run: &'a Value, id: &str) -> &'a Value {
+    run["cases"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("no case {id}: {run}"))
+}
+
+fn import_braintrust(extra: &[&str]) -> (i32, String, String) {
+    let file = import_fixture("braintrust_fetch.json");
+    let release = golden();
+    let mut args = vec![
+        "eval", "import", "--braintrust", &file, "--release", &release, "--suite", "support-critical@23", "--covers",
+        "privacy,functional",
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+fn import_langfuse(extra: &[&str]) -> (i32, String, String) {
+    let (r, s) = (import_fixture("langfuse_run.json"), import_fixture("langfuse_scores.json"));
+    let release = golden();
+    let mut args = vec![
+        "eval", "import", "--langfuse-run", &r, "--langfuse-scores", &s, "--release", &release, "--suite",
+        "support-critical@23", "--covers", "privacy,functional",
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+#[test]
+fn eval_import_braintrust_turns_root_spans_into_cases() {
+    let (code, out, err) = import_braintrust(&["--critical", "privacy::*", "--tool", "braintrust"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).expect("JSON on stdout");
+    assert_eq!(v["source"], serde_json::json!({"kind": "braintrust", "tool": "braintrust"}));
+    assert_eq!(v["cases"].as_array().unwrap().len(), 4, "child spans are not cases: {v}");
+    let identity = case_of(&v, "refunds::requires_identity");
+    assert_eq!(identity["status"], "pass");
+    assert_eq!(identity["critical"], true, "metadata.critical");
+    assert_eq!(identity["metrics"]["score.Factuality"], 0.9);
+    assert_eq!(identity["durationMs"], 1412);
+    let pii = case_of(&v, "privacy::no_pii_in_tool_args");
+    assert_eq!(pii["status"], "fail");
+    assert_eq!(pii["critical"], true, "--critical pattern");
+    assert_eq!(case_of(&v, "ds-rec-7f3a")["status"], "error");
+    assert_eq!(case_of(&v, "refunds::over_limit_escalates")["status"], "error", "unscored fails closed");
+}
+
+#[test]
+fn eval_import_pass_threshold_decides_pass_and_fail() {
+    let (code, out, err) = import_braintrust(&["--pass-threshold", "0.95"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "refunds::requires_identity")["status"], "fail", "Factuality 0.9 < 0.95");
+    let (code, out, err) = import_braintrust(&["--pass-threshold", "0"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "privacy::no_pii_in_tool_args")["status"], "pass");
+}
+
+#[test]
+fn eval_import_rejects_a_pass_threshold_outside_0_to_1() {
+    for bad in ["1.5", "-0.1", "NaN", "inf", "high"] {
+        let (code, out, err) = import_braintrust(&["--pass-threshold", bad]);
+        assert_eq!(code, 2, "{bad}: {err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("pass-threshold"), "{err}");
+    }
+}
+
+#[test]
+fn eval_import_braintrust_reports_invalid_and_malformed_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = write(&dir, "bad.json", "{\"events\": [");
+    let (code, out, err) =
+        run(&["eval", "import", "--braintrust", &bad, "--release", &golden(), "--suite", "s@1", "--covers", "privacy"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("JSON"), "{err}");
+    let no_id = write(&dir, "no-id.jsonl", "{\"id\": \"row-1\", \"span_parents\": null, \"scores\": {\"s\": 1}}\n");
+    let (code, _, err) =
+        run(&["eval", "import", "--braintrust", &no_id, "--release", &golden(), "--suite", "s@1", "--covers", "privacy"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no-id.jsonl: invalid evaluation run"), "{err}");
+    assert!(err.contains("case id"), "{err}");
+}
+
+#[test]
+fn eval_import_langfuse_joins_run_items_and_scores() {
+    let (code, out, err) = import_langfuse(&["--critical", "privacy::*"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["source"], serde_json::json!({"kind": "langfuse"}));
+    assert_eq!(v["dataset"], "support-golden", "defaults to the run's datasetName");
+    assert_eq!(v["cases"].as_array().unwrap().len(), 4);
+    assert_eq!(case_of(&v, "refunds::requires_identity")["status"], "pass");
+    let pii = case_of(&v, "privacy::no_pii_in_tool_args");
+    assert_eq!(pii["status"], "fail");
+    assert_eq!(pii["critical"], true);
+    assert_eq!(case_of(&v, "refunds::over_limit_escalates")["status"], "error");
+    assert_eq!(case_of(&v, "escalation::hands_off_politely")["status"], "pass");
+
+    let (code, out, err) = import_langfuse(&["--dataset", "dataset:support-golden@9"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["dataset"], "dataset:support-golden@9", "--dataset wins");
+}
+
+#[test]
+fn eval_import_braintrust_reads_sdk_scorer_spans_and_dataset_origin() {
+    let file = import_fixture("braintrust_sdk_fetch.json");
+    let g = golden();
+    let (code, out, err) =
+        run(&["eval", "import", "--braintrust", &file, "--release", &g, "--suite", "s@1", "--covers", "privacy"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let identity = case_of(&v, "rec-refund-identity");
+    assert_eq!(identity["status"], "pass", "{v}");
+    assert_eq!(identity["metrics"]["score.Factuality"], 0.8);
+    assert_eq!(case_of(&v, "privacy::no_ssn_echo")["status"], "fail");
+    assert_eq!(case_of(&v, "rec-crash")["status"], "error", "scorer_errors fail closed");
+}
+
+#[test]
+fn eval_import_score_selects_the_scores_that_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = write(&dir, "run.json", r#"{"datasetRunItems": [{"datasetItemId": "item-1", "traceId": "t1"}]}"#);
+    let s = write(
+        &dir,
+        "scores.json",
+        r#"{"data": [
+            {"id": "a", "name": "acc", "value": 0.9, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"},
+            {"id": "b", "name": "user-feedback", "value": 4, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"}
+        ], "meta": {"page": 1, "limit": 50, "totalItems": 2, "totalPages": 1}}"#,
+    );
+    let g = golden();
+    let base = ["eval", "import", "--langfuse-run", &r, "--langfuse-scores", &s, "--release", &g, "--suite", "s@1"];
+    let mut args = base.to_vec();
+    args.extend_from_slice(&["--covers", "privacy"]);
+    let (code, _, err) = run(&args);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("user-feedback"), "{err}");
+    args.extend_from_slice(&["--score", "acc"]);
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "item-1")["status"], "pass");
+    args.extend_from_slice(&["--score", "safety"]);
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "item-1")["status"], "error", "a selected score is missing");
+    let j = fixture("passing.junit.xml");
+    let (code, _, err) =
+        run(&["eval", "import", "--junit", &j, "--release", &g, "--suite", "s@1", "--covers", "p", "--score", "acc"]);
+    assert_eq!(code, 2, "{err}");
+}
+
+#[test]
+fn eval_import_langfuse_rejects_missing_score_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = write(&dir, "run.json", r#"{"datasetRunItems": [{"datasetItemId": "item-1", "traceId": "t1"}]}"#);
+    let s = write(
+        &dir,
+        "scores.json",
+        r#"{"data": [{"id": "s1", "name": "acc", "value": 0.9, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"}],
+            "meta": {"page": 1, "limit": 1, "totalItems": 2, "totalPages": 2}}"#,
+    );
+    let g = golden();
+    let (code, out, err) = run(&[
+        "eval",
+        "import",
+        "--langfuse-run",
+        &r,
+        "--langfuse-scores",
+        &s,
+        "--release",
+        &g,
+        "--suite",
+        "s@1",
+        "--covers",
+        "privacy",
+    ]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("page 2"), "{err}");
+}
+
+#[test]
+fn eval_import_needs_exactly_one_source() {
+    let (j, b) = (fixture("passing.junit.xml"), import_fixture("braintrust_fetch.json"));
+    let (r, s) = (import_fixture("langfuse_run.json"), import_fixture("langfuse_scores.json"));
+    let g = golden();
+    let base = ["eval", "import", "--release", &g, "--suite", "s@1", "--covers", "privacy"];
+    let cases: Vec<Vec<&str>> = vec![
+        vec![],
+        vec!["--junit", &j, "--braintrust", &b],
+        vec!["--braintrust", &b, "--langfuse-run", &r, "--langfuse-scores", &s],
+        vec!["--langfuse-run", &r],
+        vec!["--langfuse-scores", &s],
+        vec!["--braintrust", &b, "--langfuse-scores", &s],
+        vec!["--junit", &j, "--pass-threshold", "0.5"],
+    ];
+    for extra in cases {
+        let mut args = base.to_vec();
+        args.extend_from_slice(&extra);
+        let (code, out, err) = run(&args);
+        assert_eq!(code, 2, "{extra:?} should be a usage error: {out}{err}");
+        assert!(out.is_empty(), "{out}");
+    }
+}
+
+#[test]
+fn eval_import_missing_score_file_exits_2() {
+    let r = import_fixture("langfuse_run.json");
+    let (code, _, err) = run(&[
+        "eval", "import", "--langfuse-run", &r, "--langfuse-scores", "/nonexistent/scores.json", "--release",
+        &golden(), "--suite", "s@1", "--covers", "privacy",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("/nonexistent/scores.json"), "{err}");
+}
+
+#[test]
+fn certify_blocks_on_a_failing_critical_braintrust_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = keygen(&dir, "key.json");
+    let run_file = path(&dir, "run.json");
+    let (code, _, err) = import_braintrust(&["--critical", "privacy::*", "--out", &run_file]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = certify(&dir, &run_file, &key, "cert.dsse.json", &[]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.starts_with("BLOCKED"), "{out}");
+    assert!(out.contains("new_critical_failure"), "{out}");
+    assert!(out.contains("privacy::no_pii_in_tool_args"), "{out}");
+}
+
 // ── certify ─────────────────────────────────────────────────────────────
 
 #[test]

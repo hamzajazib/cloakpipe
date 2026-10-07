@@ -11,10 +11,11 @@
 //!   Rekor v2 / Trillian-Tessera expose — same wire format, simpler
 //!   test harness).
 //!
-//! Future (post-M3):
-//! - Qualified TSA (eIDAS Art 41(2) — legal presumption). Stubbed
-//!   only.
-//! - Rekor v2 / Trillian-Tessera production instances.
+//! External anchors (real services, verified before a receipt is
+//! returned):
+//! - [`rfc3161::TsaClient`] — any RFC 3161 TSA over HTTP (freetsa.org by
+//!   default, DigiCert documented).
+//! - [`rekor::RekorClient`] — Sigstore Rekor v1 API, `hashedrekord`.
 
 use crate::batch::SignedBatchHead;
 use crate::receipt::{AnchorReceipt, BackendKind};
@@ -27,6 +28,9 @@ pub enum AnchorError {
     Unavailable(String),
     #[error("submit failed: {0}")]
     Submit(String),
+    /// The anchor answered, but its answer does not verify.
+    #[error("anchor response rejected: {0}")]
+    Rejected(String),
 }
 
 /// A pluggable anchor backend.
@@ -40,6 +44,8 @@ pub trait Backend: Send + Sync {
 }
 
 pub mod log;
+pub mod rekor;
+pub mod rfc3161;
 pub mod tsa;
 
 pub use log::LogBackend;

@@ -9,7 +9,7 @@
 use crate::release::{load, load_valid, EXIT_INVALID, EXIT_IO, EXIT_OK};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, Subcommand};
-use cloakpipe_cert::import::{from_junit, ImportError, ImportMeta};
+use cloakpipe_cert::import::{from_braintrust, from_junit, from_langfuse, ImportError, ImportMeta, ScoreRules};
 use cloakpipe_cert::policy::{decide, DecisionInput};
 use cloakpipe_cert::statement::{self, Certification, Envelope, TrustedKey, VerifyContext};
 use cloakpipe_cert::{CertificationPolicy, EvaluationRun, Outcome, SuiteRef};
@@ -22,19 +22,19 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Exit early with a code.
-type Res<T> = Result<T, i32>;
+pub(crate) type Res<T> = Result<T, i32>;
 
-fn usage(msg: impl std::fmt::Display) -> i32 {
+pub(crate) fn usage(msg: impl std::fmt::Display) -> i32 {
     eprintln!("error: {msg}");
     EXIT_IO
 }
 
-fn invalid(msg: impl std::fmt::Display) -> i32 {
+pub(crate) fn invalid(msg: impl std::fmt::Display) -> i32 {
     eprintln!("error: {msg}");
     EXIT_INVALID
 }
 
-fn read(path: &Path) -> Res<String> {
+pub(crate) fn read(path: &Path) -> Res<String> {
     std::fs::read_to_string(path).map_err(|e| usage(format_args!("cannot read {}: {e}", path.display())))
 }
 
@@ -46,7 +46,7 @@ fn pretty(v: &impl Serialize) -> String {
     format!("{}\n", serde_json::to_string_pretty(v).expect("serialisable"))
 }
 
-fn finish(code: Res<i32>) -> i32 {
+pub(crate) fn finish(code: Res<i32>) -> i32 {
     code.unwrap_or_else(|c| c)
 }
 
@@ -64,7 +64,7 @@ fn release_target(arg: &str) -> Res<String> {
 
 /// `--now`: RFC 3339, normalised to UTC with second precision; defaults to
 /// the current time.
-fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
+pub(crate) fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
     match now {
         None => Ok(Utc::now()),
         Some(s) => DateTime::parse_from_rfc3339(s)
@@ -73,7 +73,7 @@ fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
     }
 }
 
-fn rfc3339(t: DateTime<Utc>) -> String {
+pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
@@ -123,7 +123,7 @@ fn check_declared(path: &Path, file: &KeyFile, public: &[u8; 32]) -> Res<String>
     Ok(id)
 }
 
-fn signing_key(path: &Path) -> Res<(SigningKey, String)> {
+pub(crate) fn signing_key(path: &Path) -> Res<(SigningKey, String)> {
     let file = read_key_file(path)?;
     let Some(seed) = file.private_key.as_deref().and_then(hex32) else {
         return Err(invalid(format_args!("{}: privateKey must be a 32-byte hex Ed25519 seed", path.display())));
@@ -192,15 +192,33 @@ fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
 
 #[derive(Subcommand)]
 pub enum EvalCommands {
-    /// Import a JUnit XML report as a native EvaluationRun
+    /// Import JUnit XML, a Braintrust experiment or a Langfuse dataset run as a native EvaluationRun
     Import(ImportArgs),
 }
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("source").required(true).args(["junit", "braintrust", "langfuse_run"]))]
 pub struct ImportArgs {
     /// JUnit XML report
     #[arg(long, value_name = "FILE")]
-    junit: PathBuf,
+    junit: Option<PathBuf>,
+    /// Braintrust experiment events: /v1/experiment/{id}/fetch output, an array of events or JSONL
+    #[arg(long, value_name = "FILE")]
+    braintrust: Option<PathBuf>,
+    /// Langfuse dataset run: /api/public/datasets/{dataset}/runs/{run} output (deprecated by Langfuse;
+    /// see docs/CERTIFICATION.md)
+    #[arg(long, value_name = "FILE", requires = "langfuse_scores")]
+    langfuse_run: Option<PathBuf>,
+    /// Langfuse scores for the run: GET /api/public/v2/scores output (a page, or an array of every page)
+    #[arg(long, value_name = "FILE", requires = "langfuse_run", conflicts_with_all = ["junit", "braintrust"])]
+    langfuse_scores: Option<PathBuf>,
+    /// Score-based sources: a case passes iff every score is >= this, 0..=1 [default: 0.5]
+    #[arg(long, value_name = "T", value_parser = unit_interval, allow_negative_numbers = true, conflicts_with = "junit")]
+    pass_threshold: Option<f64>,
+    /// Score-based sources: count only this score name (repeatable); other scores are ignored and a
+    /// case missing a named score is an error [default: every score counts]
+    #[arg(long = "score", value_name = "NAME", conflicts_with = "junit")]
+    score_names: Vec<String>,
     /// Evaluated release: a manifest path (must be certifiable) or sha256:<hex>
     #[arg(long)]
     release: String,
@@ -219,12 +237,20 @@ pub struct ImportArgs {
     /// Producing tool, e.g. pytest
     #[arg(long)]
     tool: Option<String>,
-    /// Dataset reference
+    /// Dataset reference (Langfuse default: the run's datasetName)
     #[arg(long)]
     dataset: Option<String>,
     /// Write the run here instead of stdout
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+/// `--pass-threshold`: a finite number within 0..=1.
+fn unit_interval(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(t) if t.is_finite() && (0.0..=1.0).contains(&t) => Ok(t),
+        _ => Err("must be a number within 0..=1".into()),
+    }
 }
 
 pub fn eval(cmd: EvalCommands) -> i32 {
@@ -239,7 +265,17 @@ fn import(a: ImportArgs) -> Res<i32> {
         .rsplit_once('@')
         .filter(|(n, v)| !n.trim().is_empty() && !v.trim().is_empty())
         .ok_or_else(|| usage(format_args!("--suite {:?}: expected NAME@VERSION", a.suite)))?;
-    let xml = read(&a.junit)?;
+    let rules = ScoreRules {
+        pass_threshold: a.pass_threshold.unwrap_or(ScoreRules::default().pass_threshold),
+        score_names: a.score_names.clone(),
+    };
+    // Read every input before resolving the release: I/O errors come first.
+    let source = match (&a.junit, &a.braintrust, &a.langfuse_run, &a.langfuse_scores) {
+        (Some(junit), ..) => Source::Junit(junit, read(junit)?),
+        (_, Some(bt), ..) => Source::Braintrust(bt, read(bt)?),
+        (_, _, Some(run), Some(scores)) => Source::Langfuse(run, read(run)?, read(scores)?),
+        _ => return Err(usage("one of --junit, --braintrust or --langfuse-run is required")),
+    };
     let release = release_target(&a.release)?;
     let meta = ImportMeta {
         run_id: a.run_id.clone().unwrap_or_else(|| a.suite.clone()),
@@ -251,22 +287,35 @@ fn import(a: ImportArgs) -> Res<i32> {
         tool: a.tool,
         critical: a.critical,
     };
-    let run = match from_junit(&xml, &meta) {
+    let (path, result) = match &source {
+        Source::Junit(path, xml) => (path, from_junit(xml, &meta)),
+        Source::Braintrust(path, json) => (path, from_braintrust(json, &meta, &rules)),
+        Source::Langfuse(path, run, scores) => (path, from_langfuse(run, scores, &meta, &rules)),
+    };
+    let run = match result {
         Ok(run) => run,
         Err(ImportError::Invalid(issues)) => {
-            eprintln!("error: {}: invalid evaluation run", a.junit.display());
+            eprintln!("error: {}: invalid evaluation run", path.display());
             for i in issues {
                 eprintln!("  {i}");
             }
             return Err(EXIT_INVALID);
         }
-        Err(e) => return Err(invalid(format_args!("{}: {e}", a.junit.display()))),
+        Err(e) => return Err(invalid(format_args!("{}: {e}", path.display()))),
     };
     match a.out {
         Some(out) => write(&out, &pretty(&run))?,
         None => print!("{}", pretty(&run)),
     }
     Ok(EXIT_OK)
+}
+
+/// The import source: its (main) file and contents.
+enum Source<'a> {
+    Junit(&'a PathBuf, String),
+    Braintrust(&'a PathBuf, String),
+    /// The run file, its contents, and the scores' contents.
+    Langfuse(&'a PathBuf, String, String),
 }
 
 // ── certify ─────────────────────────────────────────────────────────────
@@ -514,4 +563,106 @@ fn verify_inner(a: VerifyCertArgs) -> Res<i32> {
         }
     }
     Ok(if report.certified { EXIT_OK } else { EXIT_INVALID })
+}
+
+// ── MCP tool gate (`mcp-proxy`) ─────────────────────────────────────────
+
+/// Transparently proxy an upstream MCP server, masking PII in tool-call
+/// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
+/// With `--manifest`, only a certified release may call the tools its
+/// manifest declares (Phase C tool gate).
+#[derive(Debug, Args)]
+pub struct McpProxyArgs {
+    /// Upstream MCP server command + args, e.g.
+    /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
+    #[arg(long, required = true)]
+    pub upstream: String,
+    /// Agent Release manifest the agent runs as. Enables the tool gate:
+    /// tools/call must name a tool the manifest declares.
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    /// DSSE certification envelope of the release. Without one, every
+    /// tools/call is refused (enforce) or reported (warn).
+    #[arg(long)]
+    pub certification: Option<PathBuf>,
+    /// Trusted signer key file (from `release keygen`; public part only).
+    #[arg(long)]
+    pub trust: Vec<PathBuf>,
+    /// Trusted signer as KEYID=PUBHEX.
+    #[arg(long = "trust-key")]
+    pub trust_keys: Vec<String>,
+    /// sha256 hex of a revoked certification statement.
+    #[arg(long = "revoked-statement")]
+    pub revoked_statements: Vec<String>,
+    /// Key id of a revoked signer.
+    #[arg(long = "revoked-key")]
+    pub revoked_keys: Vec<String>,
+    /// Environment the agent runs in; the certification must cover it
+    /// (default: production).
+    #[arg(long)]
+    pub environment: Option<String>,
+    /// enforce (default): refuse calls that fail the gate; warn: forward and
+    /// report.
+    #[arg(long, value_parser = ["enforce", "warn"])]
+    pub gate: Option<String>,
+}
+
+/// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
+/// Problems are reported on stderr.
+pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::ToolGate>> {
+    let Some(manifest_path) = &a.manifest else {
+        // Any gate flag without a manifest would silently run ungated.
+        let gate_flags = a.certification.is_some()
+            || !a.trust.is_empty()
+            || !a.trust_keys.is_empty()
+            || !a.revoked_statements.is_empty()
+            || !a.revoked_keys.is_empty()
+            || a.environment.is_some()
+            || a.gate.is_some();
+        if gate_flags {
+            return Err(usage("release gate flags need --manifest (the release they are about)"));
+        }
+        return Ok(None);
+    };
+    let mut revoked_statements = BTreeSet::new();
+    for d in &a.revoked_statements {
+        let hex = d.trim().trim_start_matches("sha256:").to_ascii_lowercase();
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(usage(format_args!("--revoked-statement {d:?}: expected a sha256 hex digest")));
+        }
+        revoked_statements.insert(hex);
+    }
+    let manifest = load_valid(manifest_path)?;
+    let mut trusted = a.trust_keys.iter().map(|k| inline_key(k)).collect::<Res<Vec<_>>>()?;
+    for p in &a.trust {
+        trusted.push(trusted_key(p)?);
+    }
+    let certification = match &a.certification {
+        None => {
+            eprintln!("warning: no --certification: every tools/call fails the release gate");
+            None
+        }
+        Some(p) => {
+            if trusted.is_empty() {
+                eprintln!("warning: no trusted keys (--trust / --trust-key); the certification cannot verify");
+            }
+            let src = read(p)?;
+            Some(
+                serde_json::from_str::<Envelope>(&src)
+                    .map_err(|e| invalid(format_args!("{}: not a DSSE envelope: {e}", p.display())))?,
+            )
+        }
+    };
+    let verify = VerifyContext {
+        trusted,
+        revoked_statements,
+        revoked_keys: a.revoked_keys.iter().cloned().collect(),
+        ..Default::default()
+    };
+    let mode = match a.gate.as_deref() {
+        Some("warn") => cloakpipe_mcp::GateMode::Warn,
+        _ => cloakpipe_mcp::GateMode::Enforce,
+    };
+    let environment = a.environment.as_deref().unwrap_or("production");
+    Ok(Some(cloakpipe_mcp::ToolGate::new(mode, &manifest, environment, certification, verify)))
 }

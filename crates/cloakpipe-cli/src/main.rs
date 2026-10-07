@@ -1,5 +1,7 @@
 //! CloakPipe CLI — entrypoint for the privacy proxy.
 
+mod anchor;
+mod audit_pack;
 mod cert;
 mod commands;
 mod release;
@@ -42,12 +44,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server, masking PII in tool-call
     /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
-    McpProxy {
-        /// Upstream MCP server command + args, e.g.
-        /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-        #[arg(long, required = true)]
-        upstream: String,
-    },
+    McpProxy(cert::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
     Tree {
         #[command(subcommand)]
@@ -68,6 +65,9 @@ enum Commands {
         #[command(subcommand)]
         action: release::ReleaseCommands,
     },
+    /// Seal an exported evidence bundle under a signed batch head and anchor it
+    /// externally (RFC 3161 TSA and/or Sigstore Rekor); see docs/ANCHORING.md
+    Anchor(anchor::AnchorArgs),
     /// Evaluation runs: import external results as certification evidence
     Eval {
         #[command(subcommand)]
@@ -182,6 +182,7 @@ fn main() -> anyhow::Result<()> {
     let command = match cli.command {
         Commands::Release { action } => std::process::exit(release::run(action)),
         Commands::Eval { action } => std::process::exit(cert::eval(action)),
+        Commands::Anchor(args) => std::process::exit(anchor::run(args)),
         other => other,
     };
 
@@ -206,11 +207,11 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&config).await,
-        Commands::McpProxy { upstream } => commands::mcp_proxy(&config, upstream).await,
+        Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
         Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&config, action).await,
-        Commands::Release { .. } | Commands::Eval { .. } => unreachable!("handled above"),
+        Commands::Release { .. } | Commands::Eval { .. } | Commands::Anchor(_) => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }

@@ -26,6 +26,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use crate::gate::{GateMode, ToolGate};
+
 /// Everything the interceptor needs beyond the upstream command.
 pub struct ProxyContext {
     pub detector: Detector,
@@ -35,7 +37,14 @@ pub struct ProxyContext {
     /// Agent Release manifest hash (`CLOAKPIPE_RELEASE`) every ledger hop is
     /// bound to; `None` records unbound hops.
     pub release: Option<[u8; 32]>,
+    /// Phase C tool gate: when set, each `tools/call` must pass
+    /// [`ToolGate::check`]. Refused calls (enforce mode) never reach the
+    /// upstream; the agent gets a JSON-RPC error instead.
+    pub gate: Option<ToolGate>,
 }
+
+/// JSON-RPC error code for a tool call the gate refused (server-defined range).
+pub const TOOL_REFUSED: i64 = -32001;
 
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
 
@@ -71,25 +80,80 @@ where
     let ledger: SharedLedger = ctx.ledger_db.as_deref().and_then(open_ledger);
     let (tenant, agent) = stable_ids();
     let release = ctx.release;
+    let gate = ctx.gate;
+    // Both directions answer the agent: ingress relays upstream replies and
+    // egress answers refused calls.
+    let agent_out = Arc::new(Mutex::new(agent_out));
 
     // Egress: agent stdin → mask tools/call → upstream stdin.
     {
         let detector = detector.clone();
         let vault = vault.clone();
         let ledger = ledger.clone();
+        let agent_out = agent_out.clone();
         std::thread::spawn(move || {
             let mut to_upstream = to_upstream; // owned: dropped (→ upstream stdin EOF) when this thread ends
             for line in BufReader::new(agent_in).lines() {
                 let Ok(line) = line else { break };
+                // With a gate, only a message the gate can read in full is
+                // forwarded — as re-serialized here, never the raw line.
+                if let Some(gate) = &gate {
+                    if let Err((reason, code)) = screen(&line) {
+                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", reason.to_string())));
+                        let refusal = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": Value::Null,
+                            "error": {
+                                "code": code,
+                                "message": format!("message refused by CloakPipe: {reason}"),
+                                "data": { "reason": reason, "release": gate.release() },
+                            },
+                        });
+                        if write_line(&agent_out, &refusal.to_string()).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
+                            let mut violation = None;
+                            if let Some(gate) = &gate {
+                                let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                                if let Err(denial) = gate.check(tool, &now) {
+                                    let code = denial.code();
+                                    if gate.mode == GateMode::Enforce {
+                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", code.clone())));
+                                        // A notification (no id member) takes no response;
+                                        // `"id": null` is a request and is answered.
+                                        if let Some(id) = msg.get("id") {
+                                            let refusal = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "error": {
+                                                    "code": TOOL_REFUSED,
+                                                    "message": format!("tool call refused by CloakPipe: {code}"),
+                                                    "data": { "reason": code, "tool": tool, "release": gate.release() },
+                                                },
+                                            });
+                                            if write_line(&agent_out, &refusal.to_string()).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
+                                    violation = Some(("gate_violation", code));
+                                }
+                            }
                             let masked = {
                                 let mut v = vault.lock().expect("vault poisoned");
                                 mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
                             };
-                            if masked > 0 {
-                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked);
+                            if masked > 0 || violation.is_some() {
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, violation);
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -112,7 +176,6 @@ where
         let ledger = ledger.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(from_upstream);
-            let mut w = agent_out;
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let out = match serde_json::from_str::<Value>(&line) {
@@ -122,16 +185,13 @@ where
                                 let v = vault.lock().expect("vault poisoned");
                                 rehydrate_value(msg.pointer_mut("/result/content"), &v);
                             }
-                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0);
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, None);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
                     }
                     Err(_) => line,
                 };
-                if w.write_all(out.as_bytes()).is_err()
-                    || w.write_all(b"\n").is_err()
-                    || w.flush().is_err()
-                {
+                if write_line(&agent_out, &out).is_err() {
                     break;
                 }
             }
@@ -146,6 +206,63 @@ where
     // exiting cleans it up.
     let _ = ingress.join();
     Ok(())
+}
+
+/// JSON-RPC members whose spelling must be exact. Some JSON decoders (Go's
+/// `encoding/json`) match keys case-insensitively, so `"Method"` could reach
+/// the upstream as a method the gate never saw.
+const CANONICAL_KEYS: [&str; 6] = ["jsonrpc", "id", "method", "params", "result", "error"];
+const CANONICAL_PARAMS: [&str; 2] = ["name", "arguments"];
+
+/// Can the gate read this agent message in full? Refuses (reason, JSON-RPC
+/// code) anything else: text serde_json rejects but a laxer upstream might
+/// accept (out-of-range numbers, lone surrogates, deep nesting), batches,
+/// non-objects, and case variants of JSON-RPC member names.
+fn screen(line: &str) -> Result<(), (&'static str, i64)> {
+    const PARSE_ERROR: i64 = -32700;
+    const INVALID_REQUEST: i64 = -32600;
+    let msg: Value = serde_json::from_str(line).map_err(|_| ("unreadable", PARSE_ERROR))?;
+    let obj = match &msg {
+        Value::Object(o) => o,
+        Value::Array(_) => return Err(("batch", INVALID_REQUEST)),
+        _ => return Err(("not_an_object", INVALID_REQUEST)),
+    };
+    fn noncanonical(map: &serde_json::Map<String, Value>, canonical: &[&str]) -> bool {
+        map.keys().any(|k| {
+            let folded = fold(k);
+            canonical.iter().any(|c| folded == *c && k.as_str() != *c)
+        })
+    }
+    if noncanonical(obj, &CANONICAL_KEYS) {
+        return Err(("noncanonical", INVALID_REQUEST));
+    }
+    if let Some(Value::Object(params)) = obj.get("params") {
+        if noncanonical(params, &CANONICAL_PARAMS) {
+            return Err(("noncanonical", INVALID_REQUEST));
+        }
+    }
+    Ok(())
+}
+
+/// Case-fold as lax decoders do (ASCII plus the two non-ASCII letters that
+/// fold to ASCII: U+017F long s and U+212A Kelvin sign).
+fn fold(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            c => c,
+        })
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Write one JSON-RPC line to the agent.
+fn write_line<W: Write>(out: &Mutex<W>, line: &str) -> std::io::Result<()> {
+    let mut w = out.lock().map_err(|_| std::io::Error::other("agent writer poisoned"))?;
+    w.write_all(line.as_bytes())?;
+    w.write_all(b"\n")?;
+    w.flush()
 }
 
 /// Pseudonymize every string leaf under `v`, returning the number of entities
@@ -212,6 +329,8 @@ pub fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
 }
 
 /// Append a no-PII hop record (categories/count only, never text). Best-effort.
+/// `gate` adds one metadata entry with a gate reason code.
+#[allow(clippy::too_many_arguments)]
 fn record_hop(
     ledger: &SharedLedger,
     tenant: uuid::Uuid,
@@ -219,6 +338,8 @@ fn record_hop(
     release: Option<[u8; 32]>,
     hop: Hop,
     count: usize,
+    kind: ActionKind,
+    gate: Option<(&str, String)>,
 ) {
     let Some(ledger) = ledger else { return };
     let Ok(mut store) = ledger.lock() else {
@@ -243,7 +364,7 @@ fn record_hop(
         })
         .action(Action {
             entity_type: "mcp".to_string(),
-            kind: ActionKind::Pseudonymize,
+            kind,
             token_ref: Some(uuid::Uuid::new_v4().to_string()),
         })
         .identities(Identity {
@@ -254,6 +375,9 @@ fn record_hop(
         });
     if let Some(release) = release {
         builder = builder.release(release);
+    }
+    if let Some((key, code)) = gate {
+        builder = builder.metadata(key, cloakpipe_ledger::MetadataValue::OpaqueId(code));
     }
     let appended = builder
         .build()

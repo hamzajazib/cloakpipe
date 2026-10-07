@@ -7,7 +7,9 @@
 //! sits between an agent and an upstream MCP server, masking PII in tool calls
 //! and rehydrating results.
 
+pub mod gate;
 pub mod proxy;
+pub use gate::{Denial, GateMode, ToolGate};
 pub use proxy::{run_proxy, run_proxy_io, stable_ids, ProxyContext};
 
 use cloakpipe_core::{

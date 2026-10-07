@@ -332,6 +332,11 @@ cloakpipe start                            # edit cloakpipe.toml to change port/
 # Check the proxy is up
 curl http://127.0.0.1:8900/health
 
+# Seal an evidence bundle and anchor it at an RFC 3161 TSA + Sigstore Rekor,
+# then verify offline (see docs/ANCHORING.md)
+cloakpipe anchor bundle.json --key key.json --tsa-root freetsa-root.pem --rekor-key rekor.pub --out anchored.json
+cloakpipe-verify all anchored.json --tsa-root freetsa-root.pem --rekor-key rekor.pub
+
 # Other commands: setup (guided), stats, mcp, tree, vector, sessions
 cloakpipe --help
 ```
