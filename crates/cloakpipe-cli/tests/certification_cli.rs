@@ -680,7 +680,7 @@ fn certify_accepts_a_json_policy() {
     let policy = write(
         &dir,
         "policy.json",
-        r#"{"apiVersion":"cloakpipe.dev/v1alpha1","kind":"CertificationPolicy","name":"p","version":"1","validityDays":7}"#,
+        r#"{"apiVersion":"cloakpipe.co/v1alpha1","kind":"CertificationPolicy","name":"p","version":"1","validityDays":7}"#,
     );
     let m = manifest();
     let (code, out, err) = run(&[

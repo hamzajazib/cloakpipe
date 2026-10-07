@@ -1,5 +1,5 @@
 # Certification policy used by the CLI tests and the CI certification gate.
-apiVersion: cloakpipe.dev/v1alpha1
+apiVersion: cloakpipe.co/v1alpha1
 kind: CertificationPolicy
 name: support-prod
 version: "11"

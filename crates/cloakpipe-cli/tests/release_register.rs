@@ -83,7 +83,7 @@ fn register(args: &[&str], url: Option<&str>) -> (i32, String, String) {
     (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
 }
 
-const CREATED: &str = r#"{"created":true,"release":{"agent":"support-agent","version":"184","manifest_hash":"sha256:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32"},"baseline":{"version":"183","source":"production","manifest_hash":"sha256:00"},"diff":{"changes":[{}],"required_suites":["prompt_contract","privacy"],"requires_approval":true},"evidence":{"seq":7}}"#;
+const CREATED: &str = r#"{"created":true,"release":{"agent":"support-agent","version":"184","manifest_hash":"sha256:28b40cf5db41c164624094de4df3943e3a5f1d7238e78727af9eb5c88be2efea"},"baseline":{"version":"183","source":"production","manifest_hash":"sha256:00"},"diff":{"changes":[{}],"required_suites":["prompt_contract","privacy"],"requires_approval":true},"evidence":{"seq":7}}"#;
 
 #[test]
 fn posts_the_manifest_to_the_agents_release_endpoint_with_the_api_key() {
@@ -99,7 +99,7 @@ fn posts_the_manifest_to_the_agents_release_endpoint_with_the_api_key() {
     assert_eq!(body["spec"]["model"]["ref"], "model:openai/gpt-5@2026-08-01");
 
     assert!(out.contains("registered"), "{out}");
-    assert!(out.contains("sha256:ae7bc9e4"), "{out}");
+    assert!(out.contains("sha256:28b40cf5"), "{out}");
     assert!(out.contains("prompt_contract"), "{out}");
     assert!(out.contains("approval required"), "{out}");
 }

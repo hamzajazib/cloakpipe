@@ -185,6 +185,13 @@ jobs:
           want=$(cat "$TESTDATA/support-agent-184.hash")
           echo "got  $got"; echo "want $want"
           test "$got" = "$want"
+      - name: Legacy cloakpipe.dev golden hash is unchanged
+        # Manifests issued before the cloakpipe.co rename keep their hash.
+        run: |
+          got=$(./target/debug/cloakpipe release hash "$TESTDATA/support-agent-184.legacy.yaml")
+          want=$(cat "$TESTDATA/support-agent-184.legacy.hash")
+          echo "got  $got"; echo "want $want"
+          test "$got" = "$want"
       - name: Rust and the reference implementation agree
         # tools/release_hash_reference.py is a stdlib-only reimplementation of
         # the spec; the manifest JSON is taken from the in-toto predicate.
@@ -356,6 +363,15 @@ jobs:
         run: |
           $VERIFY release-pack "$WORK/pack.json" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
             --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z
+      - name: Legacy cloakpipe.dev pack and certification still verify (must exit 0)
+        # Issued by CloakPipe 0.10, before identifiers moved to cloakpipe.co.
+        env:
+          LEGACY: crates/cloakpipe-verify/tests/fixtures/legacy-cloakpipe-dev
+        run: |
+          $VERIFY release-pack "$LEGACY/pack.json" --trust "$LEGACY/exporter.pub.json" \
+            --ledger-trust "$LEGACY/ledger.pub.json" --cert-trust "$LEGACY/cert.pub.json" --now 2026-10-15T00:00:00Z
+          $CP release verify-cert "$LEGACY/cert.dsse.json" --trust "$LEGACY/cert.pub.json" \
+            --release "$LEGACY/manifest.yaml" --now 2026-10-02T00:00:00Z
       - name: Tampered or inconsistent packs must exit 1
         run: |
           expect_fail() {
