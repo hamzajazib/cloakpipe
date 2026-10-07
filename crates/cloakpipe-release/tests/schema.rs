@@ -36,12 +36,26 @@ fn fixtures_conform() {
 }
 
 #[test]
+fn schema_accepts_legacy_namespace_manifests() {
+    // Manifests written before the cloakpipe.co rename stay valid.
+    assert!(schema().is_valid(&fixture_yaml("support-agent-184.legacy.yaml")));
+}
+
+#[test]
+fn schema_id_is_in_the_current_namespace() {
+    let s: Value = serde_json::from_str(&std::fs::read_to_string(root().join("schemas/agent-release.schema.json")).unwrap()).unwrap();
+    assert_eq!(s["$id"], cloakpipe_release::namespace::AGENT_RELEASE_SCHEMA_ID);
+}
+
+#[test]
 fn schema_rejects_structural_errors() {
     let v = schema();
     let cases: Vec<(&str, Mutation)> = vec![
         ("unknown field", Box::new(|m| m["spec"]["toolz"] = json!([]))),
         ("wrong kind", Box::new(|m| m["kind"] = json!("Deployment"))),
         ("wrong apiVersion", Box::new(|m| m["apiVersion"] = json!("cloakpipe.dev/v9"))),
+        ("wrong apiVersion (current namespace)", Box::new(|m| m["apiVersion"] = json!("cloakpipe.co/v9"))),
+        ("foreign apiVersion domain", Box::new(|m| m["apiVersion"] = json!("cloakpipe.com/v1alpha1"))),
         ("malformed ref", Box::new(|m| m["spec"]["tools"][0]["ref"] = json!("refund@4"))),
         ("unversioned ref", Box::new(|m| m["spec"]["model"]["ref"] = json!("model:openai/gpt-5"))),
         ("moving label", Box::new(|m| m["spec"]["model"]["ref"] = json!("model:openai/gpt-5@nightly"))),

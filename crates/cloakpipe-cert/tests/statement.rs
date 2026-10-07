@@ -127,7 +127,7 @@ fn statement_has_in_toto_v1_shape() {
     assert_eq!(s["_type"], STATEMENT_TYPE);
     assert_eq!(STATEMENT_TYPE, "https://in-toto.io/Statement/v1");
     assert_eq!(s["predicateType"], PREDICATE_TYPE);
-    assert_eq!(PREDICATE_TYPE, "https://cloakpipe.dev/attestations/certification/v1alpha1");
+    assert_eq!(PREDICATE_TYPE, "https://cloakpipe.co/attestations/certification/v1alpha1");
     assert_eq!(
         s["subject"],
         json!([{ "name": "agent-release:support-agent", "digest": { "sha256": RELEASE_HEX } }])

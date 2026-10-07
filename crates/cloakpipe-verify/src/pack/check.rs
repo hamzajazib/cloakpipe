@@ -367,8 +367,12 @@ impl<'a> Checker<'a> {
             Ok(p) => p,
             Err(e) => return self.fail(format!("pack: malformed: {e}")),
         };
-        if pack.api_version != PACK_API_VERSION {
-            self.fail(format!("pack: apiVersion {:?} is not {PACK_API_VERSION:?}", pack.api_version));
+        if !cloakpipe_release::namespace::is_known_api_version(&pack.api_version) {
+            self.fail(format!(
+                "pack: apiVersion {:?} is not {PACK_API_VERSION:?} (or legacy {:?})",
+                pack.api_version,
+                cloakpipe_release::namespace::LEGACY_API_VERSION
+            ));
         }
         if pack.kind != PACK_KIND {
             self.fail(format!("pack: kind {:?} is not {PACK_KIND:?}", pack.kind));

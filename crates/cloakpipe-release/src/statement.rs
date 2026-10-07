@@ -7,7 +7,9 @@ use crate::manifest::AgentRelease;
 use serde_json::{json, Value};
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-pub const PREDICATE_TYPE: &str = "https://cloakpipe.dev/attestations/agent-release/v1alpha1";
+/// The `predicateType` writers emit; see
+/// [`crate::namespace::is_known_agent_release_predicate_type`] for readers.
+pub const PREDICATE_TYPE: &str = crate::namespace::AGENT_RELEASE_PREDICATE_TYPE;
 
 impl AgentRelease {
     pub fn intoto_statement(&self) -> Value {

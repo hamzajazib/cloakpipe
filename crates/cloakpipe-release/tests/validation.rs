@@ -35,6 +35,10 @@ fn wrong_api_version_or_kind_is_rejected() {
     assert!(codes(&v).contains(&IssueCode::UnsupportedApiVersion));
 
     let mut v = base_json();
+    v["apiVersion"] = json!("cloakpipe.co/v9");
+    assert!(codes(&v).contains(&IssueCode::UnsupportedApiVersion));
+
+    let mut v = base_json();
     v["kind"] = json!("Deployment");
     assert!(codes(&v).contains(&IssueCode::UnsupportedKind));
 }

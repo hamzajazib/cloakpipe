@@ -1,0 +1,106 @@
+{
+  "format": "cloakpipe.bundle",
+  "format_version": 4,
+  "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+  "created_at": "2026-10-07T17:56:40.995388+00:00",
+  "records": [
+    {
+      "seq": 0,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=0\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_prompt\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_0)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=0000000000000000000000000000000000000000000000000000000000000000\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "8db6ee507a4f9ccbacb03e47acd177ea4f018eb7eb9bca3340d3cc3060c6decf",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "seq": 1,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=1\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_response\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_1)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=8db6ee507a4f9ccbacb03e47acd177ea4f018eb7eb9bca3340d3cc3060c6decf\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "659fef7ec897eda2f19f3970f6fedf26d90fe01bc61bd7ab467a89c76cf93765",
+      "prev_hash": "8db6ee507a4f9ccbacb03e47acd177ea4f018eb7eb9bca3340d3cc3060c6decf"
+    },
+    {
+      "seq": 2,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=2\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_prompt\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_2)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=659fef7ec897eda2f19f3970f6fedf26d90fe01bc61bd7ab467a89c76cf93765\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "077b4b544c12617b2039196a858eec0d2cb9fa8f6dadfc30a48a00b516e26859",
+      "prev_hash": "659fef7ec897eda2f19f3970f6fedf26d90fe01bc61bd7ab467a89c76cf93765"
+    },
+    {
+      "seq": 3,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=3\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_response\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_3)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=077b4b544c12617b2039196a858eec0d2cb9fa8f6dadfc30a48a00b516e26859\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "d32b2f1dcf8f4ffe6d750acd5632ddcf6fe80db5f460eea69d88956195672f2c",
+      "prev_hash": "077b4b544c12617b2039196a858eec0d2cb9fa8f6dadfc30a48a00b516e26859"
+    },
+    {
+      "seq": 4,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=4\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_prompt\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_4)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=d32b2f1dcf8f4ffe6d750acd5632ddcf6fe80db5f460eea69d88956195672f2c\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "f5301952105ea5952ef6236963729c427080a1c09ee4a8a7b7c5fa8563474d65",
+      "prev_hash": "d32b2f1dcf8f4ffe6d750acd5632ddcf6fe80db5f460eea69d88956195672f2c"
+    },
+    {
+      "seq": 5,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=5\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_response\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_5)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=f5301952105ea5952ef6236963729c427080a1c09ee4a8a7b7c5fa8563474d65\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "420ff18664f3aec6b6a183697328835b39832bddc39e80316fe0b00eb3779f8c",
+      "prev_hash": "f5301952105ea5952ef6236963729c427080a1c09ee4a8a7b7c5fa8563474d65"
+    },
+    {
+      "seq": 6,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=6\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_prompt\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_6)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=420ff18664f3aec6b6a183697328835b39832bddc39e80316fe0b00eb3779f8c\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "d7b07b9d0234d7184d58682683239ec4e204975b4a97c21a04d06d69a02030d1",
+      "prev_hash": "420ff18664f3aec6b6a183697328835b39832bddc39e80316fe0b00eb3779f8c"
+    },
+    {
+      "seq": 7,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=7\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_response\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_7)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=d7b07b9d0234d7184d58682683239ec4e204975b4a97c21a04d06d69a02030d1\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "48b97f618c2aa7a3fa7df382ad153ac26035a3454a226a68355f91f29aa4a209",
+      "prev_hash": "d7b07b9d0234d7184d58682683239ec4e204975b4a97c21a04d06d69a02030d1"
+    },
+    {
+      "seq": 8,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=8\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_prompt\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_8)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=48b97f618c2aa7a3fa7df382ad153ac26035a3454a226a68355f91f29aa4a209\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "9d5898a84f592a6ba71265a42be0cc6ac2cf302e96b30d0b48f563f975a811c3",
+      "prev_hash": "48b97f618c2aa7a3fa7df382ad153ac26035a3454a226a68355f91f29aa4a209"
+    },
+    {
+      "seq": 9,
+      "tenant_id": "bb4633bc-74f9-4132-8ce6-e70820f24a4c",
+      "canonical_bytes": "seq=9\nts=2026-10-07T17:56:40Z\ntenant_id=bb4633bc-74f9-4132-8ce6-e70820f24a4c\nhop=llm_response\ndetections=(PAN|1|regex|<confidence>)\nactions=(PAN|pseudonymize|tok_9)\npolicy=(default|0000000|default-allow|allow)\nidentities=(00000000-0000-0000-0000-000000000000|-|unknown|unknown)\negress=(unknown|0000000000000000000000000000000000000000000000000000000000000000)\nprev_hash=9d5898a84f592a6ba71265a42be0cc6ac2cf302e96b30d0b48f563f975a811c3\nmetadata=release_hash=hash:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32;",
+      "record_hash": "092b5f76b45061ded711a62358c6ec34b5422c5c93bd8cc1d746358a3f397250",
+      "prev_hash": "9d5898a84f592a6ba71265a42be0cc6ac2cf302e96b30d0b48f563f975a811c3"
+    }
+  ],
+  "batch_heads": [],
+  "signer_public_keys": [
+    {
+      "key_id": "default",
+      "algorithm": "ed25519",
+      "public_key": "13211de012900aed90c87993b45b7300dd0ee7cf22af441f03120c9bf4caa7da"
+    }
+  ],
+  "anchor_receipts": [],
+  "manifest": {
+    "bundle_id": "bundle-2c0ef59e4d58",
+    "range_start": "2026-10-07T17:56:40Z",
+    "range_end": "2026-10-07T17:56:40Z",
+    "record_count": 10,
+    "first_seq": 0,
+    "last_seq": 9,
+    "batch_head_ids": [],
+    "anchor_receipt_refs": [],
+    "policy_pack_versions": [],
+    "operator": "default",
+    "created_at": "2026-10-07T17:56:40Z",
+    "chain_tip": "092b5f76b45061ded711a62358c6ec34b5422c5c93bd8cc1d746358a3f397250",
+    "signature": {
+      "key_id": "default",
+      "algorithm": "ed25519",
+      "value": "ae229611cf80f03dd0e0e9f19a06bc617e4b92495e200f04b050828f3717373e5e07a75451469d7cd5d8afda4ce9bae72863689b885ab91ea93883f8bedc7607"
+    }
+  }
+}

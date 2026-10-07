@@ -1,0 +1,4 @@
+[
+  {"type": "release_registered", "at": "2026-09-30T09:00:00Z", "actor": "ci:legacy-fixture", "agent": "support-agent", "version": "184"},
+  {"type": "release_promoted", "at": "2026-10-02T00:00:00Z", "actor": "alice", "environment": "production"}
+]

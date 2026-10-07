@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cloakpipe.dev/schemas/agent-release/v1alpha1.json",
+  "$id": "https://cloakpipe.co/schemas/agent-release/v1alpha1.json",
   "title": "CloakPipe Agent Release",
   "description": "The complete, immutable set of behaviour-affecting components deployed as one unit. References are `<kind>:<name>@<version>`; versions must be a sha256 digest or start with a digit (optionally after `v`), so moving labels such as `@latest` or `@nightly` are rejected. Keys that collide after Unicode NFC normalisation are rejected by `cloakpipe release validate`.",
   "type": "object",
@@ -13,7 +13,11 @@
   ],
   "properties": {
     "apiVersion": {
-      "const": "cloakpipe.dev/v1alpha1"
+      "description": "Writers emit `cloakpipe.co/v1alpha1`. `cloakpipe.dev/v1alpha1`, written by CloakPipe up to 0.10, is still accepted.",
+      "enum": [
+        "cloakpipe.co/v1alpha1",
+        "cloakpipe.dev/v1alpha1"
+      ]
     },
     "kind": {
       "const": "AgentRelease"

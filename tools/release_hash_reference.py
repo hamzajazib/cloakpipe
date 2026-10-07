@@ -12,7 +12,17 @@ import json
 import sys
 import unicodedata
 
-HASH_DOMAIN = b"cloakpipe.dev/agent-release/v1"
+# The hash domain follows the manifest's apiVersion namespace: manifests
+# issued under the legacy cloakpipe.dev namespace keep their original domain,
+# so their hashes stay valid. Any other apiVersion uses the current domain
+# (validation rejects unsupported versions).
+HASH_DOMAIN = b"cloakpipe.co/agent-release/v1"
+LEGACY_API_VERSION = "cloakpipe.dev/v1alpha1"
+LEGACY_HASH_DOMAIN = b"cloakpipe.dev/agent-release/v1"
+
+
+def hash_domain(manifest):
+    return LEGACY_HASH_DOMAIN if manifest.get("apiVersion") == LEGACY_API_VERSION else HASH_DOMAIN
 
 
 def canonical_view(m):
@@ -92,7 +102,7 @@ def jcs(v):
 
 def manifest_hash(manifest):
     body = jcs(nfc(canonical_view(manifest))).encode("utf-8")
-    return "sha256:" + hashlib.sha256(HASH_DOMAIN + b"\n" + body).hexdigest()
+    return "sha256:" + hashlib.sha256(hash_domain(manifest) + b"\n" + body).hexdigest()
 
 
 if __name__ == "__main__":
