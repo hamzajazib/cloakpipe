@@ -51,6 +51,10 @@ pub mod bundle_format {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub range_end: Option<String>,
         pub records: Vec<Record>,
+        /// Per-record Merkle inclusion proofs into the covering batch head
+        /// (index = record position). Empty until [`super::seal_batch`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub inclusion_proofs: Vec<Option<InclusionProofRef>>,
         #[serde(default)]
         pub batch_heads: Vec<BatchHead>,
         #[serde(default)]
@@ -120,6 +124,44 @@ pub mod bundle_format {
             inclusion_proof: Vec<ProofStepRef>,
             log_pubkey: HexPubkey,
         },
+        /// RFC 3161 timestamp from an external TSA (see
+        /// `cloakpipe_anchor::receipt::ExternalReceipt`).
+        Rfc3161 { batch_id: String, subject_hash: Hex32, tsa_url: String, nonce: String, tsr: String },
+        /// Sigstore Rekor entry, verbatim.
+        Rekor { batch_id: String, subject_hash: Hex32, rekor_url: String, entry_uuid: String, entry: serde_json::Value },
+    }
+
+    impl From<cloakpipe_anchor::receipt::ExternalReceipt> for AnchorReceiptRef {
+        fn from(r: cloakpipe_anchor::receipt::ExternalReceipt) -> Self {
+            use cloakpipe_anchor::receipt::ExternalReceipt as E;
+            match r {
+                E::Rfc3161 { batch_id, subject_hash, tsa_url, nonce, tsr } => {
+                    AnchorReceiptRef::Rfc3161 { batch_id, subject_hash, tsa_url, nonce, tsr }
+                }
+                E::Rekor { batch_id, subject_hash, rekor_url, entry_uuid, entry } => {
+                    AnchorReceiptRef::Rekor { batch_id, subject_hash, rekor_url, entry_uuid, entry }
+                }
+            }
+        }
+    }
+
+    impl AnchorReceiptRef {
+        pub fn batch_id(&self) -> &str {
+            match self {
+                AnchorReceiptRef::Tsa { batch_id, .. }
+                | AnchorReceiptRef::Log { batch_id, .. }
+                | AnchorReceiptRef::Rfc3161 { batch_id, .. }
+                | AnchorReceiptRef::Rekor { batch_id, .. } => batch_id,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct InclusionProofRef {
+        pub batch_id: String,
+        pub leaf_index: u64,
+        pub total_leaves: u64,
+        pub steps: Vec<ProofStepRef>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +214,8 @@ pub enum ExportError {
     Store(#[from] crate::store::StoreError),
     #[error("serialize error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("cannot anchor: {0}")]
+    Anchoring(String),
 }
 
 /// Export every record for `tenant_id` into a v3 bundle.
@@ -201,6 +245,7 @@ pub fn export_bundle<S: Signer>(
         range_start: None,
         range_end: None,
         records,
+        inclusion_proofs: vec![],
         batch_heads: vec![],
         signer_public_keys: vec![SignerKey {
             key_id: operator_key_id.clone(),
@@ -262,6 +307,7 @@ pub fn export_range<S: Signer>(
         range_start: Some(range_start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         range_end: Some(range_end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         records: filtered,
+        inclusion_proofs: vec![],
         batch_heads: vec![],
         signer_public_keys: vec![SignerKey {
             key_id: operator_key_id.clone(),
@@ -281,6 +327,143 @@ pub fn export_range<S: Signer>(
     )?);
 
     Ok(bundle)
+}
+
+/// Seal every record of an exported bundle under one signed batch head and
+/// add per-record inclusion proofs; the manifest is re-signed to list the
+/// head. Returns the head, whose JSON bytes are what external anchors
+/// commit to.
+///
+/// Fails closed: the bundle must have records, no batch head yet, a
+/// manifest signed by `signer`, and no record stamped after `signed_time`.
+pub fn seal_batch<S: Signer>(
+    bundle: &mut Bundle,
+    signer: &S,
+    batch_id: &str,
+    signed_time: chrono::DateTime<Utc>,
+) -> Result<cloakpipe_anchor::batch::SignedBatchHead, ExportError> {
+    let refuse = |m: String| ExportError::Anchoring(m);
+    let operator = check_operator(bundle, signer)?;
+    if !bundle.batch_heads.is_empty() || !bundle.anchor_receipts.is_empty() {
+        return Err(refuse("bundle is already sealed".into()));
+    }
+    let (first, last) = match (bundle.records.first(), bundle.records.last()) {
+        (Some(f), Some(l)) => (f.seq, l.seq),
+        _ => return Err(refuse("bundle has no records".into())),
+    };
+    let signed_time_s = signed_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut leaves = Vec::with_capacity(bundle.records.len());
+    for (i, r) in bundle.records.iter().enumerate() {
+        if r.seq != first + i as u64 {
+            return Err(refuse(format!("record #{} breaks the seq range", r.seq)));
+        }
+        let ts = r.canonical_bytes.lines().find_map(|l| l.strip_prefix("ts=")).ok_or_else(|| refuse(format!("record #{} has no ts", r.seq)))?;
+        let ts = chrono::DateTime::parse_from_rfc3339(ts).map_err(|_| refuse(format!("record #{} ts unreadable", r.seq)))?;
+        if ts.timestamp() > signed_time.timestamp() {
+            return Err(refuse(format!("record #{} is stamped after the seal time {signed_time_s}", r.seq)));
+        }
+        let mut leaf = [0u8; 32];
+        hex::decode_to_slice(&r.record_hash, &mut leaf).map_err(|_| refuse(format!("record #{} hash", r.seq)))?;
+        leaves.push(leaf);
+    }
+    let tree = cloakpipe_anchor::merkle::MerkleTree::from_hashed_leaves(leaves);
+    let root = hex_lower(&tree.root());
+
+    let mut head = cloakpipe_anchor::batch::build_signed_batch_head(
+        batch_id,
+        first,
+        last,
+        root.as_str(),
+        signer.algorithm(),
+        Some(signed_time_s),
+        operator.clone(),
+        signer.algorithm(),
+        String::new(),
+    );
+    let payload = serde_json::to_vec(&cloakpipe_anchor::batch::BatchHeadUnsigned::from(&head))?;
+    head.signature.value = hex_lower(&signer.sign_bytes(&payload));
+
+    bundle.inclusion_proofs = (0..bundle.records.len())
+        .map(|i| {
+            let p = tree.inclusion_proof(i);
+            Some(InclusionProofRef {
+                batch_id: batch_id.to_string(),
+                leaf_index: i as u64,
+                total_leaves: bundle.records.len() as u64,
+                steps: p
+                    .steps
+                    .into_iter()
+                    .map(|st| ProofStepRef {
+                        position: match st.position {
+                            cloakpipe_anchor::merkle::ProofPosition::Left => "left".into(),
+                            cloakpipe_anchor::merkle::ProofPosition::Right => "right".into(),
+                        },
+                        hash: hex_lower(&st.hash),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    bundle.batch_heads.push(BatchHead {
+        batch_id: head.batch_id.clone(),
+        first_seq: head.first_seq,
+        last_seq: head.last_seq,
+        merkle_root: head.merkle_root.clone(),
+        algorithm: head.algorithm.clone(),
+        signed_time: head.signed_time.clone(),
+        signature: SignedBatchHead {
+            key_id: head.signature.key_id.clone(),
+            algorithm: head.signature.algorithm.clone(),
+            value: head.signature.value.clone(),
+        },
+    });
+    reseal_manifest(bundle, signer, &operator)?;
+    Ok(head)
+}
+
+/// Attach external anchor receipts for heads already in the bundle and
+/// re-sign the manifest so it lists them.
+pub fn attach_receipts<S: Signer>(
+    bundle: &mut Bundle,
+    receipts: Vec<cloakpipe_anchor::receipt::ExternalReceipt>,
+    signer: &S,
+) -> Result<(), ExportError> {
+    let operator = check_operator(bundle, signer)?;
+    for r in receipts {
+        if !bundle.batch_heads.iter().any(|h| h.batch_id == r.batch_id()) {
+            return Err(ExportError::Anchoring(format!("receipt for unknown batch `{}`", r.batch_id())));
+        }
+        bundle.anchor_receipts.push(r.into());
+    }
+    reseal_manifest(bundle, signer, &operator)
+}
+
+/// The manifest's operator key id, if `signer` holds that key.
+fn check_operator<S: Signer>(bundle: &Bundle, signer: &S) -> Result<String, ExportError> {
+    let m = bundle.manifest.as_ref().ok_or_else(|| ExportError::Anchoring("bundle has no signed manifest".into()))?;
+    let declared = bundle
+        .signer_public_keys
+        .iter()
+        .find(|k| k.key_id == m.operator)
+        .ok_or_else(|| ExportError::Anchoring(format!("operator key `{}` not declared", m.operator)))?;
+    if declared.public_key != hex_lower(&signer.public_key()) || declared.algorithm != signer.algorithm() {
+        return Err(ExportError::Anchoring(format!("the signing key is not the bundle operator `{}`", m.operator)));
+    }
+    Ok(m.operator.clone())
+}
+
+/// Re-sign the manifest after heads or receipts changed, keeping its
+/// bundle id and range.
+fn reseal_manifest<S: Signer>(bundle: &mut Bundle, signer: &S, operator: &str) -> Result<(), ExportError> {
+    let old = bundle.manifest.take().ok_or_else(|| ExportError::Anchoring("bundle has no signed manifest".into()))?;
+    let (rs, re) = (bundle.range_start.clone(), bundle.range_end.clone());
+    bundle.range_start = Some(old.range_start.clone());
+    bundle.range_end = Some(old.range_end.clone());
+    let m = build_manifest(bundle, operator, signer, &old.bundle_id);
+    bundle.range_start = rs;
+    bundle.range_end = re;
+    bundle.manifest = Some(m?);
+    Ok(())
 }
 
 fn record_to_bundle_record(s: crate::store::StoredRecord) -> Record {
@@ -335,6 +518,8 @@ fn build_manifest<S: Signer>(
                 log_index,
                 ..
             } => format!("log:{batch_id}:{log_index}"),
+            AnchorReceiptRef::Rfc3161 { batch_id, nonce, .. } => format!("rfc3161:{batch_id}:{nonce}"),
+            AnchorReceiptRef::Rekor { batch_id, entry_uuid, .. } => format!("rekor:{batch_id}:{entry_uuid}"),
         })
         .collect();
     let policy_pack_versions: Vec<String> =

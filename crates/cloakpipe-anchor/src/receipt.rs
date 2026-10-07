@@ -226,6 +226,27 @@ impl AnchorReceipt {
     }
 }
 
+/// A receipt from an external anchor, in the bundle's wire shape
+/// (`anchor_receipts[]`, tagged by `kind`). Must stay field-compatible with
+/// `cloakpipe-verify::bundle::AnchorReceiptRef::{Rfc3161, Rekor}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExternalReceipt {
+    /// RFC 3161: the full DER `TimeStampResp` (base64) and request nonce
+    /// (hex) over SHA-256 of the head's JSON bytes.
+    Rfc3161 { batch_id: String, subject_hash: String, tsa_url: String, nonce: String, tsr: String },
+    /// Rekor: the log's entry verbatim, keyed by its UUID.
+    Rekor { batch_id: String, subject_hash: String, rekor_url: String, entry_uuid: String, entry: serde_json::Value },
+}
+
+impl ExternalReceipt {
+    pub fn batch_id(&self) -> &str {
+        match self {
+            ExternalReceipt::Rfc3161 { batch_id, .. } | ExternalReceipt::Rekor { batch_id, .. } => batch_id,
+        }
+    }
+}
+
 /// Compute the canonical subject hash for a batch head. Returns raw
 /// bytes; the producer hex-encodes before placing in the receipt.
 pub fn subject_hash_for(head: &SignedBatchHead) -> [u8; 32] {

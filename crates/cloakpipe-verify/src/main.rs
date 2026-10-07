@@ -5,7 +5,8 @@
 //! ```text
 //! cloakpipe-verify chain   <bundle.json>   # hash chain unbroken, no seq gaps
 //! cloakpipe-verify sigs    <bundle.json>   # Ed25519 batch-head signatures valid
-//! cloakpipe-verify anchors <bundle.json>   # TSA + log receipts valid offline
+//! cloakpipe-verify anchors <bundle.json> [--tsa-root PEM] [--rekor-key PEM]
+//!                                          # anchor receipts valid offline
 //! cloakpipe-verify all     <bundle.json> [--trust-key KEYID=HEX]...
 //!                                          # everything; exit 0 / nonzero for CI
 //! ```
@@ -45,7 +46,12 @@ fn run(args: &[String]) -> Result<ExitCode> {
         anyhow::bail!("missing bundle path");
     }
 
-    let trusted = parse_trust_keys(&args[3.min(args.len())..])?;
+    let opts = parse_opts(&args[3.min(args.len())..])?;
+    if !matches!(cmd, "anchors" | "all") && (opts.tsa_root.is_some() || opts.rekor_key.is_some()) {
+        anyhow::bail!("--tsa-root / --rekor-key apply only to `anchors` and `all`");
+    }
+    let trusted = opts.trust_keys;
+    let anchor_trust = load_anchor_trust(opts.tsa_root.as_deref(), opts.rekor_key.as_deref())?;
 
     match cmd {
         "chain" => {
@@ -80,9 +86,15 @@ fn run(args: &[String]) -> Result<ExitCode> {
         }
         "all" => {
             let b = load_bundle(&path)?;
-            // v2 bundles get full anchor + inclusion-proof checks.
-            if b.format_version >= 2 {
-                match run_all_v2(&b).and_then(|s| {
+            // v2 bundles get full anchor + inclusion-proof checks. So does
+            // any bundle once a trust input is given or receipts are present:
+            // format_version is unsigned, so a lowered version must never
+            // turn anchor checks off.
+            let anchored = anchor_trust.tsa_roots.is_some()
+                || anchor_trust.rekor_key.is_some()
+                || !b.anchor_receipts.is_empty();
+            if b.format_version >= 2 || anchored {
+                match run_all_v2(&b, &anchor_trust).and_then(|s| {
                     let signer = signer_status(&b, &trusted)?;
                     Ok((s, signer))
                 }) {
@@ -116,7 +128,7 @@ fn run(args: &[String]) -> Result<ExitCode> {
         }
         "anchors" => {
             let b = load_bundle(&path)?;
-            match anchor::verify_anchors(&b) {
+            match anchor::verify_anchors_with_trust(&b, &anchor_trust) {
                 Ok(n) => {
                     println!("OK  {n} anchor receipt(s) verified");
                     Ok(ExitCode::from(0))
@@ -161,13 +173,31 @@ fn run(args: &[String]) -> Result<ExitCode> {
     }
 }
 
-/// `--trust-key KEYID=HEX` pairs (64 hex chars = Ed25519 public key).
-fn parse_trust_keys(rest: &[String]) -> Result<std::collections::BTreeMap<String, [u8; 32]>> {
+struct Opts {
+    trust_keys: std::collections::BTreeMap<String, [u8; 32]>,
+    tsa_root: Option<String>,
+    rekor_key: Option<String>,
+}
+
+/// `--trust-key KEYID=HEX` pairs (64 hex chars = Ed25519 public key),
+/// `--tsa-root PEM` and `--rekor-key PEM` (each at most once).
+fn parse_opts(rest: &[String]) -> Result<Opts> {
     let mut keys = std::collections::BTreeMap::new();
+    let (mut tsa_root, mut rekor_key) = (None, None);
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
-        if arg != "--trust-key" {
-            anyhow::bail!("unexpected argument `{arg}`");
+        let slot = match arg.as_str() {
+            "--trust-key" => None,
+            "--tsa-root" => Some(&mut tsa_root),
+            "--rekor-key" => Some(&mut rekor_key),
+            _ => anyhow::bail!("unexpected argument `{arg}`"),
+        };
+        if let Some(slot) = slot {
+            let v = it.next().with_context(|| format!("{arg} needs a PEM file"))?;
+            if slot.replace(v.clone()).is_some() {
+                anyhow::bail!("{arg} given twice");
+            }
+            continue;
         }
         let spec = it.next().context("--trust-key needs KEYID=HEX")?;
         let (id, hex_key) = spec.split_once('=').context("--trust-key needs KEYID=HEX")?;
@@ -176,7 +206,26 @@ fn parse_trust_keys(rest: &[String]) -> Result<std::collections::BTreeMap<String
         key.copy_from_slice(&bytes);
         keys.insert(id.to_string(), key);
     }
-    Ok(keys)
+    Ok(Opts { trust_keys: keys, tsa_root, rekor_key })
+}
+
+/// Trust inputs for external anchors. An unreadable or unparseable file is
+/// a usage error (exit 2), never a silent skip.
+fn load_anchor_trust(tsa_root: Option<&str>, rekor_key: Option<&str>) -> Result<anchor::AnchorTrust> {
+    let read = |p: &str| std::fs::read(p).with_context(|| format!("reading {p}"));
+    let tsa_roots = match tsa_root {
+        Some(p) => Some(
+            cloakpipe_verify::rfc3161::TrustedRoots::from_pem(&read(p)?).map_err(|e| anyhow::anyhow!("--tsa-root {p}: {e}"))?,
+        ),
+        None => None,
+    };
+    let rekor_key = match rekor_key {
+        Some(p) => Some(
+            cloakpipe_verify::rekor::RekorKey::from_pem(&read(p)?).map_err(|e| anyhow::anyhow!("--rekor-key {p}: {e}"))?,
+        ),
+        None => None,
+    };
+    Ok(anchor::AnchorTrust { tsa_roots, rekor_key })
 }
 
 /// "signer trusted" when pinned keys were given and match; an explicit
@@ -209,9 +258,9 @@ struct AllV2Summary {
     chain_tip: bundle::Hex32,
 }
 
-fn run_all_v2(b: &bundle::Bundle) -> Result<AllV2Summary, anyhow::Error> {
+fn run_all_v2(b: &bundle::Bundle, trust: &anchor::AnchorTrust) -> Result<AllV2Summary, anyhow::Error> {
     let summary = verify::verify_all(b).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let anchors = anchor::verify_anchors(b).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let anchors = anchor::verify_anchors_with_trust(b, trust).map_err(|e| anyhow::anyhow!("{e}"))?;
     let proofs = anchor::verify_inclusion_proofs(b).map_err(|e| anyhow::anyhow!("{e}"))?;
     // v3 bundles additionally require a manifest check.
     if b.format_version >= 3 {
@@ -232,10 +281,16 @@ cloakpipe-verify — standalone auditor for CloakPipe evidence bundles
 USAGE:
   cloakpipe-verify chain    <bundle.json>
   cloakpipe-verify sigs     <bundle.json>
-  cloakpipe-verify anchors  <bundle.json>
+  cloakpipe-verify anchors  <bundle.json> [--tsa-root PEM] [--rekor-key PEM]
   cloakpipe-verify proofs   <bundle.json>
   cloakpipe-verify manifest <bundle.json>
-  cloakpipe-verify all      <bundle.json> [--trust-key KEYID=HEX]...
+  cloakpipe-verify all      <bundle.json> [--trust-key KEYID=HEX]... [--tsa-root PEM] [--rekor-key PEM]
+
+TRUST INPUTS (external anchors; never read from the bundle):
+  --tsa-root PEM   root certificate(s) an RFC 3161 TSA must chain to
+  --rekor-key PEM  the Rekor log's public key (rekor.sigstore.dev: /api/v1/log/publicKey)
+  A bundle with rfc3161/rekor receipts fails without the matching input;
+  with an input, every batch head must carry that kind of anchor.
 
 EXITS:
   0   bundle verified

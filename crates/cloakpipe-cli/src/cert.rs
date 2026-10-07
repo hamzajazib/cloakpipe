@@ -123,7 +123,7 @@ fn check_declared(path: &Path, file: &KeyFile, public: &[u8; 32]) -> Res<String>
     Ok(id)
 }
 
-fn signing_key(path: &Path) -> Res<(SigningKey, String)> {
+pub(crate) fn signing_key(path: &Path) -> Res<(SigningKey, String)> {
     let file = read_key_file(path)?;
     let Some(seed) = file.private_key.as_deref().and_then(hex32) else {
         return Err(invalid(format_args!("{}: privateKey must be a 32-byte hex Ed25519 seed", path.display())));
