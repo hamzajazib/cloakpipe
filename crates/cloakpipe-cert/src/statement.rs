@@ -7,7 +7,7 @@
 //! { "_type": "https://in-toto.io/Statement/v1",
 //!   "subject": [{ "name": "agent-release:<agent or 'unknown'>",
 //!                 "digest": { "sha256": "<release hex>" } }],
-//!   "predicateType": "https://cloakpipe.dev/attestations/certification/v1alpha1",
+//!   "predicateType": "https://cloakpipe.co/attestations/certification/v1alpha1",
 //!   "predicate": { "certification": <Certification as camelCase JSON> } }
 //! ```
 //! `Certification.decision.release` must equal `Certification.release`.
@@ -25,7 +25,9 @@
 //! ValidWithLimitations > Valid, plus every reason found:
 //! - **Invalid**: wrong payloadType; undecodable base64/JSON; no signature
 //!   that verifies under a *trusted* key whose `keyid` matches; wrong
-//!   `_type`/`predicateType`; malformed predicate; empty `certification.id`;
+//!   `_type`/`predicateType` (the legacy
+//!   `https://cloakpipe.dev/attestations/certification/v1alpha1` is accepted);
+//!   malformed predicate; empty `certification.id`;
 //!   subject digest ≠
 //!   `certification.release` hex or ≠ `decision.release`; `expected_release`
 //!   given and ≠ subject; `issuedAt`/`validUntil` not RFC 3339, or
@@ -56,8 +58,9 @@ use std::collections::BTreeSet;
 
 /// in-toto Statement `_type`.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-/// in-toto `predicateType` of a certification attestation.
-pub const PREDICATE_TYPE: &str = "https://cloakpipe.dev/attestations/certification/v1alpha1";
+/// in-toto `predicateType` writers emit for a certification attestation.
+/// [`verify`] also accepts the legacy `cloakpipe.dev` predicate type.
+pub const PREDICATE_TYPE: &str = cloakpipe_release::namespace::CERTIFICATION_PREDICATE_TYPE;
 /// DSSE `payloadType` of an in-toto Statement.
 pub const PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
@@ -375,8 +378,15 @@ fn check_statement(value: &Value, ctx: &VerifyContext, f: &mut Findings, report:
     if obj.get("_type").and_then(Value::as_str) != Some(STATEMENT_TYPE) {
         f.invalid(format!("_type: expected {STATEMENT_TYPE:?}"));
     }
-    if obj.get("predicateType").and_then(Value::as_str) != Some(PREDICATE_TYPE) {
-        f.invalid(format!("predicateType: expected {PREDICATE_TYPE:?}"));
+    if !obj
+        .get("predicateType")
+        .and_then(Value::as_str)
+        .is_some_and(cloakpipe_release::namespace::is_known_certification_predicate_type)
+    {
+        f.invalid(format!(
+            "predicateType: expected {PREDICATE_TYPE:?} (or legacy {:?})",
+            cloakpipe_release::namespace::LEGACY_CERTIFICATION_PREDICATE_TYPE
+        ));
     }
 
     let subject = match parse_subject(obj.get("subject")) {

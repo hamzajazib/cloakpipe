@@ -4,16 +4,28 @@
 //! domain-separated hash (RFC 8785 JSON, like Agent Release manifests), so a
 //! decision pins the exact release, runs and policy it was made from.
 
+use cloakpipe_release::namespace::{self, Namespace};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const API_VERSION: &str = "cloakpipe.dev/v1alpha1";
+/// The `apiVersion` writers emit; readers also accept the legacy
+/// `cloakpipe.dev/v1alpha1` (see [`cloakpipe_release::namespace`]).
+pub const API_VERSION: &str = namespace::API_VERSION;
 pub const RUN_KIND: &str = "EvaluationRun";
 pub const POLICY_KIND: &str = "CertificationPolicy";
 
-pub const RUN_HASH_DOMAIN: &str = "cloakpipe.dev/evaluation-run/v1";
-pub const POLICY_HASH_DOMAIN: &str = "cloakpipe.dev/certification-policy/v1";
+/// Hash domains of current-namespace runs and policies. An object issued
+/// under the legacy `cloakpipe.dev/v1alpha1` hashes with the legacy domain
+/// ([`Namespace::for_hashing`]), so its issued hash stays valid.
+pub const RUN_HASH_DOMAIN: &str = namespace::EVALUATION_RUN_HASH_DOMAIN;
+pub const POLICY_HASH_DOMAIN: &str = namespace::CERTIFICATION_POLICY_HASH_DOMAIN;
+
+/// The `apiVersion` problem of an object, if any.
+fn api_version_issue(api_version: &str) -> Option<String> {
+    (!namespace::is_known_api_version(api_version))
+        .then(|| format!("apiVersion: expected {API_VERSION} (or legacy {})", namespace::LEGACY_API_VERSION))
+}
 
 /// `sha256:<hex>` of `SHA-256(domain || "\n" || RFC8785(value))`.
 pub fn domain_hash(domain: &str, value: &serde_json::Value) -> String {
@@ -127,15 +139,13 @@ impl EvaluationRun {
     }
 
     pub fn run_hash(&self) -> String {
-        domain_hash(RUN_HASH_DOMAIN, &self.canonical_view())
+        domain_hash(Namespace::for_hashing(&self.api_version).evaluation_run_hash_domain(), &self.canonical_view())
     }
 
     /// Structural problems that make the run unusable as evidence.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
-        if self.api_version != API_VERSION {
-            issues.push(format!("apiVersion: expected {API_VERSION}"));
-        }
+        issues.extend(api_version_issue(&self.api_version));
         if self.kind != RUN_KIND {
             issues.push(format!("kind: expected {RUN_KIND}"));
         }
@@ -272,14 +282,15 @@ pub struct CertificationPolicy {
 
 impl CertificationPolicy {
     pub fn policy_hash(&self) -> String {
-        domain_hash(POLICY_HASH_DOMAIN, &serde_json::to_value(self).expect("serialisable"))
+        domain_hash(
+            Namespace::for_hashing(&self.api_version).certification_policy_hash_domain(),
+            &serde_json::to_value(self).expect("serialisable"),
+        )
     }
 
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
-        if self.api_version != API_VERSION {
-            issues.push(format!("apiVersion: expected {API_VERSION}"));
-        }
+        issues.extend(api_version_issue(&self.api_version));
         if self.kind != POLICY_KIND {
             issues.push(format!("kind: expected {POLICY_KIND}"));
         }
