@@ -266,6 +266,14 @@ also binds every evidence hop to its release. MCP server identity
 (`spec.mcpServers`) is not checked: the gate fronts the one upstream it was
 started with.
 
+## Audit packs
+
+Certifications, the runs they cite and their revocations travel to
+reviewers inside a release audit pack ([AUDIT_PACK.md](AUDIT_PACK.md)); its
+verifier checks every envelope with `statement::verify` and requires each
+production promotion to be covered by a certification valid at that moment
+(or a break-glass override).
+
 ## What a certification does not claim
 
 A valid certification proves that a named issuer applied a named policy to

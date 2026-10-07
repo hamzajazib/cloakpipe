@@ -50,6 +50,8 @@ pub enum ReleaseCommands {
     Certify(crate::cert::CertifyArgs),
     /// Verify a signed certification offline
     VerifyCert(crate::cert::VerifyCertArgs),
+    /// Assemble and sign a release audit pack (verify with `cloakpipe-verify release-pack`)
+    AuditPack(crate::audit_pack::AuditPackArgs),
 }
 
 pub fn run(cmd: ReleaseCommands) -> i32 {
@@ -62,6 +64,7 @@ pub fn run(cmd: ReleaseCommands) -> i32 {
         ReleaseCommands::Keygen { out } => crate::cert::keygen(out.as_deref()),
         ReleaseCommands::Certify(args) => crate::cert::certify(args),
         ReleaseCommands::VerifyCert(args) => crate::cert::verify_cert(args),
+        ReleaseCommands::AuditPack(args) => crate::audit_pack::audit_pack(args),
     }
 }
 

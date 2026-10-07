@@ -14,4 +14,5 @@ pub mod bundle;
 pub mod rekor;
 pub mod rfc3161;
 mod time;
+pub mod pack;
 pub mod verify;

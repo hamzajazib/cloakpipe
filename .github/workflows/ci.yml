@@ -314,10 +314,102 @@ jobs:
           name: certification-envelopes
           path: ${{ env.WORK }}/*.cert.dsse.json
 
+  audit-pack-gate:
+    name: release audit pack
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      FIXTURES: crates/cloakpipe-cli/tests/fixtures/certification
+      MANIFEST: crates/cloakpipe-release/testdata/support-agent-184.yaml
+      CP: ./target/debug/cloakpipe
+      VERIFY: ./target/debug/cloakpipe-verify
+      WORK: pack-work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins
+      - name: Evidence for one release (keys, run, certification, ledger export, events)
+        run: |
+          mkdir -p "$WORK"
+          $CP release keygen --out "$WORK/exporter.key.json"
+          $CP release keygen --out "$WORK/cert.key.json"
+          $CP eval import --junit "$FIXTURES/passing.junit.xml" --release "$MANIFEST" \
+            --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out "$WORK/run.json"
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/run.json" \
+            --require privacy,functional --environment production --issuer ci:pack-gate \
+            --key "$WORK/cert.key.json" --now 2026-10-01T00:00:00Z --out "$WORK/cert.dsse.json"
+          ./target/debug/ledger-export-fixture "$WORK/ledger.json" "$($CP release hash "$MANIFEST")" "$WORK/ledger.pub.json"
+          cat > "$WORK/events.json" <<'JSON'
+          [
+            {"type": "release_registered", "at": "2026-09-30T09:00:00Z", "actor": "ci:pack-gate", "agent": "support-agent", "version": "184"},
+            {"type": "release_promoted", "at": "2026-10-02T00:00:00Z", "actor": "alice", "environment": "production"}
+          ]
+          JSON
+      - name: Assemble the pack
+        run: |
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" --certification "$WORK/cert.dsse.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/events.json" --key "$WORK/exporter.key.json" \
+            --exporter ci:pack-gate --now 2026-10-10T00:00:00Z --out "$WORK/pack.json"
+      - name: Verify the pack (must exit 0)
+        run: |
+          $VERIFY release-pack "$WORK/pack.json" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
+            --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z
+      - name: Tampered or inconsistent packs must exit 1
+        run: |
+          expect_fail() {
+            set +e
+            $VERIFY release-pack "$1" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
+              --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z > "$1.txt"
+            code=$?
+            set -e
+            cat "$1.txt"
+            test "$code" -eq 1
+            grep -q '^FAIL' "$1.txt"
+          }
+          # Any edit without the exporter's key breaks the digest and signature.
+          python3 - "$WORK/pack.json" "$WORK/tampered.json" <<'PY'
+          import json, sys
+          p = json.load(open(sys.argv[1]))
+          p["spec"]["governance"]["events"][1]["actor"] = "mallory"
+          json.dump(p, open(sys.argv[2], "w"))
+          PY
+          expect_fail "$WORK/tampered.json"
+          # A production promotion before the certification existed, signed
+          # by the exporter itself, is still inconsistent.
+          python3 - "$WORK/events.json" "$WORK/early.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          e[1]["at"] = "2026-09-30T12:00:00Z"
+          json.dump(e, open(sys.argv[2], "w"))
+          PY
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" --certification "$WORK/cert.dsse.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/early.json" --key "$WORK/exporter.key.json" \
+            --now 2026-10-10T00:00:00Z --out "$WORK/early.pack.json"
+          expect_fail "$WORK/early.pack.json"
+          # A near-miss of "production" must not dodge the certification rule.
+          python3 - "$WORK/events.json" "$WORK/misspelled.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          e[1]["environment"] = "Production"
+          json.dump(e, open(sys.argv[2], "w"))
+          PY
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/misspelled.json" --key "$WORK/exporter.key.json" \
+            --now 2026-10-10T00:00:00Z --out "$WORK/misspelled.pack.json"
+          expect_fail "$WORK/misspelled.pack.json"
+      - name: Upload the pack
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-audit-pack
+          path: ${{ env.WORK }}/pack.json
+
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, cloakleak-gate, verifier-e2e, release-gate, certification-gate]
+    needs: [test, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -334,6 +426,7 @@ jobs:
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
             - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)
             - [x] agent release certification (keygen, eval import, certify pass/block, verify-cert, tamper rejection, composite action)
+            - [x] release audit pack (assemble, verify, tamper and inconsistency rejection)
 
             See PR artifacts for the scoreboards.`;
             await github.rest.issues.createComment({

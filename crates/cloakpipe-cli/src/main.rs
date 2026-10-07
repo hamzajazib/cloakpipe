@@ -1,6 +1,7 @@
 //! CloakPipe CLI — entrypoint for the privacy proxy.
 
 mod anchor;
+mod audit_pack;
 mod cert;
 mod commands;
 mod release;

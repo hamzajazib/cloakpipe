@@ -22,19 +22,19 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Exit early with a code.
-type Res<T> = Result<T, i32>;
+pub(crate) type Res<T> = Result<T, i32>;
 
-fn usage(msg: impl std::fmt::Display) -> i32 {
+pub(crate) fn usage(msg: impl std::fmt::Display) -> i32 {
     eprintln!("error: {msg}");
     EXIT_IO
 }
 
-fn invalid(msg: impl std::fmt::Display) -> i32 {
+pub(crate) fn invalid(msg: impl std::fmt::Display) -> i32 {
     eprintln!("error: {msg}");
     EXIT_INVALID
 }
 
-fn read(path: &Path) -> Res<String> {
+pub(crate) fn read(path: &Path) -> Res<String> {
     std::fs::read_to_string(path).map_err(|e| usage(format_args!("cannot read {}: {e}", path.display())))
 }
 
@@ -46,7 +46,7 @@ fn pretty(v: &impl Serialize) -> String {
     format!("{}\n", serde_json::to_string_pretty(v).expect("serialisable"))
 }
 
-fn finish(code: Res<i32>) -> i32 {
+pub(crate) fn finish(code: Res<i32>) -> i32 {
     code.unwrap_or_else(|c| c)
 }
 
@@ -64,7 +64,7 @@ fn release_target(arg: &str) -> Res<String> {
 
 /// `--now`: RFC 3339, normalised to UTC with second precision; defaults to
 /// the current time.
-fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
+pub(crate) fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
     match now {
         None => Ok(Utc::now()),
         Some(s) => DateTime::parse_from_rfc3339(s)
@@ -73,7 +73,7 @@ fn now_arg(now: Option<&str>) -> Res<DateTime<Utc>> {
     }
 }
 
-fn rfc3339(t: DateTime<Utc>) -> String {
+pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 

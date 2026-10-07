@@ -17,7 +17,7 @@ hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core", "digest"] }
 uuid = { workspace = true }
 rand = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 reqwest = { workspace = true, features = ["blocking"] }
 # The external anchors are verified before a receipt is returned, with the
 # same standalone code an auditor runs.
