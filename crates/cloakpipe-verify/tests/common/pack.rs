@@ -71,7 +71,7 @@ pub fn options() -> VerifyOptions {
 
 pub fn run_for(release: &str) -> EvaluationRun {
     serde_json::from_value(json!({
-        "apiVersion": "cloakpipe.dev/v1alpha1",
+        "apiVersion": cloakpipe_cert::API_VERSION,
         "kind": "EvaluationRun",
         "runId": "support-critical@23",
         "release": release,

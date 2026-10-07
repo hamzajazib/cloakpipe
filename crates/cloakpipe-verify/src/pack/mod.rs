@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! {
-//!   "apiVersion": "cloakpipe.dev/v1alpha1",
+//!   "apiVersion": "cloakpipe.co/v1alpha1",
 //!   "kind": "ReleaseAuditPack",
 //!   "spec": {
 //!     "createdAt": RFC 3339, "exporter": "<who assembled the pack>",
@@ -21,8 +21,10 @@
 //! }
 //! ```
 //!
-//! **Signing input** = `"cloakpipe.dev/release-audit-pack/v1alpha1" || "\n" ||
-//! JCS({apiVersion, kind, spec})` (RFC 8785). `digest` is `sha256:` + hex of
+//! **Signing input** = `"cloakpipe.co/release-audit-pack/v1alpha1" || "\n" ||
+//! JCS({apiVersion, kind, spec})` (RFC 8785). A pack issued under the legacy
+//! `cloakpipe.dev/v1alpha1` apiVersion is signed under the legacy domain
+//! `cloakpipe.dev/release-audit-pack/v1alpha1` and still verifies. `digest` is `sha256:` + hex of
 //! SHA-256(signing input); `signature.sig` is standard base64 of the Ed25519
 //! signature over the signing input, by the key named `keyid`
 //! (`ed25519:` + first 16 hex of SHA-256(public key), as `release keygen`).
@@ -52,17 +54,19 @@ pub use keys::{keyid, trusted_key_from_json};
 use crate::bundle::Bundle;
 use cloakpipe_cert::statement::Envelope;
 use cloakpipe_cert::EvaluationRun;
+use cloakpipe_release::namespace::{self, Namespace};
 use cloakpipe_release::AgentRelease;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// `apiVersion` of a pack.
-pub const PACK_API_VERSION: &str = "cloakpipe.dev/v1alpha1";
+/// `apiVersion` the builder writes; the verifier also accepts the legacy
+/// `cloakpipe.dev/v1alpha1` (see [`cloakpipe_release::namespace`]).
+pub const PACK_API_VERSION: &str = namespace::API_VERSION;
 /// `kind` of a pack.
 pub const PACK_KIND: &str = "ReleaseAuditPack";
-/// Domain separator of the signing input.
-pub const PACK_SIGNING_DOMAIN: &str = "cloakpipe.dev/release-audit-pack/v1alpha1";
+/// Domain separator of the signing input of a current-namespace pack.
+pub const PACK_SIGNING_DOMAIN: &str = namespace::RELEASE_AUDIT_PACK_SIGNING_DOMAIN;
 /// The only `governance.attestedBy` this version defines.
 pub const ATTESTED_BY_EXPORTER: &str = "exporter";
 /// The one environment a promotion into requires a valid certification (or
@@ -230,12 +234,15 @@ impl ReleaseAuditPack {
 }
 
 /// The signing input of a pack document: the domain, a newline and the
-/// RFC 8785 form of `{apiVersion, kind, spec}` taken from `doc` as is.
+/// RFC 8785 form of `{apiVersion, kind, spec}` taken from `doc` as is. The
+/// domain follows `apiVersion`: a legacy `cloakpipe.dev` pack keeps the
+/// legacy domain it was signed under.
 pub fn signing_input(api_version: &Value, kind: &Value, spec: &Value) -> Result<Vec<u8>, String> {
     let body = serde_json::json!({ "apiVersion": api_version, "kind": kind, "spec": spec });
     let jcs = serde_json_canonicalizer::to_vec(&body).map_err(|e| format!("not canonicalisable: {e}"))?;
-    let mut out = Vec::with_capacity(PACK_SIGNING_DOMAIN.len() + 1 + jcs.len());
-    out.extend_from_slice(PACK_SIGNING_DOMAIN.as_bytes());
+    let domain = Namespace::for_hashing(api_version.as_str().unwrap_or_default()).release_audit_pack_signing_domain();
+    let mut out = Vec::with_capacity(domain.len() + 1 + jcs.len());
+    out.extend_from_slice(domain.as_bytes());
     out.push(b'\n');
     out.extend_from_slice(&jcs);
     Ok(out)
