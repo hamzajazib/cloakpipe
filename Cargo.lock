@@ -531,11 +531,13 @@ dependencies = [
  "cloakpipe-audit",
  "cloakpipe-cert",
  "cloakpipe-core",
+ "cloakpipe-ledger",
  "cloakpipe-mcp",
  "cloakpipe-proxy",
  "cloakpipe-release",
  "cloakpipe-tree",
  "cloakpipe-vector",
+ "cloakpipe-verify",
  "dialoguer",
  "ed25519-dalek",
  "hex",
@@ -551,6 +553,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
