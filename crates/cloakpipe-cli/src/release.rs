@@ -1,7 +1,8 @@
 //! `cloakpipe release …` — Agent Release manifest tooling.
 //!
-//! Exit codes: 0 ok, 1 manifest invalid / not certifiable (locally or by the
-//! API), 2 usage, I/O, network or server error.
+//! Exit codes: 0 ok (certified, for `certify` / `verify-cert`), 1 manifest
+//! invalid / not certifiable (locally or by the API), certification blocked or
+//! attestation not valid, 2 usage, I/O, network or server error.
 
 use clap::Subcommand;
 use cloakpipe_release::{diff, parse_path, AgentRelease, ChangeKind, ParseError};
@@ -39,6 +40,18 @@ pub enum ReleaseCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Generate an Ed25519 signing key for certifications
+    Keygen {
+        /// Write the key pair here (mode 0600, never overwritten) and print only the public part
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Decide whether a release is certified under a policy; with --key, sign the decision
+    Certify(crate::cert::CertifyArgs),
+    /// Verify a signed certification offline
+    VerifyCert(crate::cert::VerifyCertArgs),
+    /// Assemble and sign a release audit pack (verify with `cloakpipe-verify release-pack`)
+    AuditPack(crate::audit_pack::AuditPackArgs),
 }
 
 pub fn run(cmd: ReleaseCommands) -> i32 {
@@ -48,11 +61,15 @@ pub fn run(cmd: ReleaseCommands) -> i32 {
         ReleaseCommands::Diff { baseline, candidate, json } => diff_cmd(&baseline, &candidate, json),
         ReleaseCommands::Register { manifest, json } => register(&manifest, json),
         ReleaseCommands::Inspect { manifest, json } => inspect(&manifest, json),
+        ReleaseCommands::Keygen { out } => crate::cert::keygen(out.as_deref()),
+        ReleaseCommands::Certify(args) => crate::cert::certify(args),
+        ReleaseCommands::VerifyCert(args) => crate::cert::verify_cert(args),
+        ReleaseCommands::AuditPack(args) => crate::audit_pack::audit_pack(args),
     }
 }
 
 /// Load a manifest, reporting parse/I-O failures with the right exit code.
-fn load(path: &Path) -> Result<AgentRelease, i32> {
+pub(crate) fn load(path: &Path) -> Result<AgentRelease, i32> {
     parse_path(path).map_err(|e| {
         eprintln!("error: {e}");
         match e {
@@ -63,7 +80,7 @@ fn load(path: &Path) -> Result<AgentRelease, i32> {
 }
 
 /// Load and require a certifiable manifest; issues go to stderr.
-fn load_valid(path: &Path) -> Result<AgentRelease, i32> {
+pub(crate) fn load_valid(path: &Path) -> Result<AgentRelease, i32> {
     let r = load(path)?;
     let issues = r.validate();
     if issues.is_empty() {

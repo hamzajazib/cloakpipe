@@ -45,7 +45,7 @@ pub const BUNDLE_MAGIC: &str = "cloakpipe.bundle";
 /// - v2: + Merkle inclusion proofs per record + anchor receipts (M3)
 /// - v3: + signed manifest, policy pack refs, date range, signed-tree-
 ///   head index (M4 — auditor pack)
-pub const BUNDLE_FORMAT_VERSION: u32 = 3;
+pub const BUNDLE_FORMAT_VERSION: u32 = 4;
 
 /// The version that introduced Merkle proofs and anchor receipts.
 /// Bundles with version < 2 cannot have these fields; the verifier
@@ -56,6 +56,10 @@ pub const MIN_BUNDLE_VERSION_FOR_ANCHORS: u32 = 2;
 /// have a [`Manifest`]; v2 bundles may be promoted to v3 by re-
 /// running `export` with `with_manifest = true`.
 pub const MIN_BUNDLE_VERSION_FOR_MANIFEST: u32 = 3;
+
+/// The version whose signed manifest commits to the chain tip, so the
+/// signature checkpoints every record (not just the count and seq range).
+pub const MIN_BUNDLE_VERSION_FOR_CHAIN_TIP: u32 = 4;
 
 /// A tenant identifier. Lowercase hyphenated UUID.
 pub type TenantId = String;
@@ -207,6 +211,9 @@ pub struct Manifest {
     pub policy_pack_versions: Vec<String>, // git shas
     pub operator: String, // key_id of the signer
     pub created_at: String,
+    /// v4+: hex `record_hash` of the last record (genesis when empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tip: Option<String>,
     pub signature: ManifestSignature,
 }
 
@@ -252,6 +259,55 @@ pub enum AnchorReceiptRef {
         /// Hex-encoded Ed25519 public key of the log.
         log_pubkey: String,
     },
+    /// A real RFC 3161 timestamp from an external TSA. The message imprint
+    /// is SHA-256 of the batch head's JSON bytes (`subject_hash`). Verified
+    /// offline against a caller-supplied TSA root (`--tsa-root`); nothing
+    /// in the bundle is trusted to say who the TSA is.
+    Rfc3161 {
+        batch_id: String,
+        subject_hash: Hex32,
+        /// Where the token was obtained (informational, never fetched).
+        tsa_url: String,
+        /// The request nonce, hex (big-endian), which the token must echo.
+        nonce: String,
+        /// The complete DER `TimeStampResp`, base64 (standard alphabet).
+        tsr: String,
+    },
+    /// A Sigstore Rekor (v1 API) `hashedrekord` entry for the batch head,
+    /// signed Ed25519ph by the head's signing key. Verified offline against
+    /// a caller-supplied Rekor public key (`--rekor-key`).
+    Rekor {
+        batch_id: String,
+        subject_hash: Hex32,
+        /// The log the entry was submitted to (informational).
+        rekor_url: String,
+        /// The entry UUID (`[treeID]` + leaf hash, hex).
+        entry_uuid: String,
+        /// The log's response entry, verbatim: body, integratedTime, logID,
+        /// logIndex and verification (SET + inclusion proof + checkpoint).
+        entry: serde_json::Value,
+    },
+}
+
+impl AnchorReceiptRef {
+    pub fn batch_id(&self) -> &str {
+        match self {
+            AnchorReceiptRef::Tsa { batch_id, .. }
+            | AnchorReceiptRef::Log { batch_id, .. }
+            | AnchorReceiptRef::Rfc3161 { batch_id, .. }
+            | AnchorReceiptRef::Rekor { batch_id, .. } => batch_id,
+        }
+    }
+
+    /// The wire tag (`kind`), also the prefix of manifest anchor refs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AnchorReceiptRef::Tsa { .. } => "tsa",
+            AnchorReceiptRef::Log { .. } => "log",
+            AnchorReceiptRef::Rfc3161 { .. } => "rfc3161",
+            AnchorReceiptRef::Rekor { .. } => "rekor",
+        }
+    }
 }
 
 /// The actual signature payload over a batch head.
@@ -276,7 +332,7 @@ mod tests {
     #[test]
     fn magic_and_version_are_stable() {
         assert_eq!(BUNDLE_MAGIC, "cloakpipe.bundle");
-        assert_eq!(BUNDLE_FORMAT_VERSION, 3);
+        assert_eq!(BUNDLE_FORMAT_VERSION, 4);
     }
 
     #[test]

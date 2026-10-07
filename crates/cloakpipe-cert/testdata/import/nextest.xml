@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" failures="1" errors="0" uuid="0b4f6c1e-2a7d-4d61-9f0b-7f6f7f9c3e11" timestamp="2026-10-05T14:09:12.004+00:00" time="0.183">
+    <testsuite name="agent-evals::policy" tests="3" disabled="0" errors="0" failures="1">
+        <testcase name="policy::blocks_wire_transfer" classname="agent-evals::policy" timestamp="2026-10-05T14:09:12.010+00:00" time="0.012">
+        </testcase>
+        <testcase name="policy::flaky_retry_passes" classname="agent-evals::policy" timestamp="2026-10-05T14:09:12.011+00:00" time="0.044">
+            <flakyFailure timestamp="2026-10-05T14:09:12.011+00:00" time="0.021" message="thread panicked" type="test failure">
+                <system-err>thread 'policy::flaky_retry_passes' panicked</system-err>
+            </flakyFailure>
+        </testcase>
+        <testcase name="policy::denies_export" classname="agent-evals::policy" timestamp="2026-10-05T14:09:12.012+00:00" time="0.0995">
+            <failure type="test failure">thread 'policy::denies_export' panicked at src/policy.rs:12:5</failure>
+            <rerunFailure timestamp="2026-10-05T14:09:12.100+00:00" time="0.0981" type="test failure"/>
+            <system-out></system-out>
+        </testcase>
+    </testsuite>
+</testsuites>

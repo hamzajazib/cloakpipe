@@ -1,10 +1,12 @@
 name: CI
 
 on:
+  # Every pushed branch is tested, so stacked feature branches get CI before
+  # their base merges; PRs into main are tested as merge commits too.
   push:
-    branches: [main, feat/v2-ledger]
+    branches: ["**"]
   pull_request:
-    branches: [main, feat/v2-ledger]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,6 +96,70 @@ jobs:
       - name: Verify the bundle (all) — must exit 0
         run: |
           cargo run -q -p cloakpipe-verify -- all crates/cloakpipe-verify/tests/fixtures/sample.bundle.json
+      - name: Trust inputs on an unanchored bundle must fail (nothing is anchored)
+        run: |
+          F=crates/cloakpipe-verify/tests/fixtures/anchoring
+          if cargo run -q -p cloakpipe-verify -- anchors crates/cloakpipe-verify/tests/fixtures/sample.bundle.json \
+              --tsa-root "$F/freetsa-root.pem" --rekor-key "$F/rekor.pub"; then
+            echo "an unanchored bundle verified as anchored"; exit 1
+          fi
+
+  live-anchor:
+    # Real external anchoring: freetsa.org, DigiCert and rekor.sigstore.dev.
+    # Every offline anchoring test (recorded responses) already runs in
+    # `test`; this job proves the live services still accept and answer what
+    # we send. Push only (not PRs), bounded by a timeout, and allowed to fail
+    # the build: a broken anchor path must be seen.
+    name: live external anchoring
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+    continue-on-error: false
+    env:
+      CLOAKPIPE_LIVE_ANCHOR: "1"
+      FIX: crates/cloakpipe-verify/tests/fixtures/anchoring
+      WORK: anchor-work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Live client tests (TSA, Rekor, served Rekor key)
+        timeout-minutes: 10
+        run: cargo test -p cloakpipe-anchor --test live -- --nocapture
+      - name: Build
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger
+      - name: Export a bundle and its operator key
+        run: |
+          mkdir -p "$WORK"
+          ./target/debug/ledger-export-fixture "$WORK/bundle.json" --key-out "$WORK/key.json"
+      - name: Seal and anchor it (freetsa.org + rekor.sigstore.dev)
+        timeout-minutes: 5
+        run: |
+          ./target/debug/cloakpipe anchor "$WORK/bundle.json" --key "$WORK/key.json" \
+            --tsa-root "$FIX/freetsa-root.pem" --rekor-key "$FIX/rekor.pub" --out "$WORK/anchored.json"
+      - name: Verify offline with the trust inputs (must exit 0)
+        run: |
+          ./target/debug/cloakpipe-verify all "$WORK/anchored.json" \
+            --tsa-root "$FIX/freetsa-root.pem" --rekor-key "$FIX/rekor.pub"
+      - name: Missing trust input must fail, not skip
+        run: |
+          if ./target/debug/cloakpipe-verify anchors "$WORK/anchored.json" --rekor-key "$FIX/rekor.pub"; then
+            echo "verified without --tsa-root"; exit 1
+          fi
+      - name: Anchor at DigiCert too
+        timeout-minutes: 5
+        run: |
+          ./target/debug/cloakpipe anchor "$WORK/bundle.json" --key "$WORK/key.json" \
+            --tsa-url http://timestamp.digicert.com --tsa-root "$FIX/digicert-trusted-root-g4.pem" --no-rekor \
+            --out "$WORK/anchored-digicert.json"
+          ./target/debug/cloakpipe-verify anchors "$WORK/anchored-digicert.json" --tsa-root "$FIX/digicert-trusted-root-g4.pem"
+      - name: Upload anchored bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchored-bundles
+          path: ${{ env.WORK }}/anchored*.json
 
   release-gate:
     name: agent release manifests
@@ -143,10 +209,207 @@ jobs:
             | tee diff.json \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["requires_approval"] and "trajectory" in d["required_suites"], d'
 
+  certification-gate:
+    name: agent release certification
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      FIXTURES: crates/cloakpipe-cli/tests/fixtures/certification
+      MANIFEST: crates/cloakpipe-release/testdata/support-agent-184.yaml
+      CP: ./target/debug/cloakpipe
+      WORK: cert-work
+      NOW: "2026-10-01T12:00:00Z"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build -p cloakpipe-cli
+      - name: Generate a throwaway signing key
+        run: |
+          mkdir -p "$WORK"
+          $CP release keygen --out "$WORK/key.json"
+          test "$(stat -c %a "$WORK/key.json")" = 600
+      - name: Import JUnit reports as evaluation runs
+        run: |
+          for r in passing failing; do
+            $CP eval import --junit "$FIXTURES/$r.junit.xml" --release "$MANIFEST" \
+              --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' \
+              --tool pytest --out "$WORK/$r.run.json"
+          done
+      - name: Certify the passing run (must exit 0)
+        run: |
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/passing.run.json" \
+            --require privacy,functional --environment production --issuer "ci:${GITHUB_REPOSITORY}" \
+            --key "$WORK/key.json" --now "$NOW" --out "$WORK/passing.cert.dsse.json"
+      - name: Certify the failing run (must exit 1, BLOCKED)
+        run: |
+          set +e
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/failing.run.json" \
+            --require privacy,functional --environment production --issuer "ci:${GITHUB_REPOSITORY}" \
+            --key "$WORK/key.json" --now "$NOW" --out "$WORK/failing.cert.dsse.json" | tee "$WORK/failing.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit $code"
+          test "$code" -eq 1
+          grep -q '^BLOCKED' "$WORK/failing.txt"
+          grep -q 'new_critical_failure' "$WORK/failing.txt"
+      - name: Verify the certification (must exit 0)
+        run: |
+          $CP release verify-cert "$WORK/passing.cert.dsse.json" --trust "$WORK/key.json" \
+            --release "$MANIFEST" --now "2026-10-02T00:00:00Z"
+      - name: A blocked decision and a tampered envelope must not verify
+        run: |
+          if $CP release verify-cert "$WORK/failing.cert.dsse.json" --trust "$WORK/key.json" --now "2026-10-02T00:00:00Z"; then
+            echo "a BLOCKED decision must not verify as certified"; exit 1
+          fi
+          python3 - "$WORK/passing.cert.dsse.json" "$WORK/tampered.cert.dsse.json" <<'PY'
+          import base64, json, sys
+          env = json.load(open(sys.argv[1]))
+          st = json.loads(base64.b64decode(env["payload"]))
+          st["predicate"]["certification"]["environment"] = "anything"
+          env["payload"] = base64.b64encode(json.dumps(st).encode()).decode()
+          json.dump(env, open(sys.argv[2], "w"))
+          PY
+          set +e
+          $CP release verify-cert "$WORK/tampered.cert.dsse.json" --trust "$WORK/key.json" --now "2026-10-02T00:00:00Z" | tee "$WORK/tampered.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          test "$code" -eq 1
+          grep -q '^INVALID' "$WORK/tampered.txt"
+      - name: Expose the key to the composite action
+        id: key
+        run: |
+          echo "::add-mask::$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["privateKey"])' "$WORK/key.json")"
+          {
+            echo "json<<CLOAKPIPE_KEY_EOF"
+            cat "$WORK/key.json"
+            echo "CLOAKPIPE_KEY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+      - name: Certify through the composite action
+        id: action
+        uses: ./.github/actions/certify
+        with:
+          install: "false"
+          manifest: ${{ env.MANIFEST }}
+          policy: ${{ env.FIXTURES }}/policy.yaml
+          runs: |
+            ${{ env.WORK }}/passing.run.json
+          require: privacy,functional
+          environment: production
+          signing-key: ${{ steps.key.outputs.json }}
+          out: ${{ env.WORK }}/action.cert.dsse.json
+      - name: Check the action's outputs
+        env:
+          OUTCOME: ${{ steps.action.outputs.outcome }}
+          ENVELOPE: ${{ steps.action.outputs.envelope }}
+        run: |
+          test "$OUTCOME" = certified
+          $CP release verify-cert "$ENVELOPE" --trust "$WORK/key.json" --release "$MANIFEST"
+      - name: Upload certification envelopes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: certification-envelopes
+          path: ${{ env.WORK }}/*.cert.dsse.json
+
+  audit-pack-gate:
+    name: release audit pack
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      FIXTURES: crates/cloakpipe-cli/tests/fixtures/certification
+      MANIFEST: crates/cloakpipe-release/testdata/support-agent-184.yaml
+      CP: ./target/debug/cloakpipe
+      VERIFY: ./target/debug/cloakpipe-verify
+      WORK: pack-work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins
+      - name: Evidence for one release (keys, run, certification, ledger export, events)
+        run: |
+          mkdir -p "$WORK"
+          $CP release keygen --out "$WORK/exporter.key.json"
+          $CP release keygen --out "$WORK/cert.key.json"
+          $CP eval import --junit "$FIXTURES/passing.junit.xml" --release "$MANIFEST" \
+            --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out "$WORK/run.json"
+          $CP release certify "$MANIFEST" --policy "$FIXTURES/policy.yaml" --run "$WORK/run.json" \
+            --require privacy,functional --environment production --issuer ci:pack-gate \
+            --key "$WORK/cert.key.json" --now 2026-10-01T00:00:00Z --out "$WORK/cert.dsse.json"
+          ./target/debug/ledger-export-fixture "$WORK/ledger.json" "$($CP release hash "$MANIFEST")" "$WORK/ledger.pub.json"
+          cat > "$WORK/events.json" <<'JSON'
+          [
+            {"type": "release_registered", "at": "2026-09-30T09:00:00Z", "actor": "ci:pack-gate", "agent": "support-agent", "version": "184"},
+            {"type": "release_promoted", "at": "2026-10-02T00:00:00Z", "actor": "alice", "environment": "production"}
+          ]
+          JSON
+      - name: Assemble the pack
+        run: |
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" --certification "$WORK/cert.dsse.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/events.json" --key "$WORK/exporter.key.json" \
+            --exporter ci:pack-gate --now 2026-10-10T00:00:00Z --out "$WORK/pack.json"
+      - name: Verify the pack (must exit 0)
+        run: |
+          $VERIFY release-pack "$WORK/pack.json" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
+            --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z
+      - name: Tampered or inconsistent packs must exit 1
+        run: |
+          expect_fail() {
+            set +e
+            $VERIFY release-pack "$1" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
+              --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z > "$1.txt"
+            code=$?
+            set -e
+            cat "$1.txt"
+            test "$code" -eq 1
+            grep -q '^FAIL' "$1.txt"
+          }
+          # Any edit without the exporter's key breaks the digest and signature.
+          python3 - "$WORK/pack.json" "$WORK/tampered.json" <<'PY'
+          import json, sys
+          p = json.load(open(sys.argv[1]))
+          p["spec"]["governance"]["events"][1]["actor"] = "mallory"
+          json.dump(p, open(sys.argv[2], "w"))
+          PY
+          expect_fail "$WORK/tampered.json"
+          # A production promotion before the certification existed, signed
+          # by the exporter itself, is still inconsistent.
+          python3 - "$WORK/events.json" "$WORK/early.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          e[1]["at"] = "2026-09-30T12:00:00Z"
+          json.dump(e, open(sys.argv[2], "w"))
+          PY
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" --certification "$WORK/cert.dsse.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/early.json" --key "$WORK/exporter.key.json" \
+            --now 2026-10-10T00:00:00Z --out "$WORK/early.pack.json"
+          expect_fail "$WORK/early.pack.json"
+          # A near-miss of "production" must not dodge the certification rule.
+          python3 - "$WORK/events.json" "$WORK/misspelled.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          e[1]["environment"] = "Production"
+          json.dump(e, open(sys.argv[2], "w"))
+          PY
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/misspelled.json" --key "$WORK/exporter.key.json" \
+            --now 2026-10-10T00:00:00Z --out "$WORK/misspelled.pack.json"
+          expect_fail "$WORK/misspelled.pack.json"
+      - name: Upload the pack
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-audit-pack
+          path: ${{ env.WORK }}/pack.json
+
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, cloakleak-gate, verifier-e2e, release-gate]
+    needs: [test, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -162,6 +425,8 @@ jobs:
             - [x] cloakleak zero-leak gate (prose + tool_json)
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
             - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)
+            - [x] agent release certification (keygen, eval import, certify pass/block, verify-cert, tamper rejection, composite action)
+            - [x] release audit pack (assemble, verify, tamper and inconsistency rejection)
 
             See PR artifacts for the scoreboards.`;
             await github.rest.issues.createComment({

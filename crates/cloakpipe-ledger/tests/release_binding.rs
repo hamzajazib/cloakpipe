@@ -47,6 +47,8 @@ fn release_lifecycle_events_have_stable_tags() {
     // Tags are part of the signed canonical bytes: never rename them.
     assert_eq!(Hop::ReleaseRegistered.tag(), "release_registered");
     assert_eq!(Hop::ReleasePromoted.tag(), "release_promoted");
+    assert_eq!(Hop::ReleaseCertified.tag(), "release_certified");
+    assert_eq!(Hop::CertificationRevoked.tag(), "certification_revoked");
 }
 
 #[test]

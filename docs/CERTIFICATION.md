@@ -1,0 +1,283 @@
+# Agent Release certification
+
+Certification turns evaluation evidence about one exact Agent Release into a
+deterministic decision and a signed, scoped, expiring attestation that anyone
+can verify offline.
+
+```
+release manifest ─┐
+evaluation runs ──┼─> decide(policy) ─> Decision ─> sign ─> DSSE(in-toto) ─> verify(now, trust, revocations)
+baseline runs  ───┘
+```
+
+Crate: [`crates/cloakpipe-cert`](../crates/cloakpipe-cert). Each module's doc
+comment is the normative contract:
+
+| Module | Contract |
+|---|---|
+| `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.dev/evaluation-run/v1`, `cloakpipe.dev/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
+| `import` | JUnit XML, Braintrust experiments, Langfuse dataset runs and native JSON → `EvaluationRun`. |
+| `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds. Pure and deterministic. |
+| `statement` | in-toto v1 Statement in a DSSE envelope signed with Ed25519; verification statuses `VALID`, `VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`. |
+
+## CLI
+
+All commands are offline and deterministic given their inputs (`--now` pins
+time). Exit codes: **0** ok / certified, **1** invalid input, BLOCKED
+decision or attestation that does not certify, **2** usage or I/O error.
+
+### `cloakpipe release keygen [--out FILE]`
+
+Generates an Ed25519 signing key and prints
+`{"keyid", "publicKey", "privateKey"}` (hex; `privateKey` is the 32-byte
+seed). `keyid = "ed25519:" + first 16 hex chars of SHA-256(public key)`.
+With `--out`, the full key is written to `FILE` with mode `0600` (an existing
+file is never overwritten) and only `keyid` and `publicKey` are printed —
+publish those to verifiers.
+
+### `cloakpipe eval import`
+
+```
+cloakpipe eval import (--junit FILE | --braintrust FILE | --langfuse-run FILE --langfuse-scores FILE)
+    --release <manifest | sha256:hex> --suite NAME@VERSION --covers a,b
+    [--critical PATTERN]... [--pass-threshold T] [--run-id ID] [--tool NAME]
+    [--dataset REF] [--out FILE]
+```
+
+Turns an evaluation report into a native `EvaluationRun` (rules in `import`)
+on stdout or in `--out`. Exactly one source is required. A manifest path
+must be certifiable and is replaced by its hash. `--run-id` defaults to
+`NAME@VERSION`; `--critical` takes `prefix*` or exact case ids. An invalid
+report or run exits 1 with the issues on stderr; a missing file or a bad
+argument exits 2.
+
+- **`--junit`**: JUnit XML from pytest, Jest, Go, JUnit or cargo-nextest.
+  Status comes from `<failure>`/`<error>`/`<skipped>`.
+- **`--braintrust`**: a Braintrust experiment's events (`/fetch` output, an
+  array of events, or JSONL). Each root span is one case. Its scores are
+  the root's own `scores` plus those of its scorer spans
+  (`span_attributes.type: "score"`), which is where the SDK's `Eval()`
+  logs each scorer's result; other child spans (task, LLM calls) are
+  ignored. The case id is `metadata.cloakpipe_case_id`, else
+  `metadata.case_id`, else the dataset record (`origin.id` of a dataset
+  `origin`, or `dataset_record_id` from older SDKs) — row ids change
+  between runs, so an event with none of these is rejected. Run the
+  experiment with one trial (`trial_count`/`trialCount` 1): every trial is
+  its own root span with the same case id, which is rejected as a
+  duplicate. `metadata.critical: true` marks a case critical. `error` on
+  the root or a scorer span, or a scorer that crashed
+  (`metadata.scorer_errors`), → `error`; `metrics.start/end` →
+  `durationMs`; token counts → `metrics.tokens.*`.
+- **`--langfuse-run` + `--langfuse-scores`**: a Langfuse dataset run and the
+  scores of its traces. Each run item is one case with id `datasetItemId`;
+  a score joins an item by `traceId` (trace scores, or scores of the item's
+  own `observationId`). `BOOLEAN` scores count as 0/1; `CATEGORICAL`,
+  `TEXT` and `CORRECTION` scores are ignored. Scores must come from
+  `GET /api/public/v2/scores` (v3 output is rejected), and every page the
+  listing's `meta.totalPages` announces must be included — a missing page
+  is rejected, since it could hold a failing score. A score id repeated
+  with different contents (pages fetched at different times) is rejected:
+  fetch again. Langfuse has no critical flag: use `--critical`.
+  `--dataset` defaults to the run's `datasetName`.
+
+Score-based sources decide each case from its scores with
+`--pass-threshold` (default `0.5`, within `0..=1`; not accepted with
+`--junit`): **pass** iff every score `>=` the threshold, else **fail**; an
+explicit error, or **no numeric score at all, is `error`** — an unscored
+case is not evidence, so it fails closed. `score` is the mean of the case's
+scores and each score is kept as `metrics["score.<name>"]`, so policies can
+put thresholds on individual scorers (`metric: score.Factuality`). Scores
+must lie in `0..=1`, and a scorer name may appear only once per case.
+`--score NAME` (repeatable) restricts the decision to the named scores:
+any other score (a 1–5 user-feedback rating, a latency score) is ignored
+without validation, and a case missing a named score is `error`.
+
+#### Getting the inputs
+
+Braintrust (REST API, bearer token; follow `cursor` for more than one page,
+or flatten pages to JSONL):
+
+```sh
+curl -sf -H "Authorization: Bearer $BRAINTRUST_API_KEY" \
+  "https://api.braintrust.dev/v1/experiment/$EXPERIMENT_ID/fetch?limit=1000" > experiment.json
+# More pages: repeat with &cursor=<.cursor of the previous page>, then
+#   jq -c '.events[]' page-*.json > experiment.jsonl
+cloakpipe eval import --braintrust experiment.json --release release.yaml \
+  --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out run.json
+```
+
+Langfuse (public API, basic auth `public key:secret key`; URL-encode dataset
+and run names). Scores are listed by `GET /api/public/v2/scores` (the
+importer reads the v2 shape, with a top-level `traceId`), at most 100 per
+page; fetch every page of each trace's scores and pass them as an array of
+pages (`jq -s`):
+
+```sh
+set -o pipefail
+lf() { curl -sSf -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "$LANGFUSE_HOST$1"; }
+lf "/api/public/datasets/support-golden/runs/support-agent-184-golden" > lf-run.json
+jq -r '.datasetRunItems[].traceId' lf-run.json | sort -u | while read -r t; do
+  page=1
+  while :; do
+    lf "/api/public/v2/scores?traceId=$t&limit=100&page=$page" > lf-page.json || exit 1
+    cat lf-page.json
+    [ "$page" -ge "$(jq '.meta.totalPages' lf-page.json)" ] && break
+    page=$((page + 1))
+  done
+done | jq -s . > lf-scores.json
+cloakpipe eval import --langfuse-run lf-run.json --langfuse-scores lf-scores.json \
+  --release release.yaml --suite support-critical@23 --covers privacy,functional \
+  --critical 'privacy::*' --pass-threshold 0.7 --score correctness --score pii_leak_free --out run.json
+```
+
+`GET /api/public/datasets/{dataset}/runs/{run}` is deprecated by Langfuse:
+on Langfuse Cloud it is scheduled for removal on 2026-11-16 (self-hosted:
+with the v4 upgrade), when dataset runs become experiments
+(`/api/public/experiments`). The importer does not read the experiments
+API yet; until it does, `--langfuse-run` needs a deployment that still
+serves dataset runs.
+
+### `cloakpipe release certify`
+
+```
+cloakpipe release certify MANIFEST --policy FILE --run FILE...
+    [--baseline MANIFEST --baseline-run FILE...] [--require a,b]
+    --environment ENV --issuer ID [--key KEYFILE] [--now RFC3339]
+    [--limitation TEXT]... [--out FILE] [--json]
+```
+
+- **Required suites** = `cloakpipe_release::diff(baseline, candidate).required_suites`
+  ∪ `--require`. Without `--baseline` only `--require` applies; an empty
+  set is allowed but warned about on stderr.
+- **Decision**: `policy::decide` over the candidate's manifest hash, the
+  runs, the baseline runs and the policy (YAML, or JSON when the file ends
+  in `.json`). Structurally invalid runs or policies become `invalid_input`
+  reasons; unparseable files exit 1.
+- **Signing** (`--key`): a `Certification` with `issuedAt = --now` (default:
+  current UTC), `validUntil = issuedAt + policy.validityDays`, the
+  manifest's agent, `--environment`, `--issuer` and `--limitation`s, signed
+  into a DSSE envelope written to `--out` (default
+  `<manifest stem>.cert.dsse.json` in the working directory). BLOCKED
+  decisions are signed too: an attestation of a block.
+- **Output**: `CERTIFIED` or `BLOCKED`, the release hash, the policy, the
+  required suites, then one line per reason. `--json` prints
+  `{"decision", "envelope"?, "envelopePath"?}`.
+- Exit 0 iff the decision is `certified`.
+
+### `cloakpipe release verify-cert`
+
+```
+cloakpipe release verify-cert ENVELOPE [--trust KEYFILE]... [--trust-key KEYID=PUBHEX]...
+    [--release <manifest | sha256:hex>] [--require-run HASH]...
+    [--revoked-statement HEX]... [--revoked-key KEYID]... [--now RFC3339] [--json]
+```
+
+Runs `statement::verify` and prints the status (`VALID`,
+`VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`), the
+decision outcome, release, statement digest and reasons (`--json`: the
+`Report`). Key files from `keygen` are accepted as trust anchors; only their
+public part is used and a declared `keyid` must match the key. Exit 0 iff
+`report.certified` (valid, possibly with limitations, *and* a certified
+decision).
+
+### End to end
+
+```sh
+cloakpipe release keygen --out key.json
+cloakpipe eval import --junit report.xml --release release.yaml \
+  --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out run.json
+cloakpipe release certify release.yaml --policy policy.yaml --run run.json \
+  --baseline previous.yaml --baseline-run previous-run.json \
+  --environment production --issuer ci:acme/support --key key.json
+cloakpipe release verify-cert release.cert.dsse.json --trust key.json --release release.yaml
+```
+
+## GitHub Action
+
+[`.github/actions/certify`](../.github/actions/certify) wraps `release certify`
+for workflows: it installs the CLI (`cargo install --git
+https://github.com/rohansx/cloakpipe … cloakpipe-cli --locked` at
+`cloakpipe-ref`), certifies, writes a job summary and sets the outputs
+`outcome`, `envelope` and `decision`. The `signing-key` input takes the
+contents of a `keygen` key file from a secret; it is written to a `0600`
+temp file for the step and removed afterwards. The action uploads nothing.
+
+```yaml
+- id: cert
+  uses: rohansx/cloakpipe/.github/actions/certify@main
+  with:
+    manifest: release.yaml
+    policy: certification-policy.yaml
+    runs: |
+      runs/support-critical.json
+    baseline-manifest: releases/previous.yaml
+    baseline-runs: |
+      runs/previous/support-critical.json
+    environment: production
+    signing-key: ${{ secrets.CLOAKPIPE_CERT_KEY }}
+```
+
+See the action's [README](../.github/actions/certify/README.md) for all
+inputs. The `certification-gate` CI job exercises the CLI and the action on
+the fixtures in `crates/cloakpipe-cli/tests/fixtures/certification/`.
+
+## Runtime: the MCP tool gate
+
+`cloakpipe mcp-proxy` enforces certification where an agent acts: its tool
+calls. With `--manifest`, each `tools/call` passes only if
+
+1. the tool is declared in the manifest's `spec.tools` (`tool:refund@4`
+   declares `refund`), and
+2. `--certification` verifies offline at the moment of the call: trusted
+   signer (`--trust` / `--trust-key`), not revoked (`--revoked-statement`),
+   inside its validity window, about this manifest's release, a `certified`
+   decision, for `--environment` (default `production`).
+
+```
+cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
+  --manifest release.yaml --certification release.cert.dsse.json \
+  --trust-key "$KEYID=$PUBHEX" --environment production
+```
+
+`--gate enforce` (default): a refused call never reaches the upstream tool.
+The agent receives JSON-RPC error `-32001` with
+`data: {reason, tool, release}` (notifications get no reply). Reasons:
+`undeclared_tool`, `uncertified` (no `--certification`), `wrong_environment`,
+`blocked`, or the verification status (`expired`, `revoked`, `invalid`, …).
+The refusal is recorded as a release-bound `mcp_tool_call` hop with action
+`block` and `gate_denial=<reason>`. `--gate warn` forwards the call, logs the
+violation and marks the hop `gate_violation=<reason>`.
+
+The gate fails closed:
+
+- With a gate, only a message it can read in full is forwarded, re-serialized
+  (never the raw line). In both modes it refuses, with a JSON-RPC error
+  (`id: null`) and a `block` hop: lines that do not parse
+  (`unreadable`, -32700; e.g. out-of-range numbers, lone surrogates, deep
+  nesting that laxer upstream parsers accept), batches (`batch`), non-objects
+  (`not_an_object`) and case variants of JSON-RPC member names such as
+  `"Method"` or `"Name"` (`noncanonical`; some decoders match keys
+  case-insensitively).
+- `--manifest` without a certification refuses every call. Any gate flag
+  without `--manifest`, a malformed `--revoked-statement`, an unreadable
+  envelope, or a `CLOAKPIPE_RELEASE` naming another release refuse to start.
+- `--revoked-key KEYID` revokes a signer. The manifest
+also binds every evidence hop to its release. MCP server identity
+(`spec.mcpServers`) is not checked: the gate fronts the one upstream it was
+started with.
+
+## Audit packs
+
+Certifications, the runs they cite and their revocations travel to
+reviewers inside a release audit pack ([AUDIT_PACK.md](AUDIT_PACK.md)); its
+verifier checks every envelope with `statement::verify` and requires each
+production promotion to be covered by a certification valid at that moment
+(or a break-glass override).
+
+## What a certification does not claim
+
+A valid certification proves that a named issuer applied a named policy to
+named evaluation runs of an exact release and reached the stated decision. It
+does not prove the evaluators measured the right property, that the suites are
+representative, or that the release is safe outside the certified scope and
+validity window.

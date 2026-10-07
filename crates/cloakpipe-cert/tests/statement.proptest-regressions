@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c8ab517bb7d7c2f2ee1194d0a3efd599511e8b2edca2919b5e78cbe2bdf8a513 # shrinks to field = "release", replacement = Null
+cc 222bc1c56530f2e787ea9ce7eb5c56289b9f7b7b21b8e601b7d6235741393cf0 # shrinks to agent = "", env = ""
+cc 0738a52b75707745c8d5aca01df86cb48c26ed825bdbef190fd2dbaa97391bcb # shrinks to payload_type = "", payload = "", keyid = "", sig = "", now = ""
+cc 864d948a30b2a6b57425d3dae0e4aa477cc26a7720e17078f37ca8639b3b0f73 # shrinks to bytes = []
