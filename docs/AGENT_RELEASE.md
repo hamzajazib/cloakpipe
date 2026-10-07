@@ -12,7 +12,7 @@ one configuration can never certify a different one.
 ## Manifest
 
 ```yaml
-apiVersion: cloakpipe.dev/v1alpha1
+apiVersion: cloakpipe.co/v1alpha1
 kind: AgentRelease
 metadata:
   agent: support-agent        # identity — hashed
@@ -44,8 +44,15 @@ collide after Unicode NFC normalisation.
 ## Hash
 
 ```
-manifest_hash = "sha256:" + hex(SHA-256("cloakpipe.dev/agent-release/v1" || "\n" || JCS(view)))
+manifest_hash = "sha256:" + hex(SHA-256("cloakpipe.co/agent-release/v1" || "\n" || JCS(view)))
 ```
+
+> **Legacy identifiers.** Manifests written by CloakPipe up to 0.10 use
+> `apiVersion: cloakpipe.dev/v1alpha1`. They are still accepted, never
+> rewritten, and hashed with the legacy domain `cloakpipe.dev/agent-release/v1`,
+> so release hashes issued before the move to `cloakpipe.co` stay valid. The
+> in-toto predicate type is `https://cloakpipe.co/attestations/agent-release/v1alpha1`
+> (readers also accept the `https://cloakpipe.dev/...` form).
 
 Numbers are written as RFC 8785 requires (ECMAScript `Number::toString`, e.g.
 `1e-7`, `100000000000000000000`, `1e+21`).

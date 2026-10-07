@@ -15,10 +15,16 @@ comment is the normative contract:
 
 | Module | Contract |
 |---|---|
-| `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.dev/evaluation-run/v1`, `cloakpipe.dev/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
+| `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.co/evaluation-run/v1`, `cloakpipe.co/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
 | `import` | JUnit XML, Braintrust experiments, Langfuse dataset runs and native JSON → `EvaluationRun`. |
 | `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds. Pure and deterministic. |
 | `statement` | in-toto v1 Statement in a DSSE envelope signed with Ed25519; verification statuses `VALID`, `VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`. |
+
+Runs and policies use `apiVersion: cloakpipe.co/v1alpha1`; certifications
+use predicate type `https://cloakpipe.co/attestations/certification/v1alpha1`.
+The `cloakpipe.dev/...` identifiers written by CloakPipe up to 0.10 are still
+accepted, and such runs and policies keep their legacy hash domains, so hashes
+pinned in earlier certifications still match.
 
 ## CLI
 

@@ -21,16 +21,16 @@ has a single canonical byte representation, opens in any tool, and leaves
 nothing outside the signature. The cost is size: ledger exports are
 embedded whole (see [Ledger](#ledger)).
 
-## Format (`cloakpipe.dev/v1alpha1`, `ReleaseAuditPack`)
+## Format (`cloakpipe.co/v1alpha1`, `ReleaseAuditPack`)
 
 ```json
 {
-  "apiVersion": "cloakpipe.dev/v1alpha1",
+  "apiVersion": "cloakpipe.co/v1alpha1",
   "kind": "ReleaseAuditPack",
   "spec": {
     "createdAt": "2026-10-07T12:00:00Z",
     "exporter": "cloakpipe-cloud:acme",
-    "release": { "hash": "sha256:<hex>", "manifest": { "apiVersion": "cloakpipe.dev/v1alpha1", "kind": "AgentRelease", "...": "..." } },
+    "release": { "hash": "sha256:<hex>", "manifest": { "apiVersion": "cloakpipe.co/v1alpha1", "kind": "AgentRelease", "...": "..." } },
     "evaluationRuns": [ { "kind": "EvaluationRun", "release": "sha256:<hex>", "...": "..." } ],
     "certifications": [ { "payloadType": "application/vnd.in-toto+json", "payload": "<base64>", "signatures": [ { "keyid": "...", "sig": "..." } ] } ],
     "governance": {
@@ -66,11 +66,16 @@ embedded whole (see [Ledger](#ledger)).
 Every object defined by the pack rejects unknown fields; event `type` is a
 closed set.
 
-**Signing input** = `"cloakpipe.dev/release-audit-pack/v1alpha1"` ‖ `"\n"` ‖
+**Signing input** = `"cloakpipe.co/release-audit-pack/v1alpha1"` ‖ `"\n"` ‖
 `JCS({"apiVersion", "kind", "spec"})`. `digest` = `"sha256:"` + hex SHA-256 of
 the signing input. `signature.sig` = standard base64 of the Ed25519 signature
 of the signing input by the exporter key; `keyid` = `"ed25519:"` + first 16
 hex chars of SHA-256(public key) (the `release keygen` key id).
+
+Packs written by CloakPipe up to 0.10 carry `apiVersion: cloakpipe.dev/v1alpha1`
+and were signed under `cloakpipe.dev/release-audit-pack/v1alpha1`; the
+verifier still accepts them with their original digest and signature, as it
+accepts `cloakpipe.dev` manifests, runs and certifications inside any pack.
 
 ## Governance events are exporter-attested only
 
