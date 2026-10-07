@@ -1,6 +1,7 @@
 //! `cloakpipe anchor` through the real binary, offline: every path that
 //! must refuse before or instead of writing an anchored bundle. The success
-//! path against freetsa.org and rekor.sigstore.dev runs in the `live-anchor`
+//! path is tested offline against replayed recordings in `src/anchor.rs`,
+//! and live against freetsa.org and rekor.sigstore.dev in the `live-anchor`
 //! CI job.
 //!
 //! Exit codes: 0 anchored, 1 anchoring failed / refused, 2 usage or I/O.

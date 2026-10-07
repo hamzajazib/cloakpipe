@@ -42,8 +42,12 @@ cloakpipe anchor bundle.json --key key.json \
 
 1. checks `--key` is the key that signed the bundle's manifest;
 2. builds one batch head over all records (Merkle root of the record hashes,
-   `signed_time` = now, signed by the operator key) and a Merkle inclusion
-   proof per record;
+   signed by the operator key) and a Merkle inclusion proof per record. The
+   head's `signed_time` is now minus `--clock-skew-secs` (default 60), but
+   never before the newest record: a claim earlier than the real seal is
+   harmless, while a host clock running ahead of the TSA's or Rekor's would
+   otherwise make the honest seal look later than its own anchor (and fail
+   as back-dating);
 3. sends `SHA-256(head JSON)` to the TSA in a DER `TimeStampReq` with a fresh
    128-bit nonce and `certReq = TRUE`;
 4. submits a `hashedrekord` entry to Rekor: the artifact is the head JSON,
@@ -57,7 +61,7 @@ cloakpipe anchor bundle.json --key key.json \
 
 Options: `--tsa-url` (DigiCert: `http://timestamp.digicert.com` with root
 *DigiCert Trusted Root G4*), `--rekor-url`, `--no-tsa`, `--no-rekor`,
-`--batch-id`, `--timeout-secs`. Each enabled anchor requires its trust input.
+`--batch-id`, `--timeout-secs`, `--clock-skew-secs`. Each enabled anchor requires its trust input.
 Exit codes: 0 anchored, 1 refused / anchor failed (nothing written), 2 usage
 or I/O.
 
@@ -85,7 +89,17 @@ Fail-closed rules:
   a batch head with a valid inclusion proof. An unanchored bundle fails.
 - **Back-dating**: no record `ts` and no head `signed_time` may be later than
   the anchored time (`genTime` / `integratedTime`, compared in whole
-  seconds). A record claimed after its anchor was written after the fact.
+  seconds, with no tolerance; TSTInfo `accuracy` is not applied). A record
+  claimed after its anchor was written after the fact. Clock skew is
+  absorbed on the producing side (`--clock-skew-secs`), never by the
+  verifier; records stamped by a clock ahead of the TSA's fail, since they
+  are indistinguishable from back-dated ones.
+- **Batch structure**: batch ids are unique and head ranges are non-empty
+  and disjoint, so each record is covered by exactly one head and a second
+  head cannot reuse an anchored head's id.
+- `all` runs these checks whenever a trust input is given or the bundle
+  carries receipts, whatever its `format_version`: lowering the version does
+  not switch them off.
 - A receipt whose subject is not the SHA-256 of the head as it appears in the
   bundle fails (a changed head is not covered by its anchor).
 
