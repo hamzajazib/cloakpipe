@@ -11,4 +11,5 @@
 
 pub mod anchor;
 pub mod bundle;
+pub mod pack;
 pub mod verify;
