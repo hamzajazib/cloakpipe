@@ -1,7 +1,12 @@
 //! Produce a fixture bundle for the `cloakpipe-verify` gate tests.
 //!
 //! Usage:
-//!   cargo run -p cloakpipe-ledger --bin ledger-export-example -- <out_path>
+//!   cargo run -p cloakpipe-ledger --bin ledger-export-fixture -- [out_path [release_hash trust_out]]
+//!
+//! With `release_hash` (`sha256:<hex>`) every hop is bound to that Agent
+//! Release, and the signer's public key is written to `trust_out` in the
+//! `release keygen` trust-file format, so a release audit pack built from
+//! the bundle can pin it (`cloakpipe-verify release-pack --trust`).
 //!
 //! Writes a self-describing bundle containing 10 records across one
 //! tenant, signed with a fresh Ed25519 key (the pubkey is included in
@@ -27,9 +32,18 @@ fn main() -> anyhow::Result<()> {
     let mut store = LedgerStore::open(db_path.to_str().unwrap())?;
     let tenant = uuid::Uuid::new_v4();
     let signer = Ed25519Signer::generate();
+    let release = match args.get(2) {
+        Some(h) => {
+            let hex = h.strip_prefix("sha256:").ok_or_else(|| anyhow::anyhow!("release must be sha256:<hex>"))?;
+            let mut out = [0u8; 32];
+            hex::decode_to_slice(hex, &mut out)?;
+            Some(out)
+        }
+        None => None,
+    };
 
     for i in 0..10u64 {
-        let mut r = RecordBuilder::new()
+        let mut b = RecordBuilder::new()
             .seq(i)
             .tenant(tenant)
             .hop(if i % 2 == 0 { Hop::LlmPrompt } else { Hop::LlmResponse })
@@ -42,8 +56,11 @@ fn main() -> anyhow::Result<()> {
                 entity_type: "PAN".into(),
                 kind: ActionKind::Pseudonymize,
                 token_ref: Some(format!("tok_{i}")),
-            })
-            .build()?;
+            });
+        if let Some(h) = release {
+            b = b.release(h);
+        }
+        let mut r = b.build()?;
         store.append(&tenant, &mut r)?;
     }
 
@@ -54,5 +71,14 @@ fn main() -> anyhow::Result<()> {
     }
     write_bundle(&path, &bundle)?;
     println!("wrote bundle to {}", path.display());
+    if let Some(trust_out) = args.get(3) {
+        use cloakpipe_ledger::Signer;
+        use sha2::Digest;
+        let public = signer.public_key();
+        let keyid = format!("ed25519:{}", &hex::encode(sha2::Sha256::digest(public))[..16]);
+        let trust = serde_json::json!({"keyid": keyid, "publicKey": hex::encode(public)});
+        std::fs::write(trust_out, trust.to_string())?;
+        println!("wrote signer trust file to {trust_out}");
+    }
     Ok(())
 }
