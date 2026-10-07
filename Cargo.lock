@@ -481,10 +481,13 @@ name = "cloakpipe-anchor"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
+ "cloakpipe-verify",
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
