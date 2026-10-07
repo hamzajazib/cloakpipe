@@ -1,8 +1,11 @@
-apiVersion: cloakpipe.co/v1alpha1
+# Legacy-namespace fixture (cloakpipe.dev), as written before the rename to
+# cloakpipe.co. Do not edit or migrate: readers must keep accepting it and its
+# hash is pinned in support-agent-184.legacy.hash.
+apiVersion: cloakpipe.dev/v1alpha1
 kind: AgentRelease
 metadata:
   agent: support-agent
-  version: "185"
+  version: "184"
   labels:
     team: support
 spec:
@@ -10,7 +13,7 @@ spec:
     repository: acme/support
     commit: 8fd29ac
   prompts:
-    - ref: prompt:support-answer@32
+    - ref: prompt:support-answer@31
   model:
     ref: model:openai/gpt-5@2026-08-01
   parameters:
@@ -19,7 +22,6 @@ spec:
   tools:
     - ref: tool:lookup-customer@7
     - ref: tool:refund@4
-    - ref: tool:send-email@2
   mcpServers:
     - ref: mcp:crm@12
   retrieval:

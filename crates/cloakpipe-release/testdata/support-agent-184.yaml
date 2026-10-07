@@ -1,4 +1,4 @@
-apiVersion: cloakpipe.dev/v1alpha1
+apiVersion: cloakpipe.co/v1alpha1
 kind: AgentRelease
 metadata:
   agent: support-agent

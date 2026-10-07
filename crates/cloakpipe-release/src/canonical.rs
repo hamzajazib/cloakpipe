@@ -11,16 +11,20 @@
 //! - an absent `retrieval` is an explicit `null`; empty collections are kept.
 //!
 //! The normalised view is encoded with RFC 8785 (JSON Canonicalization Scheme)
-//! and hashed as `SHA-256(HASH_DOMAIN || "\n" || jcs_bytes)`.
+//! and hashed as `SHA-256(domain || "\n" || jcs_bytes)`, where `domain` is
+//! [`HASH_DOMAIN`] for a `cloakpipe.co` manifest and the legacy
+//! `cloakpipe.dev/agent-release/v1` for a manifest issued under
+//! `cloakpipe.dev/v1alpha1`, so legacy hashes stay valid.
 
 use crate::manifest::{AgentRelease, ArtifactRef};
+use crate::namespace::{self, Namespace};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-/// Domain-separation prefix for the manifest hash. Bump only together with a
-/// deliberate change to the canonical view.
-pub const HASH_DOMAIN: &str = "cloakpipe.dev/agent-release/v1";
+/// Domain-separation prefix for the manifest hash of a current-namespace
+/// manifest. Bump only together with a deliberate change to the canonical view.
+pub const HASH_DOMAIN: &str = namespace::AGENT_RELEASE_HASH_DOMAIN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReleaseHash(pub [u8; 32]);
@@ -98,7 +102,7 @@ impl AgentRelease {
 
     pub fn manifest_hash(&self) -> ReleaseHash {
         let mut h = Sha256::new();
-        h.update(HASH_DOMAIN.as_bytes());
+        h.update(Namespace::for_hashing(&self.api_version).agent_release_hash_domain().as_bytes());
         h.update(b"\n");
         h.update(self.canonical_bytes());
         ReleaseHash(h.finalize().into())

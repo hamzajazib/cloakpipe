@@ -5,7 +5,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const API_VERSION: &str = "cloakpipe.dev/v1alpha1";
+/// The `apiVersion` writers emit; readers also accept
+/// [`crate::namespace::LEGACY_API_VERSION`].
+pub const API_VERSION: &str = crate::namespace::API_VERSION;
 pub const KIND: &str = "AgentRelease";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

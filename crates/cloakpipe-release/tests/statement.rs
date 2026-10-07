@@ -11,7 +11,7 @@ fn statement_binds_subject_digest_to_manifest_hash() {
     let s = r.intoto_statement();
 
     assert_eq!(s["_type"], "https://in-toto.io/Statement/v1");
-    assert_eq!(s["predicateType"], "https://cloakpipe.dev/attestations/agent-release/v1alpha1");
+    assert_eq!(s["predicateType"], "https://cloakpipe.co/attestations/agent-release/v1alpha1");
     assert_eq!(s["subject"][0]["name"], "agent-release:support-agent@184");
 
     let digest = s["subject"][0]["digest"]["sha256"].as_str().unwrap();

@@ -217,12 +217,18 @@ pub fn diff(baseline: &AgentRelease, candidate: &AgentRelease) -> ReleaseDiff {
     let requires_approval = changes.iter().any(|c| c.component.requires_approval());
 
     ReleaseDiff {
-        comparable: a["agent"] == b["agent"] && a["apiVersion"] == b["apiVersion"],
+        comparable: a["agent"] == b["agent"] && same_format(&baseline.api_version, &candidate.api_version),
         same_hash: baseline.manifest_hash() == candidate.manifest_hash(),
         changes,
         required_suites,
         requires_approval,
     }
+}
+
+/// The same format version: equal `apiVersion`s, or one supported version
+/// spelled in either namespace (`cloakpipe.co` / legacy `cloakpipe.dev`).
+fn same_format(a: &str, b: &str) -> bool {
+    a == b || (crate::namespace::is_known_api_version(a) && crate::namespace::is_known_api_version(b))
 }
 
 fn render(v: &Value) -> Option<String> {

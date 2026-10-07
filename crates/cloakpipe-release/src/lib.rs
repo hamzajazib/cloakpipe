@@ -9,6 +9,7 @@
 mod canonical;
 mod diff;
 mod manifest;
+pub mod namespace;
 mod reference;
 mod statement;
 mod validate;

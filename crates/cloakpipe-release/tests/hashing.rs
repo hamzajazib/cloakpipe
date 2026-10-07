@@ -37,7 +37,8 @@ fn hash_has_algorithm_prefix_and_hex_digest() {
 #[test]
 fn golden_hash_is_stable_across_versions_of_this_crate() {
     // If this changes, every previously issued release hash is invalidated.
-    // Only update it together with a new hash domain (cloakpipe.dev/agent-release/v2).
+    // Only update it together with a new hash domain (cloakpipe.co/agent-release/v2).
+    // The legacy golden (cloakpipe.dev namespace) is pinned in tests/namespace.rs.
     let r = parse_path(&testdata("support-agent-184.yaml")).unwrap();
     assert_eq!(r.manifest_hash().to_string(), include_str!("../testdata/support-agent-184.hash").trim());
 }

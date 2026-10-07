@@ -2,6 +2,7 @@
 //! behaviour-affecting component to an immutable identity.
 
 use crate::manifest::{AgentRelease, ArtifactRef, API_VERSION, KIND};
+use crate::namespace;
 use crate::reference::{is_lower_hex, is_valid_name, RefError, RefKind, Reference};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,8 +63,12 @@ impl AgentRelease {
         let mut v = Validator::default();
         let s = &self.spec;
 
-        if self.api_version != API_VERSION {
-            v.push(IssueCode::UnsupportedApiVersion, "apiVersion", format!("expected {API_VERSION}, got {:?}", self.api_version));
+        if !namespace::is_known_api_version(&self.api_version) {
+            v.push(
+                IssueCode::UnsupportedApiVersion,
+                "apiVersion",
+                format!("expected {API_VERSION} (or legacy {}), got {:?}", namespace::LEGACY_API_VERSION, self.api_version),
+            );
         }
         if self.kind != KIND {
             v.push(IssueCode::UnsupportedKind, "kind", format!("expected {KIND}, got {:?}", self.kind));
