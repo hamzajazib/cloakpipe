@@ -13,33 +13,37 @@ Thanks for your interest in contributing to CloakPipe! This document covers the 
 
 ## Development Setup
 
+CloakPipe builds with the current stable Rust toolchain (CI uses `dtolnay/rust-toolchain@stable`).
+
 ```bash
-# Build
-cargo build
+# Build everything
+cargo build --workspace
 
-# Run tests
-cargo test
+# Run the full test suite
+cargo test --workspace
 
-# Run with debug logging
-RUST_LOG=debug cargo run -- start
+# Lint exactly as CI does
+cargo clippy --workspace --all-targets -- -D warnings
 
-# Run detection test (no API key needed)
-cargo run -- test --text "Send $1.2M to alice@acme.com"
+# Run the proxy with debug logging
+RUST_LOG=debug cargo run -p cloakpipe-cli -- start
+
+# Try detection (no API key needed)
+cargo run -p cloakpipe-cli -- test --text "Send $1.2M to alice@acme.com"
 ```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) also runs end-to-end
+gates for release manifests, certification, audit packs, the verifier and the
+CloakLeak zero-leak benchmark. A change that alters the golden release hash in
+`crates/cloakpipe-release/testdata` invalidates every hash already issued, so call
+it out explicitly in your PR.
 
 ## Project Structure
 
-CloakPipe is a Cargo workspace with these crates:
-
-| Crate | Purpose |
-|-------|---------|
-| `cloakpipe-core` | Detection engine, pseudonymization, vault, rehydration |
-| `cloakpipe-proxy` | Axum HTTP proxy server |
-| `cloakpipe-cli` | CLI binary |
-| `cloakpipe-audit` | JSONL audit logging |
-| `cloakpipe-tree` | Vectorless retrieval (planned) |
-| `cloakpipe-vector` | Vector encryption (planned) |
-| `cloakpipe-local` | Local-only RAG mode (planned) |
+CloakPipe is a Cargo workspace; see the crate map in the [README](README.md#architecture).
+Normative specifications live in [`docs/`](docs): `AGENT_RELEASE.md`,
+`CERTIFICATION.md`, `ANCHORING.md` and `AUDIT_PACK.md`. If you change a format
+or a verification rule, update the matching document in the same PR.
 
 ## What to Contribute
 
@@ -52,15 +56,16 @@ For larger changes (new features, architectural changes), please open an issue f
 
 ## Code Guidelines
 
-- Run `cargo test` before submitting. All tests must pass.
-- Run `cargo clippy` and address any warnings.
+- Run `cargo test --workspace` before submitting. All tests must pass.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`; CI denies warnings.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) style messages, e.g. `fix(verify): ...`, `feat(cli): ...`, `docs: ...`.
 - Follow existing code style -- no need to reformat files you didn't change.
 - Keep PRs focused. One feature or fix per PR.
 - Write tests for new functionality.
 
 ## Security
 
-If you discover a security vulnerability, **do not open a public issue**. Instead, report it privately via [GitHub Security Advisories](https://github.com/rohansx/cloakpipe/security/advisories/new).
+If you discover a security vulnerability, **do not open a public issue**. See [SECURITY.md](SECURITY.md).
 
 ## License
 
