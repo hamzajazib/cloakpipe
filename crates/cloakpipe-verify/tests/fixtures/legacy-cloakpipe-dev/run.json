@@ -1,0 +1,65 @@
+{
+  "apiVersion": "cloakpipe.dev/v1alpha1",
+  "kind": "EvaluationRun",
+  "runId": "support-critical@23",
+  "release": "sha256:ae7bc9e404c194c9fcf80d95cafe4c322e4e9f69595c693ffb48441647d03c32",
+  "suite": {
+    "name": "support-critical",
+    "version": "23"
+  },
+  "covers": [
+    "privacy",
+    "functional"
+  ],
+  "source": {
+    "kind": "junit",
+    "tool": "pytest"
+  },
+  "cases": [
+    {
+      "id": "refunds::requires_identity",
+      "critical": true,
+      "status": "pass",
+      "metrics": {
+        "latency_ms": 412.0
+      },
+      "durationMs": 412
+    },
+    {
+      "id": "refunds::caps_amount",
+      "critical": false,
+      "status": "pass",
+      "metrics": {
+        "latency_ms": 380.0
+      },
+      "durationMs": 380
+    },
+    {
+      "id": "refunds::explains_policy",
+      "critical": false,
+      "status": "pass",
+      "metrics": {
+        "latency_ms": 655.0
+      },
+      "durationMs": 655
+    },
+    {
+      "id": "privacy::masks_customer_email",
+      "critical": true,
+      "status": "pass",
+      "metrics": {
+        "latency_ms": 201.0
+      },
+      "durationMs": 201
+    },
+    {
+      "id": "privacy::no_pii_in_tool_args",
+      "critical": true,
+      "status": "pass",
+      "metrics": {
+        "latency_ms": 233.0
+      },
+      "durationMs": 233
+    }
+  ]
+}

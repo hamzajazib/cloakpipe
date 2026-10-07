@@ -41,3 +41,22 @@ case is `<case>-root.pem` (the trust input), `<case>.tsr`, `<case>.nonce`:
 | `critroot` | CA root with an unknown critical extension -> TSA | rejected |
 | `ekuint` | CA root -> CA with EKU codeSigning only -> TSA | rejected |
 
+
+## `legacy-cloakpipe-dev/`: objects issued before the `cloakpipe.co` rename
+
+Produced on 2026-10-07 by the CloakPipe 0.10 CLI (commit `60a3206`, before
+format identifiers moved from `cloakpipe.dev` to `cloakpipe.co`), following
+the CI `audit-pack-gate` steps. Never regenerate or edit them: they prove
+that objects carrying `cloakpipe.dev/...` identifiers keep verifying with the
+hashes and signatures they were issued with.
+
+| file | what |
+|---|---|
+| `manifest.yaml` | `cloakpipe.dev/v1alpha1` Agent Release (hash `sha256:ae7bc9e4...`) |
+| `policy.yaml` | `cloakpipe.dev/v1alpha1` certification policy |
+| `run.json` | evaluation run imported from `passing.junit.xml` |
+| `cert.dsse.json` | certification (predicate type `https://cloakpipe.dev/attestations/certification/v1alpha1`), valid 2026-10-01 to 2026-10-31 |
+| `ledger.json`, `ledger.pub.json` | ledger export bound to the release and its signer |
+| `events.json` | governance events used for the pack |
+| `pack.json` | release audit pack signed under `cloakpipe.dev/release-audit-pack/v1alpha1` |
+| `exporter.pub.json`, `cert.pub.json` | public halves of the throwaway exporter and issuer keys (private halves discarded) |
