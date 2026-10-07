@@ -153,8 +153,9 @@ impl Inputs {
         verify_pack_bytes(
             &bytes,
             &VerifyOptions {
-                trusted: vec![self.trust("exporter.key.json"), ledger],
-                cert_trusted: Some(vec![self.trust("cert.key.json")]),
+                trusted: vec![self.trust("exporter.key.json")],
+                ledger_trusted: vec![ledger],
+                cert_trusted: vec![self.trust("cert.key.json")],
                 now: NOW.parse().unwrap(),
             },
         )
@@ -219,7 +220,7 @@ fn assembles_a_pack_that_verifies() {
 }
 
 #[test]
-fn ledger_exports_and_events_are_optional() {
+fn ledger_exports_are_optional_but_a_registration_is_not() {
     let i = Inputs::new();
     let (code, out, err) = run(
         i.dir.path(),
@@ -238,10 +239,18 @@ fn ledger_exports_and_events_are_optional() {
             CREATED,
             "--out",
             "pack.json",
+            "--events",
+            "events.json",
         ],
     );
     assert_eq!(code, 0, "{out}{err}");
     assert!(i.verify().ok);
+
+    let i = Inputs::new();
+    i.write("events.json", &json!([events()[0].clone()]).to_string());
+    let (code, _, err) = i.assemble(&[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("release_registered"), "{err}");
 }
 
 #[test]

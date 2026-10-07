@@ -3,11 +3,11 @@
 //! The builder refuses inputs that could never verify (a run or
 //! certification about another release, an uncertifiable manifest, a
 //! timestamp that is not RFC 3339, a ledger export with no hop for this
-//! release), sorts governance events by time and always states
+//! release or overlapping another, no `release_registered` event), sorts governance events by time and always states
 //! [`GOVERNANCE_LIMITATION`]. It does not check certification signatures or
 //! promotion consistency: those need the verifier's trust anchors.
 
-use super::check::{parse_time, release_binding_count, subject_release};
+use super::check::{overlap, parse_time, release_binding_count, subject_release};
 use super::*;
 use base64::prelude::*;
 use ed25519_dalek::{Signer, SigningKey};
@@ -30,6 +30,8 @@ pub enum BuildError {
     Ledger { index: usize, problem: String },
     #[error("pack cannot be serialised canonically: {0}")]
     Serialization(String),
+    #[error("governance events must include the release_registered event")]
+    MissingRegistration,
 }
 
 /// Assembles a [`ReleaseAuditPack`]; see the module docs.
@@ -174,6 +176,7 @@ impl PackBuilder {
         }
         events.sort_by_key(|(at, _)| *at); // stable: equal times keep their order
 
+        let mut seen = std::collections::BTreeMap::new();
         for (index, bundle) in self.ledger_exports.iter().enumerate() {
             match release_binding_count(bundle, &hash) {
                 Ok(0) => {
@@ -182,6 +185,12 @@ impl PackBuilder {
                 Ok(_) => {}
                 Err(problem) => return Err(BuildError::Ledger { index, problem }),
             }
+            if let Some(problem) = overlap(&mut seen, index, bundle) {
+                return Err(BuildError::Ledger { index, problem });
+            }
+        }
+        if !events.iter().any(|(_, e)| matches!(e, GovernanceEvent::ReleaseRegistered { .. })) {
+            return Err(BuildError::MissingRegistration);
         }
 
         let mut limitations = vec![GOVERNANCE_LIMITATION.to_string()];

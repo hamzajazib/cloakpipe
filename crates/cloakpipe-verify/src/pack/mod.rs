@@ -68,6 +68,13 @@ pub const ATTESTED_BY_EXPORTER: &str = "exporter";
 /// The one environment a promotion into requires a valid certification (or
 /// a break-glass override).
 pub const CERTIFIED_ENVIRONMENT: &str = "production";
+/// The environments an event may name, spelled exactly (CloakPipe Cloud's
+/// environment pointers). Anything else, including a near-miss such as
+/// `Production` or `prod`, fails verification rather than being treated as
+/// an environment that needs no certification.
+pub const KNOWN_ENVIRONMENTS: [&str; 5] = ["draft", "candidate", "staging", CERTIFIED_ENVIRONMENT, "rollback"];
+/// The largest pack file `cloakpipe-verify release-pack` reads (256 MiB).
+pub const MAX_PACK_BYTES: u64 = 256 * 1024 * 1024;
 /// Stated in every pack the builder makes and in every report.
 pub const GOVERNANCE_LIMITATION: &str = "Governance events (registration, promotions, revocations, sentinel \
      breaches) are attested only by the exporter's pack signature; they are not signed by the actors they name.";
@@ -130,7 +137,8 @@ pub struct PackSignature {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum GovernanceEvent {
-    /// The manifest was registered; `agent`/`version` must match it.
+    /// The manifest was registered; `agent`/`version` must match it. Exactly
+    /// one, and it is the first event.
     ReleaseRegistered { at: String, actor: String, agent: String, version: String },
     /// An environment pointer moved to this release. Into
     /// [`CERTIFIED_ENVIRONMENT`] it needs a certification valid at `at`, or

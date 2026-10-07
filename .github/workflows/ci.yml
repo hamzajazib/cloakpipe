@@ -290,13 +290,13 @@ jobs:
             --exporter ci:pack-gate --now 2026-10-10T00:00:00Z --out "$WORK/pack.json"
       - name: Verify the pack (must exit 0)
         run: |
-          $VERIFY release-pack "$WORK/pack.json" --trust "$WORK/exporter.key.json" --trust "$WORK/ledger.pub.json" \
+          $VERIFY release-pack "$WORK/pack.json" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
             --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z
       - name: Tampered or inconsistent packs must exit 1
         run: |
           expect_fail() {
             set +e
-            $VERIFY release-pack "$1" --trust "$WORK/exporter.key.json" --trust "$WORK/ledger.pub.json" \
+            $VERIFY release-pack "$1" --trust "$WORK/exporter.key.json" --ledger-trust "$WORK/ledger.pub.json" \
               --cert-trust "$WORK/cert.key.json" --now 2026-10-15T00:00:00Z > "$1.txt"
             code=$?
             set -e
@@ -324,6 +324,17 @@ jobs:
             --ledger-export "$WORK/ledger.json" --events "$WORK/early.json" --key "$WORK/exporter.key.json" \
             --now 2026-10-10T00:00:00Z --out "$WORK/early.pack.json"
           expect_fail "$WORK/early.pack.json"
+          # A near-miss of "production" must not dodge the certification rule.
+          python3 - "$WORK/events.json" "$WORK/misspelled.json" <<'PY'
+          import json, sys
+          e = json.load(open(sys.argv[1]))
+          e[1]["environment"] = "Production"
+          json.dump(e, open(sys.argv[2], "w"))
+          PY
+          $CP release audit-pack --manifest "$MANIFEST" --run "$WORK/run.json" \
+            --ledger-export "$WORK/ledger.json" --events "$WORK/misspelled.json" --key "$WORK/exporter.key.json" \
+            --now 2026-10-10T00:00:00Z --out "$WORK/misspelled.pack.json"
+          expect_fail "$WORK/misspelled.pack.json"
       - name: Upload the pack
         if: always()
         uses: actions/upload-artifact@v4

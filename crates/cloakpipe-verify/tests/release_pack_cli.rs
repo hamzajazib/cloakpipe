@@ -49,7 +49,7 @@ impl Fixture {
             pack,
             "--trust",
             "exporter.pub.json",
-            "--trust",
+            "--ledger-trust",
             "ledger.pub.json",
             "--cert-trust",
             "cert.pub.json",
@@ -120,32 +120,59 @@ fn a_file_that_is_not_a_pack_exits_1() {
 }
 
 #[test]
-fn without_cert_trust_the_trust_keys_are_used() {
+fn each_key_role_has_its_own_flag() {
     let f = Fixture::new();
+    // Without --cert-trust no certification verifies, whatever --trust holds.
     let o = f.run(&[
         "release-pack",
         "pack.json",
         "--trust",
         "exporter.pub.json",
-        "--trust",
-        "ledger.pub.json",
         "--trust",
         "cert.pub.json",
-        "--now",
-        NOW,
-    ]);
-    assert_eq!(code(&o), 0, "{}", stdout(&o));
-    let o = f.run(&[
-        "release-pack",
-        "pack.json",
-        "--trust",
-        "exporter.pub.json",
-        "--trust",
+        "--ledger-trust",
         "ledger.pub.json",
         "--now",
         NOW,
     ]);
     assert_eq!(code(&o), 1, "{}", stdout(&o));
+    // The ledger signer is not an exporter.
+    let o = f.run(&[
+        "release-pack",
+        "pack.json",
+        "--trust",
+        "exporter.pub.json",
+        "--trust",
+        "ledger.pub.json",
+        "--cert-trust",
+        "cert.pub.json",
+        "--now",
+        NOW,
+    ]);
+    assert_eq!(code(&o), 1, "{}", stdout(&o));
+    // One key given for two roles fails.
+    let o = f.verify("pack.json", &["--cert-trust", "exporter.pub.json"]);
+    assert_eq!(code(&o), 1, "{}", stdout(&o));
+    assert!(stdout(&o).contains("more than one role"), "{}", stdout(&o));
+}
+
+#[test]
+fn a_pack_larger_than_the_limit_is_not_read() {
+    let f = Fixture::new();
+    let big = std::fs::File::create(f.path("big.json")).unwrap();
+    big.set_len(cloakpipe_verify::pack::MAX_PACK_BYTES + 1).unwrap();
+    let o = f.verify("big.json", &[]);
+    assert_eq!(code(&o), 2, "{}", stdout(&o));
+    assert!(stderr(&o).contains("larger than"), "{}", stderr(&o));
+}
+
+#[test]
+fn usage_says_trust_flags_take_one_file_each() {
+    let o = Command::new(bin()).arg("help").output().unwrap();
+    let out = stdout(&o);
+    assert!(!out.contains("KEYFILE..."), "{out}");
+    assert!(out.contains("--ledger-trust"), "{out}");
+    assert!(out.contains("repeat"), "{out}");
 }
 
 #[test]
@@ -193,7 +220,7 @@ fn a_private_key_file_is_accepted_as_trust() {
         "pack.json",
         "--trust",
         "exporter.key.json",
-        "--trust",
+        "--ledger-trust",
         "ledger.pub.json",
         "--cert-trust",
         "cert.pub.json",

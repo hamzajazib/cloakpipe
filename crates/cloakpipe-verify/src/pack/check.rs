@@ -13,13 +13,18 @@ use cloakpipe_release::ReleaseHash;
 use ed25519_dalek::VerifyingKey;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What verification depends on besides the pack.
+/// What verification depends on besides the pack. Each role has its own
+/// trust anchors, and one key may not hold two roles: otherwise the exporter
+/// could certify its own promotions, or a runtime ledger key (on a less
+/// protected proxy host) could sign governance history.
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
-    /// Trusted exporter and ledger signer keys (`--trust`).
+    /// Trusted exporter keys (`--trust`): the pack signature.
     pub trusted: Vec<TrustedKey>,
-    /// Trusted certification issuers (`--cert-trust`); `None` uses `trusted`.
-    pub cert_trusted: Option<Vec<TrustedKey>>,
+    /// Trusted ledger signer keys (`--ledger-trust`), matched by public key.
+    pub ledger_trusted: Vec<TrustedKey>,
+    /// Trusted certification issuers (`--cert-trust`).
+    pub cert_trusted: Vec<TrustedKey>,
     /// The verification time (`--now`).
     pub now: DateTime<Utc>,
 }
@@ -190,33 +195,83 @@ const RECORD_LINES: [&str; 11] = [
 
 /// Parse the fields a pack needs from a record's canonical bytes (the
 /// `cloakpipe-ledger` encoding). Anything that does not read one way only
-/// is an error: an unexpected line layout, or a `release_hash=` that is not
-/// exactly one `release_hash=hash:<64 hex>;` metadata entry.
+/// is an error: an unexpected line layout, or metadata that is not exactly
+/// the ledger's `key=type:value;` entries (see [`parse_metadata`]).
 fn parse_hop(canonical: &str) -> Result<Hop, String> {
     let lines: Vec<&str> = canonical.split('\n').collect();
     if lines.len() != RECORD_LINES.len() || lines.iter().zip(RECORD_LINES).any(|(l, p)| !l.starts_with(p)) {
         return Err("canonical bytes are not the 11-line record encoding".into());
     }
-    let meta = &lines[10]["metadata=".len()..];
-    const KEY: &str = "release_hash=";
-    let release = match meta.matches(KEY).count() {
-        0 => None,
-        1 => {
-            let pos = meta.find(KEY).unwrap_or_default();
-            let entry = &meta[pos + KEY.len()..];
-            let hex = entry
-                .strip_prefix("hash:")
-                .and_then(|h| h.get(..64))
-                .filter(|h| h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-            let terminated = entry.as_bytes().get(5 + 64) == Some(&b';');
-            match hex {
-                Some(hex) if terminated && (pos == 0 || meta[..pos].ends_with(';')) => Some(format!("sha256:{hex}")),
-                _ => return Err("ambiguous release binding in metadata".into()),
+    let release = parse_metadata(&lines[10]["metadata=".len()..])?;
+    Ok(Hop { hop: lines[3]["hop=".len()..].to_string(), ts: lines[1]["ts=".len()..].to_string(), release })
+}
+
+/// Parse a record's metadata line and return its release binding.
+///
+/// The ledger writes a `BTreeMap` as `key=type:value;` entries, keys in
+/// strictly increasing byte order, and refuses keys and opaque ids that
+/// contain `;` or `=` (or whitespace). Under those rules a line splits into
+/// entries one way only, so the binding read here is exactly
+/// `LedgerRecord::release_hash()`: the entry whose key is `release_hash`,
+/// which must be a `hash`. Anything else fails rather than being guessed.
+fn parse_metadata(meta: &str) -> Result<Option<String>, String> {
+    if meta.is_empty() {
+        return Ok(None);
+    }
+    let body = meta.strip_suffix(';').ok_or("metadata does not end with `;`")?;
+    let is_hex64 = |v: &str| v.len() == 64 && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let mut release = None;
+    let mut previous: Option<&str> = None;
+    for entry in body.split(';') {
+        let malformed = || format!("metadata entry {entry:?} is not `key=type:value`");
+        let (key, typed) = entry.split_once('=').ok_or_else(malformed)?;
+        let (kind, value) = typed.split_once(':').ok_or_else(malformed)?;
+        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(format!("metadata key {key:?} is not a plain name"));
+        }
+        if previous.is_some_and(|p| p >= key) {
+            return Err(format!("metadata key {key:?} is out of order or repeated"));
+        }
+        previous = Some(key);
+        let well_typed = match kind {
+            "bool" => value == "true" || value == "false",
+            "int" => value.parse::<i64>().is_ok_and(|i| i.to_string() == value),
+            "hash" => is_hex64(value),
+            "id" => !value.contains('=') && !value.chars().any(char::is_whitespace),
+            _ => false,
+        };
+        if !well_typed {
+            return Err(format!("metadata entry {entry:?} is not a valid {kind:?} value"));
+        }
+        if key == RELEASE_HASH_KEY {
+            if kind != "hash" {
+                return Err(format!("metadata release_hash is a {kind:?}, not a hash: ambiguous release binding"));
+            }
+            release = Some(format!("sha256:{value}"));
+        }
+    }
+    Ok(release)
+}
+
+/// `cloakpipe_ledger::RELEASE_HASH_KEY` (this crate does not depend on the
+/// ledger).
+const RELEASE_HASH_KEY: &str = "release_hash";
+
+/// Record the `(tenant, seq)` of every record of export `index`; the first
+/// one already seen in an earlier export is reported as an overlap.
+pub(crate) fn overlap(seen: &mut BTreeMap<(String, u64), usize>, index: usize, bundle: &Bundle) -> Option<String> {
+    let mut found = None;
+    for r in &bundle.records {
+        if let Some(j) = seen.insert((r.tenant_id.clone(), r.seq), index) {
+            if j != index && found.is_none() {
+                found = Some(format!(
+                    "overlaps ledgerExports[{j}] (record {}#{}): include each hop once, in one export",
+                    r.tenant_id, r.seq
+                ));
             }
         }
-        _ => return Err("ambiguous release binding: `release_hash=` appears more than once in metadata".into()),
-    };
-    Ok(Hop { hop: lines[3]["hop=".len()..].to_string(), ts: lines[1]["ts=".len()..].to_string(), release })
+    }
+    found
 }
 
 /// How many records of `bundle` are bound to `release`.
@@ -261,6 +316,8 @@ struct Checker<'a> {
 /// A certification decoded from the pack, for consistency checks.
 struct PackCert<'a> {
     envelope: &'a Envelope,
+    /// sha256 hex of the decoded payload (what revocations name).
+    digest: Option<String>,
     certification: Option<Certification>,
 }
 
@@ -297,6 +354,7 @@ impl<'a> Checker<'a> {
         if let Err(e) = strict::check_numbers(doc) {
             self.fail(format!("pack: {e}"));
         }
+        self.check_roles();
         let Some(obj) = doc.as_object() else {
             return self.fail("pack: not a JSON object");
         };
@@ -316,6 +374,34 @@ impl<'a> Checker<'a> {
             self.fail(format!("pack: kind {:?} is not {PACK_KIND:?}", pack.kind));
         }
         self.check_spec(&pack.spec);
+    }
+
+    /// No public key is trusted for two roles.
+    fn check_roles(&mut self) {
+        let roles = [
+            ("exporter (--trust)", &self.opts.trusted),
+            ("ledger signer (--ledger-trust)", &self.opts.ledger_trusted),
+            ("certification issuer (--cert-trust)", &self.opts.cert_trusted),
+        ];
+        let mut owner: BTreeMap<[u8; 32], &str> = BTreeMap::new();
+        let mut clashes = Vec::new();
+        for (role, keys) in roles {
+            for k in keys {
+                match owner.get(&k.public_key) {
+                    Some(other) if *other != role => clashes.push(format!(
+                        "trust: key {} is trusted for more than one role ({other} and {role}); \
+                         each role needs its own key",
+                        keyid(&k.public_key)
+                    )),
+                    _ => {
+                        owner.insert(k.public_key, role);
+                    }
+                }
+            }
+        }
+        for c in clashes {
+            self.fail(c);
+        }
     }
 
     /// The digest recomputes and a trusted exporter key signed it.
@@ -394,7 +480,12 @@ impl<'a> Checker<'a> {
         let revocations = self.check_events(&spec.governance.events, &release, created_at, &spec.release.manifest);
         let certs = self.check_certifications(&spec.certifications, &release, &run_hashes, &revocations);
         self.check_promotions(&spec.governance.events, &certs, &release, &revocations);
+        self.check_sentinels(&spec.governance.events, &certs, &release, &revocations);
+        let mut seen = BTreeMap::new();
         for (i, bundle) in spec.ledger_exports.iter().enumerate() {
+            if let Some(problem) = overlap(&mut seen, i, bundle) {
+                self.fail(format!("ledgerExports[{i}]: {problem}"));
+            }
             self.check_ledger(i, bundle, &release);
         }
     }
@@ -484,6 +575,8 @@ impl<'a> Checker<'a> {
                     registrations += 1;
                     if registrations > 1 {
                         self.fail(format!("{label}: the release is registered more than once"));
+                    } else if i != 0 {
+                        self.fail(format!("{label}: the registration must be the first event"));
                     }
                     if *agent != manifest.metadata.agent || *version != manifest.metadata.version {
                         self.fail(format!(
@@ -494,24 +587,26 @@ impl<'a> Checker<'a> {
                     self.at(at, "registered", format!("{agent} v{version} by {actor}"));
                 }
                 GovernanceEvent::ReleasePromoted { environment, from_release, break_glass, reason, .. } => {
-                    if environment.trim().is_empty() {
-                        self.fail(format!("{label}: environment must not be empty"));
-                    }
+                    self.check_environment(&label, environment);
                     if *break_glass && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
                         self.fail(format!("{label}: a break_glass promotion needs a non-empty reason"));
                     }
                     if let Some(from) = from_release {
-                        if from.parse::<ReleaseHash>().is_err() {
-                            self.fail(format!("{label}: fromRelease {from:?} is not a sha256:<hex> release hash"));
+                        match from.parse::<ReleaseHash>() {
+                            Err(_) => {
+                                self.fail(format!("{label}: fromRelease {from:?} is not a sha256:<hex> release hash"))
+                            }
+                            Ok(h) if h.to_string() == release => {
+                                self.fail(format!("{label}: fromRelease is this release"))
+                            }
+                            Ok(_) => {}
                         }
                     }
                     // The timeline entry is added by check_promotions, which
                     // knows the basis.
                 }
                 GovernanceEvent::ReleaseSuperseded { environment, to_release, .. } => {
-                    if environment.trim().is_empty() {
-                        self.fail(format!("{label}: environment must not be empty"));
-                    }
+                    self.check_environment(&label, environment);
                     match to_release.parse::<ReleaseHash>() {
                         Err(_) => {
                             self.fail(format!("{label}: toRelease {to_release:?} is not a sha256:<hex> release hash"))
@@ -547,9 +642,10 @@ impl<'a> Checker<'a> {
                     action,
                     ..
                 } => {
-                    if sentinel.trim().is_empty() || environment.trim().is_empty() || metric.trim().is_empty() {
-                        self.fail(format!("{label}: sentinel, environment and metric must not be empty"));
+                    if sentinel.trim().is_empty() || metric.trim().is_empty() {
+                        self.fail(format!("{label}: sentinel and metric must not be empty"));
                     }
+                    self.check_environment(&label, environment);
                     if !threshold.is_finite() || !value.is_finite() {
                         self.fail(format!("{label}: threshold and value must be finite"));
                     }
@@ -575,16 +671,22 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if registrations == 0 {
+            self.fail("governance: there is no release_registered event (it must be the first event)");
+        }
         revocations
     }
 
-    fn cert_trust(&self) -> Vec<TrustedKey> {
-        self.opts.cert_trusted.clone().unwrap_or_else(|| self.opts.trusted.clone())
+    /// One of [`KNOWN_ENVIRONMENTS`], spelled exactly.
+    fn check_environment(&mut self, label: &str, environment: &str) {
+        if !KNOWN_ENVIRONMENTS.contains(&environment) {
+            self.fail(format!("{label}: environment {environment:?} is not one of {}", KNOWN_ENVIRONMENTS.join(", ")));
+        }
     }
 
     fn cert_context(&self, now: &str, release: &str, revoked: BTreeSet<String>) -> VerifyContext {
         VerifyContext {
-            trusted: self.cert_trust(),
+            trusted: self.opts.cert_trusted.clone(),
             revoked_statements: revoked,
             revoked_keys: BTreeSet::new(),
             now: now.to_string(),
@@ -617,6 +719,15 @@ impl<'a> Checker<'a> {
             }
             let decoded = decode_certification(envelope);
             if let Some((digest, c)) = &decoded {
+                if let (Some(revoked), Some(issued)) = (revocations.get(digest), parse_time(&c.issued_at)) {
+                    if *revoked < issued {
+                        self.fail(format!(
+                            "{label}: revoked at {} (governance), before it was issued ({})",
+                            rfc3339(*revoked),
+                            c.issued_at
+                        ));
+                    }
+                }
                 for r in &c.decision.runs {
                     if !run_hashes.contains(&r.hash) {
                         self.fail(format!("{label}: cites run {:?} ({}) which is not in the pack", r.run_id, r.hash));
@@ -661,7 +772,8 @@ impl<'a> Checker<'a> {
                 revoked_at,
                 reasons: report.reasons.clone(),
             });
-            certs.push(PackCert { envelope, certification: decoded.map(|(_, c)| c) });
+            let (digest, certification) = decoded.map_or((None, None), |(d, c)| (Some(d), Some(c)));
+            certs.push(PackCert { envelope, digest, certification });
         }
         for digest in revocations.keys() {
             if !digests.contains(digest) {
@@ -767,7 +879,50 @@ impl<'a> Checker<'a> {
         for e in envs.values_mut() {
             e.certified_now = self.certified_at(certs, &e.environment, now, release, revocations);
         }
+        // A truthful history, so not a failure: but a reviewer must not read
+        // PASS as "production runs a certified release".
+        for e in envs.values().filter(|e| e.environment == CERTIFIED_ENVIRONMENT && e.live && !e.certified_now) {
+            self.report.warnings.push(format!(
+                "the release is live in {} with no certification valid now (revoked, expired or never certified)",
+                e.environment
+            ));
+        }
         self.report.environments = envs.into_values().collect();
+    }
+
+    /// A `sentinel_breach` with action `revoke` revoked every certification
+    /// for its environment that was valid at the breach: each must have a
+    /// `certification_revoked` event. Its time is not compared with the
+    /// breach's: CloakPipe Cloud revokes before it records the breach, and a
+    /// breach folded into its window's row keeps that row's earlier time.
+    fn check_sentinels(
+        &mut self,
+        events: &[GovernanceEvent],
+        certs: &[PackCert],
+        release: &str,
+        revocations: &BTreeMap<String, DateTime<Utc>>,
+    ) {
+        for (i, event) in events.iter().enumerate() {
+            let GovernanceEvent::SentinelBreach { sentinel, environment, action: SentinelAction::Revoke, .. } = event
+            else {
+                continue;
+            };
+            let Some(at) = parse_time(event.at()) else { continue };
+            // Valid at the breach, revocations aside.
+            let ctx = self.cert_context(&rfc3339(at), release, BTreeSet::new());
+            for c in certs {
+                let for_env = c.certification.as_ref().is_some_and(|cert| &cert.environment == environment);
+                let Some(digest) = c.digest.as_ref().filter(|_| for_env) else { continue };
+                if statement::verify(c.envelope, &ctx).certified && !revocations.contains_key(digest) {
+                    self.fail(format!(
+                        "governance.events[{i}] (sentinel_breach): sentinel {sentinel} revoked {environment} at {} \
+                         but certification {}… valid then has no certification_revoked event",
+                        event.at(),
+                        &digest[..12]
+                    ));
+                }
+            }
+        }
     }
 
     /// A signed v4 ledger export from a trusted signer, with at least one
@@ -811,9 +966,9 @@ impl<'a> Checker<'a> {
                 .find(|k| &k.key_id == key_id)
                 .and_then(|k| hex::decode(&k.public_key).ok())
                 .filter(|k| k.len() == 32);
-            let trusted = declared.is_some_and(|d| self.opts.trusted.iter().any(|t| t.public_key[..] == d[..]));
+            let trusted = declared.is_some_and(|d| self.opts.ledger_trusted.iter().any(|t| t.public_key[..] == d[..]));
             if !trusted {
-                self.fail(format!("{label}: ledger signer {key_id:?} is not trusted (--trust)"));
+                self.fail(format!("{label}: ledger signer {key_id:?} is not trusted (--ledger-trust)"));
             }
         }
 
@@ -970,22 +1125,37 @@ mod tests {
     #[test]
     fn release_binding_is_read_one_way_only() {
         let hex = "ab".repeat(32);
-        assert_eq!(parse_hop(&canon("")).unwrap().release, None);
+        let bound = |meta: &str| parse_hop(&canon(meta)).map(|h| h.release);
+        assert_eq!(bound(""), Ok(None));
+        assert_eq!(bound(&format!("release_hash=hash:{hex};")), Ok(Some(format!("sha256:{hex}"))));
         assert_eq!(
-            parse_hop(&canon(&format!("release_hash=hash:{hex};"))).unwrap().release,
-            Some(format!("sha256:{hex}"))
+            bound(&format!("a=int:-1;gate=id:undeclared_tool;release_hash=hash:{hex};z=bool:true;")),
+            Ok(Some(format!("sha256:{hex}")))
         );
+        // Other keys that merely contain `release_hash` are other keys.
+        assert_eq!(bound(&format!("prev_release_hash=hash:{hex};")), Ok(None));
+        assert_eq!(bound("gate=id:;"), Ok(None));
         assert_eq!(
-            parse_hop(&canon(&format!("a=int:1;release_hash=hash:{hex};z=bool:true;"))).unwrap().release,
-            Some(format!("sha256:{hex}"))
+            bound(&format!("prev_release_hash=hash:{hex};release_hash=hash:{hex};")),
+            Ok(Some(format!("sha256:{hex}")))
         );
         for bad in [
-            format!("xrelease_hash=hash:{hex};"),
-            format!("release_hash=hash:{hex};prev_release_hash=hash:{hex};"),
-            format!("release_hash=id:{hex};"),
-            format!("release_hash=hash:{};", "AB".repeat(32)),
+            // Not `key=type:value;` entries in strictly increasing key order.
             format!("release_hash=hash:{hex}"),
-            "release_hash=hash:ab;".to_string(),
+            format!("release_hash=hash:{hex};release_hash=hash:{hex};"),
+            format!("z=int:1;release_hash=hash:{hex};"),
+            format!("=int:1;release_hash=hash:{hex};"),
+            format!("gate=id:x=y;release_hash=hash:{hex};"),
+            format!("gate=str:x;release_hash=hash:{hex};"),
+            format!("gate;release_hash=hash:{hex};"),
+            "a=int:01;".to_string(),
+            "a=int:;".to_string(),
+            "a=bool:yes;".to_string(),
+            format!("a=hash:{};", "AB".repeat(32)),
+            "a=hash:ab;".to_string(),
+            // A binding that is not a hash.
+            format!("release_hash=id:{hex};"),
+            ";".to_string(),
         ] {
             assert!(parse_hop(&canon(&bad)).is_err(), "{bad}");
         }

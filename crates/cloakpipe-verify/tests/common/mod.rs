@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use cloakpipe_cert::statement::{self, Certification, Envelope};
 use cloakpipe_cert::EvaluationRun;
 use cloakpipe_ledger::export::export_bundle;
-use cloakpipe_ledger::{Ed25519Signer, Hop, LedgerStore, MetadataValue, RecordBuilder};
+use cloakpipe_ledger::{Ed25519Signer, Hop, LedgerStore, RecordBuilder};
 use cloakpipe_release::AgentRelease;
 use cloakpipe_verify::bundle::Bundle;
 use cloakpipe_verify::pack::{
@@ -60,12 +60,12 @@ pub fn now() -> DateTime<Utc> {
     NOW.parse().unwrap()
 }
 
-/// Exporter and ledger signer trusted; certifications checked against the
-/// same list (no separate `cert_trusted`) plus the cert key.
+/// One trusted key per role: exporter, ledger signer, certification issuer.
 pub fn options() -> VerifyOptions {
     VerifyOptions {
-        trusted: vec![trusted(EXPORTER_SEED), trusted(LEDGER_SEED)],
-        cert_trusted: Some(vec![trusted(CERT_SEED)]),
+        trusted: vec![trusted(EXPORTER_SEED)],
+        ledger_trusted: vec![trusted(LEDGER_SEED)],
+        cert_trusted: vec![trusted(CERT_SEED)],
         now: now(),
     }
 }
@@ -153,22 +153,6 @@ pub fn ledger_with(bound: u64, unbound: u64, seed: u8) -> Bundle {
         store.append(&tenant, &mut r).unwrap();
     }
     to_verify_bundle(export_bundle(&store, &tenant, &Ed25519Signer::from_bytes(&[seed; 32])).unwrap())
-}
-
-/// A ledger whose single hop carries an extra metadata key ending in
-/// `release_hash`, so the binding cannot be read unambiguously.
-pub fn ambiguous_ledger() -> Bundle {
-    let mut store = LedgerStore::open(":memory:").unwrap();
-    let tenant = uuid::Uuid::from_u128(42);
-    let mut r = RecordBuilder::new()
-        .seq(0)
-        .tenant(tenant)
-        .release(release_bytes())
-        .metadata("prev_release_hash", MetadataValue::Hash([0xab; 32]))
-        .build()
-        .unwrap();
-    store.append(&tenant, &mut r).unwrap();
-    to_verify_bundle(export_bundle(&store, &tenant, &Ed25519Signer::from_bytes(&[LEDGER_SEED; 32])).unwrap())
 }
 
 pub fn to_verify_bundle(b: impl serde::Serialize) -> Bundle {

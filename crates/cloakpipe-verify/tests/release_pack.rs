@@ -115,10 +115,11 @@ fn the_report_has_a_status_timeline() {
 }
 
 #[test]
-fn a_pack_without_ledger_or_events_still_verifies() {
+fn a_pack_without_ledger_or_promotions_still_verifies() {
     let p = cloakpipe_verify::pack::PackBuilder::new(manifest(), "cli", CREATED_AT)
         .run(run())
         .certification(envelope())
+        .event(registered())
         .build(&key(EXPORTER_SEED))
         .unwrap();
     assert_ok(&check(&serde_json::to_value(p).unwrap()));
@@ -251,17 +252,44 @@ fn a_certification_by_an_untrusted_key_fails() {
 }
 
 #[test]
-fn cert_trust_defaults_to_the_trust_keys() {
-    let doc = pack_value();
-    let only_trust = VerifyOptions { cert_trusted: None, ..options() };
-    let r = verify_pack(&doc, &only_trust);
+fn without_cert_trust_no_certification_verifies() {
+    let r = verify_pack(&pack_value(), &VerifyOptions { cert_trusted: vec![], ..options() });
     assert_fails(&r, "certifications[0]");
-    let with_cert_key = VerifyOptions {
-        trusted: vec![trusted(EXPORTER_SEED), trusted(LEDGER_SEED), trusted(CERT_SEED)],
-        cert_trusted: None,
-        now: now(),
-    };
-    assert_ok(&verify_pack(&doc, &with_cert_key));
+    assert_fails(&r, "break_glass");
+}
+
+// ── Key roles (exporter, ledger signer, certification issuer) ───────────
+
+#[test]
+fn the_exporter_key_cannot_certify_its_own_promotion() {
+    let mut doc = pack_value();
+    doc["spec"]["certifications"] = json!([sign_cert(&certification(), EXPORTER_SEED)]);
+    let r = check(&resign(doc, EXPORTER_SEED));
+    assert_fails(&r, "certifications[0]");
+    assert_fails(&r, "break_glass");
+}
+
+#[test]
+fn the_ledger_key_cannot_sign_the_pack() {
+    assert_fails(&check(&resign(pack_value(), LEDGER_SEED)), "not trusted");
+}
+
+#[test]
+fn a_ledger_export_signed_by_the_exporter_key_fails() {
+    let mut doc = pack_value();
+    doc["spec"]["ledgerExports"] = json!([ledger_with(2, 0, EXPORTER_SEED)]);
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "not trusted");
+}
+
+#[test]
+fn a_key_trusted_for_two_roles_fails() {
+    let doc = pack_value();
+    let both = VerifyOptions { cert_trusted: vec![trusted(CERT_SEED), trusted(EXPORTER_SEED)], ..options() };
+    assert_fails(&verify_pack(&doc, &both), "more than one role");
+    let both = VerifyOptions { ledger_trusted: vec![trusted(LEDGER_SEED), trusted(EXPORTER_SEED)], ..options() };
+    assert_fails(&verify_pack(&doc, &both), "more than one role");
+    let both = VerifyOptions { ledger_trusted: vec![trusted(LEDGER_SEED), trusted(CERT_SEED)], ..options() };
+    assert_fails(&verify_pack(&doc, &both), "more than one role");
 }
 
 #[test]
@@ -320,6 +348,7 @@ fn a_production_promotion_on_a_blocked_decision_fails() {
     let p = cloakpipe_verify::pack::PackBuilder::new(manifest(), "cli", CREATED_AT)
         .run(run())
         .certification(sign_cert(&c, CERT_SEED))
+        .event(registered())
         .event(promoted("production", "2026-10-02T00:00:00Z", false, None))
         .build(&key(EXPORTER_SEED))
         .unwrap();
@@ -435,6 +464,155 @@ fn an_inconsistent_sentinel_breach_fails() {
         action: SentinelAction::Alert,
     });
     assert_fails(&check(&serde_json::to_value(pack_with(evs)).unwrap()), "does not breach");
+}
+
+// Environments are a closed set, spelled exactly: a near-miss of
+// `production` must not slip past the certification rule.
+#[test]
+fn an_unknown_or_misspelled_environment_fails() {
+    for env in ["Production", "production ", " production", "prod", "PRODUCTION", "prd", "dev", ""] {
+        let p = pack_with(vec![registered(), promoted(env, "2026-10-02T00:00:00Z", false, None)]);
+        assert_fails(&check(&serde_json::to_value(p).unwrap()), "environment");
+    }
+    let mut evs = events();
+    evs.push(GovernanceEvent::ReleaseSuperseded {
+        at: "2026-10-05T00:00:00Z".into(),
+        actor: "alice@acme".into(),
+        environment: "Production".into(),
+        to_release: other_release(),
+    });
+    assert_fails(&check(&serde_json::to_value(pack_with(evs)).unwrap()), "environment");
+    let mut evs = events();
+    evs.push(breach("prod", SentinelAction::Alert, "2026-10-04T00:00:00Z"));
+    assert_fails(&check(&serde_json::to_value(pack_with(evs)).unwrap()), "environment");
+}
+
+#[test]
+fn every_known_environment_is_accepted() {
+    let mut evs = vec![registered()];
+    for (i, env) in ["draft", "candidate", "staging", "rollback"].iter().enumerate() {
+        evs.push(promoted(env, &format!("2026-09-30T1{i}:00:00Z"), false, None));
+    }
+    assert_ok(&check(&serde_json::to_value(pack_with(evs)).unwrap()));
+}
+
+fn breach(environment: &str, action: SentinelAction, at: &str) -> GovernanceEvent {
+    GovernanceEvent::SentinelBreach {
+        at: at.into(),
+        actor: "sentinel:block-rate".into(),
+        sentinel: "block-rate".into(),
+        environment: environment.into(),
+        metric: "guardrail_block_rate".into(),
+        op: SentinelOp::Gt,
+        threshold: 0.2,
+        value: 0.4,
+        calls: 50,
+        action,
+    }
+}
+
+fn revoke(at: &str) -> GovernanceEvent {
+    GovernanceEvent::CertificationRevoked {
+        at: at.into(),
+        actor: "sentinel:block-rate".into(),
+        statement_digest: statement_digest(&envelope()),
+        reason: "sentinel breach".into(),
+    }
+}
+
+#[test]
+fn a_revoking_sentinel_breach_without_the_revocation_fails() {
+    let mut evs = events();
+    evs.push(breach("production", SentinelAction::Revoke, "2026-10-04T00:00:00Z"));
+    let r = check(&serde_json::to_value(pack_with(evs)).unwrap());
+    assert_fails(&r, "sentinel");
+}
+
+#[test]
+fn a_revoking_sentinel_breach_is_consistent_with_the_revocation_before_or_after_it() {
+    // CloakPipe Cloud revokes first and records the breach after; a breach
+    // folded into an earlier window row can carry an earlier time.
+    for evs in [
+        vec![revoke("2026-10-04T00:00:00Z"), breach("production", SentinelAction::Revoke, "2026-10-04T00:00:01Z")],
+        vec![breach("production", SentinelAction::Revoke, "2026-10-04T00:00:00Z"), revoke("2026-10-04T00:05:00Z")],
+    ] {
+        let mut all = events();
+        all.extend(evs);
+        assert_ok(&check(&serde_json::to_value(pack_with(all)).unwrap()));
+    }
+}
+
+#[test]
+fn an_alerting_breach_or_one_with_nothing_to_revoke_needs_no_revocation() {
+    let mut evs = events();
+    evs.push(breach("production", SentinelAction::Alert, "2026-10-04T00:00:00Z"));
+    evs.push(breach("staging", SentinelAction::Revoke, "2026-10-04T00:00:00Z"));
+    assert_ok(&check(&serde_json::to_value(pack_with(evs)).unwrap()));
+}
+
+#[test]
+fn a_live_production_release_without_a_valid_certification_warns() {
+    let mut evs = events();
+    evs.push(GovernanceEvent::CertificationRevoked {
+        at: "2026-10-03T00:00:00Z".into(),
+        actor: "bob@acme".into(),
+        statement_digest: statement_digest(&envelope()),
+        reason: "key compromise".into(),
+    });
+    let r = check(&serde_json::to_value(pack_with(evs)).unwrap());
+    assert_ok(&r);
+    assert!(
+        r.warnings.iter().any(|w| w.contains("production") && w.contains("no certification valid now")),
+        "{:#?}",
+        r.warnings
+    );
+    // Expiry is the same situation.
+    let opts = VerifyOptions { now: "2026-11-15T00:00:00Z".parse().unwrap(), ..options() };
+    let r = verify_pack(&pack_value(), &opts);
+    assert!(r.warnings.iter().any(|w| w.contains("no certification valid now")), "{:#?}", r.warnings);
+    // A certified live release does not warn.
+    assert!(check(&pack_value()).warnings.is_empty());
+}
+
+#[test]
+fn a_pack_without_a_registration_fails() {
+    let p = cloakpipe_verify::pack::PackBuilder::new(manifest(), "cli", CREATED_AT)
+        .run(run())
+        .certification(envelope())
+        .event(promoted("production", "2026-10-02T00:00:00Z", false, None));
+    assert!(matches!(p.clone().build(&key(EXPORTER_SEED)), Err(BuildError::MissingRegistration)));
+    let mut doc = pack_value();
+    doc["spec"]["governance"]["events"].as_array_mut().unwrap().remove(0);
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "release_registered");
+}
+
+#[test]
+fn the_registration_must_come_first() {
+    let mut doc = pack_value();
+    doc["spec"]["governance"]["events"][0]["at"] = json!("2026-09-30T12:00:00Z");
+    doc["spec"]["governance"]["events"].as_array_mut().unwrap().swap(0, 1);
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "first");
+}
+
+#[test]
+fn a_promotion_from_this_release_fails() {
+    let mut doc = pack_value();
+    doc["spec"]["governance"]["events"][2]["fromRelease"] = json!(release());
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "fromRelease");
+}
+
+#[test]
+fn a_revocation_before_the_certification_was_issued_fails() {
+    let evs = vec![
+        registered(),
+        GovernanceEvent::CertificationRevoked {
+            at: "2026-09-30T10:00:00Z".into(),
+            actor: "bob@acme".into(),
+            statement_digest: statement_digest(&envelope()),
+            reason: "x".into(),
+        },
+    ];
+    assert_fails(&check(&serde_json::to_value(pack_with(evs)).unwrap()), "before");
 }
 
 #[test]
@@ -560,10 +738,56 @@ fn a_ledger_export_without_a_signed_chain_tip_fails() {
 }
 
 #[test]
-fn an_ambiguous_release_binding_fails() {
+fn a_hop_whose_metadata_does_not_parse_one_way_fails() {
     let mut doc = pack_value();
-    doc["spec"]["ledgerExports"] = json!([ambiguous_ledger()]);
-    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "ambiguous");
+    let rec = &mut doc["spec"]["ledgerExports"][0]["records"][4]["canonical_bytes"];
+    *rec = json!(format!("{}gate=id:x=y;", rec.as_str().unwrap()));
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "metadata");
+}
+
+/// The reviewer's injection: an opaque id that spells out a release binding.
+/// The ledger refuses to build it, so canonical metadata reads one way only.
+#[test]
+fn the_ledger_refuses_an_opaque_id_that_could_forge_a_binding() {
+    let forged = format!("x;release_hash=hash:{}", release().trim_start_matches("sha256:"));
+    let r = cloakpipe_ledger::RecordBuilder::new()
+        .metadata("gate", cloakpipe_ledger::MetadataValue::OpaqueId(forged))
+        .build();
+    assert!(r.is_err(), "{r:?}");
+}
+
+#[test]
+fn a_key_merely_ending_in_release_hash_is_not_a_binding() {
+    let mut store = cloakpipe_ledger::LedgerStore::open(":memory:").unwrap();
+    let tenant = uuid::Uuid::from_u128(42);
+    for (seq, bound) in [(0, true), (1, false)] {
+        let mut b = cloakpipe_ledger::RecordBuilder::new()
+            .seq(seq)
+            .tenant(tenant)
+            .metadata("prev_release_hash", cloakpipe_ledger::MetadataValue::Hash(release_bytes()));
+        if bound {
+            b = b.release(release_bytes());
+        }
+        let mut r = b.build().unwrap();
+        store.append(&tenant, &mut r).unwrap();
+    }
+    let signer = cloakpipe_ledger::Ed25519Signer::from_bytes(&[LEDGER_SEED; 32]);
+    let bundle = to_verify_bundle(cloakpipe_ledger::export::export_bundle(&store, &tenant, &signer).unwrap());
+    let mut doc = pack_value();
+    doc["spec"]["ledgerExports"] = json!([bundle]);
+    let r = check(&resign(doc, EXPORTER_SEED));
+    assert_ok(&r);
+    assert_eq!((r.ledger[0].release_hops, r.ledger[0].other_hops), (1, 1));
+}
+
+#[test]
+fn the_same_ledger_export_twice_fails() {
+    let p = builder_with(events()).ledger_export(ledger());
+    assert!(matches!(p.clone().build(&key(EXPORTER_SEED)), Err(BuildError::Ledger { index: 1, .. })));
+    let mut doc = pack_value();
+    let l = doc["spec"]["ledgerExports"][0].clone();
+    doc["spec"]["ledgerExports"].as_array_mut().unwrap().push(l);
+    assert_fails(&check(&resign(doc, EXPORTER_SEED)), "overlaps");
 }
 
 #[test]
@@ -665,6 +889,7 @@ fn the_builder_accepts_a_producer_bundle_as_json() {
     let ledger_json = serde_json::to_value(ledger()).unwrap();
     let p = cloakpipe_verify::pack::PackBuilder::new(manifest(), "cli", CREATED_AT)
         .run(run())
+        .event(registered())
         .ledger_export_json(ledger_json)
         .unwrap()
         .build(&key(EXPORTER_SEED))
