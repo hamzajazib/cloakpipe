@@ -30,6 +30,15 @@ pub enum Hop {
     MemoryWrite,
     RetrievalResult,
     Unmask,
+    /// An Agent Release manifest was registered (control plane).
+    ReleaseRegistered,
+    /// An environment pointer (staging, production, rollback, ...) moved to a
+    /// release (control plane).
+    ReleasePromoted,
+    /// A certification decision was issued for a release (control plane).
+    ReleaseCertified,
+    /// An issued certification was revoked (control plane).
+    CertificationRevoked,
 }
 
 impl Hop {
@@ -44,6 +53,10 @@ impl Hop {
             Hop::MemoryWrite => "memory_write",
             Hop::RetrievalResult => "retrieval_result",
             Hop::Unmask => "unmask",
+            Hop::ReleaseRegistered => "release_registered",
+            Hop::ReleasePromoted => "release_promoted",
+            Hop::ReleaseCertified => "release_certified",
+            Hop::CertificationRevoked => "certification_revoked",
         }
     }
 }
@@ -207,6 +220,20 @@ pub enum MetadataValue {
     OpaqueId(String),
 }
 
+/// Metadata key under which a record is bound to the Agent Release
+/// (`sha256` manifest hash) that produced it.
+pub const RELEASE_HASH_KEY: &str = "release_hash";
+
+impl LedgerRecord {
+    /// The Agent Release manifest hash this record is bound to, if any.
+    pub fn release_hash(&self) -> Option<[u8; 32]> {
+        match self.metadata.get(RELEASE_HASH_KEY) {
+            Some(MetadataValue::Hash(h)) => Some(*h),
+            _ => None,
+        }
+    }
+}
+
 /// Errors raised when the builder is misused.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RecordError {
@@ -217,6 +244,14 @@ pub enum RecordError {
     /// Tried to add an opaque ID that exceeded a conservative length cap.
     #[error("metadata field `{0}` exceeds 128 chars")]
     OpaqueIdTooLong(String),
+    /// An opaque id contained `;` or `=`, which delimit canonical metadata
+    /// entries: the record's bytes would read two ways.
+    #[error("metadata field `{0}` contains a `;` or `=` delimiter")]
+    MetadataDelimiter(String),
+    /// A metadata key was empty or contained whitespace, a control
+    /// character, `;` or `=`.
+    #[error("metadata key {0:?} must be non-empty printable ASCII without `;` or `=`")]
+    BadMetadataKey(String),
 }
 
 /// Builder. The only way to make a record.
@@ -305,6 +340,12 @@ impl RecordBuilder {
         self
     }
 
+    /// Bind the record to an Agent Release manifest hash. The hash is part of
+    /// the canonical bytes, so it is covered by the record hash and signature.
+    pub fn release(self, manifest_hash: [u8; 32]) -> Self {
+        self.metadata(RELEASE_HASH_KEY, MetadataValue::Hash(manifest_hash))
+    }
+
     /// Borrow the staged metadata for inspection (e.g. validation before
     /// build).
     pub fn staged_metadata(&self) -> &BTreeMap<String, MetadataValue> {
@@ -313,6 +354,7 @@ impl RecordBuilder {
 
     pub fn build(self) -> Result<LedgerRecord, RecordError> {
         for (k, v) in &self.metadata {
+            validate_metadata_key(k)?;
             if let MetadataValue::OpaqueId(s) = v {
                 validate_opaque_id(k, s)?;
             }
@@ -357,6 +399,17 @@ impl Default for RecordBuilder {
     }
 }
 
+/// Canonical metadata is `key=type:value;` entries, so a key is printable
+/// ASCII without `;` or `=`: then the bytes read one way only.
+fn validate_metadata_key(key: &str) -> Result<(), RecordError> {
+    let plain = !key.is_empty() && key.bytes().all(|b| b.is_ascii_graphic() && b != b';' && b != b'=');
+    if plain {
+        Ok(())
+    } else {
+        Err(RecordError::BadMetadataKey(key.to_string()))
+    }
+}
+
 /// Hard reject free-text-shaped or PII-shaped opaque IDs at runtime.
 ///
 /// The list is deliberately conservative: anything that *could* be a raw
@@ -393,6 +446,11 @@ fn validate_opaque_id(key: &str, s: &str) -> Result<(), RecordError> {
             key.to_string(),
             "contains whitespace".into(),
         ));
+    }
+    // `;` and `=` delimit canonical metadata entries; an id containing them
+    // could spell out another entry (e.g. a `release_hash`).
+    if s.contains(';') || s.contains('=') {
+        return Err(RecordError::MetadataDelimiter(key.to_string()));
     }
     Ok(())
 }
@@ -493,6 +551,37 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, RecordError::OpaqueIdTooLong(_)));
+    }
+
+    // The canonical encoding writes metadata as `key=type:value;` entries.
+    // A key or opaque id containing a delimiter could spell out another
+    // entry (e.g. a forged `release_hash`), so the bytes would read two ways.
+    #[test]
+    fn metadata_rejects_delimiters_in_opaque_ids() {
+        let forged = format!("x;release_hash=hash:{}", "ab".repeat(32));
+        for value in [forged.as_str(), "a;b", "a=b", "x=", ";"] {
+            let err = RecordBuilder::new()
+                .metadata("gate", MetadataValue::OpaqueId(value.into()))
+                .build()
+                .unwrap_err();
+            assert!(matches!(err, RecordError::MetadataDelimiter(_)), "{value}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_keys_that_are_not_plain_names() {
+        for key in ["", "a;b", "a=b", "a b", "a\nb", "release_hash=hash"] {
+            let err = RecordBuilder::new()
+                .metadata(key, MetadataValue::Integer(1))
+                .build()
+                .unwrap_err();
+            assert!(matches!(err, RecordError::BadMetadataKey(_)), "{key:?}: {err:?}");
+        }
+        RecordBuilder::new()
+            .metadata("gate_denial", MetadataValue::OpaqueId("undeclared_tool".into()))
+            .metadata("a.b-c:d", MetadataValue::Bool(true))
+            .build()
+            .unwrap();
     }
 
     #[test]

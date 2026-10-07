@@ -1,0 +1,16 @@
+# Certification policy used by the CLI tests and the CI certification gate.
+apiVersion: cloakpipe.dev/v1alpha1
+kind: CertificationPolicy
+name: support-prod
+version: "11"
+validityDays: 30
+rules:
+  maxNewCriticalFailures: 0
+  blockPersistingCriticalFailures: true
+  minPassRate: 0.95
+  minCoverage: 1.0
+  metrics:
+    - metric: latency_ms
+      aggregate: p95
+      op: lte
+      value: 2000

@@ -1,6 +1,10 @@
 //! CloakPipe CLI — entrypoint for the privacy proxy.
 
+mod anchor;
+mod audit_pack;
+mod cert;
 mod commands;
+mod release;
 
 use clap::{Parser, Subcommand};
 
@@ -40,12 +44,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server, masking PII in tool-call
     /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
-    McpProxy {
-        /// Upstream MCP server command + args, e.g.
-        /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-        #[arg(long, required = true)]
-        upstream: String,
-    },
+    McpProxy(cert::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
     Tree {
         #[command(subcommand)]
@@ -60,6 +59,19 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         action: SessionCommands,
+    },
+    /// Agent Release manifests: validate, hash, diff, inspect, certify, verify-cert
+    Release {
+        #[command(subcommand)]
+        action: release::ReleaseCommands,
+    },
+    /// Seal an exported evidence bundle under a signed batch head and anchor it
+    /// externally (RFC 3161 TSA and/or Sigstore Rekor); see docs/ANCHORING.md
+    Anchor(anchor::AnchorArgs),
+    /// Evaluation runs: import external results as certification evidence
+    Eval {
+        #[command(subcommand)]
+        action: cert::EvalCommands,
     },
     /// Scan files/directories for PII (RAG pre-indexing pipeline)
     Scan {
@@ -161,10 +173,23 @@ pub enum VectorCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Release and eval tooling is synchronous (including blocking HTTP for `register`),
+    // prints machine-readable output and uses distinct exit codes, so it runs
+    // before logging setup and outside the async runtime.
+    let command = match cli.command {
+        Commands::Release { action } => std::process::exit(release::run(action)),
+        Commands::Eval { action } => std::process::exit(cert::eval(action)),
+        Commands::Anchor(args) => std::process::exit(anchor::run(args)),
+        other => other,
+    };
+
+    tokio::runtime::Runtime::new()?.block_on(run(command, cli.config))
+}
+
+async fn run(command: Commands, config: String) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         // Diagnostics go to stderr — stdout is reserved for program output and,
         // for the `mcp`/`mcp-proxy` stdio servers, the JSON-RPC stream itself.
@@ -175,19 +200,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    match cli.command {
-        Commands::Start => commands::start(&cli.config).await,
-        Commands::Test { text, file } => commands::test(&cli.config, text, file).await,
-        Commands::Stats => commands::stats(&cli.config).await,
+    match command {
+        Commands::Start => commands::start(&config).await,
+        Commands::Test { text, file } => commands::test(&config, text, file).await,
+        Commands::Stats => commands::stats(&config).await,
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
-        Commands::Mcp => commands::mcp(&cli.config).await,
-        Commands::McpProxy { upstream } => commands::mcp_proxy(&cli.config, upstream).await,
-        Commands::Tree { action } => commands::tree(&cli.config, action).await,
+        Commands::Mcp => commands::mcp(&config).await,
+        Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
+        Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
-        Commands::Sessions { action } => commands::sessions(&cli.config, action).await,
+        Commands::Sessions { action } => commands::sessions(&config, action).await,
+        Commands::Release { .. } | Commands::Eval { .. } | Commands::Anchor(_) => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
-            commands::scan(&cli.config, input, output, strategy, detect_only, min_confidence).await
+            commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }
     }
 }

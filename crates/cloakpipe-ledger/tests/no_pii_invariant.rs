@@ -75,12 +75,14 @@ proptest! {
         .any(|m| lowered.contains(m));
 
         let too_long = s.len() > 128;
+        // `;` and `=` delimit canonical metadata entries.
+        let has_delimiter = s.contains(';') || s.contains('=');
 
         let res = RecordBuilder::new()
             .metadata("k", MetadataValue::OpaqueId(s.clone()))
             .build();
 
-        if has_ws || has_marker || too_long {
+        if has_ws || has_marker || too_long || has_delimiter {
             prop_assert!(res.is_err(), "validator let through PII-shaped: {s:?}");
         } else {
             prop_assert!(res.is_ok(), "validator rejected a clean opaque id: {s:?}");

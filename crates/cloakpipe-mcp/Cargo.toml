@@ -9,6 +9,10 @@ description = "MCP server for CloakPipe — expose privacy tools to AI agents"
 [dependencies]
 cloakpipe-core = { path = "../cloakpipe-core", version = "0.10.0" }
 cloakpipe-ledger = { path = "../cloakpipe-ledger", version = "0.10.0" }
+cloakpipe-release = { path = "../cloakpipe-release", version = "0.10.0" }
+cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.10.0" }
+base64 = "0.23"
+chrono = { workspace = true }
 rmcp = { workspace = true }
 tokio.workspace = true
 serde.workspace = true
@@ -19,3 +23,8 @@ uuid = { workspace = true, features = ["v5"] }
 
 [dev-dependencies]
 tempfile = "3"
+ed25519-dalek = "2"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { workspace = true }
+cloakpipe-verify = { path = "../cloakpipe-verify" }

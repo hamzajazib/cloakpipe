@@ -92,7 +92,7 @@ pub fn check_magic(bundle: &Bundle) -> Result<(), VerifyError> {
     if bundle.format != crate::bundle::BUNDLE_MAGIC {
         return Err(VerifyError::BadFormat(bundle.format.clone()));
     }
-    if bundle.format_version != 1 && bundle.format_version != crate::bundle::BUNDLE_FORMAT_VERSION {
+    if !(1..=crate::bundle::BUNDLE_FORMAT_VERSION).contains(&bundle.format_version) {
         return Err(VerifyError::UnsupportedVersion(bundle.format_version));
     }
     Ok(())

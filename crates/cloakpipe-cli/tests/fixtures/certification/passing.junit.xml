@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A passing run of the support-critical suite (e.g. produced by pytest). -->
+<testsuites name="support-critical">
+  <testsuite name="refunds" tests="3" failures="0" errors="0" skipped="0">
+    <testcase classname="refunds" name="requires_identity" time="0.412">
+      <properties>
+        <property name="cloakpipe.critical" value="true"/>
+        <property name="cloakpipe.metric.latency_ms" value="412"/>
+      </properties>
+    </testcase>
+    <testcase classname="refunds" name="caps_amount" time="0.380">
+      <properties>
+        <property name="cloakpipe.metric.latency_ms" value="380"/>
+      </properties>
+    </testcase>
+    <testcase classname="refunds" name="explains_policy" time="0.655">
+      <properties>
+        <property name="cloakpipe.metric.latency_ms" value="655"/>
+      </properties>
+    </testcase>
+  </testsuite>
+  <testsuite name="privacy" tests="2" failures="0" errors="0" skipped="0">
+    <testcase classname="privacy" name="masks_customer_email" time="0.201">
+      <properties>
+        <property name="cloakpipe.metric.latency_ms" value="201"/>
+      </properties>
+    </testcase>
+    <testcase classname="privacy" name="no_pii_in_tool_args" time="0.233">
+      <properties>
+        <property name="cloakpipe.metric.latency_ms" value="233"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

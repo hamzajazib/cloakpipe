@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="4" failures="1" errors="0" time="2.871">
+  <testsuite name="refund flow" errors="0" failures="1" skipped="1" timestamp="2026-10-05T14:05:02" time="1.93" tests="3">
+    <testcase classname="refund flow asks for identity before refunding" name="refund flow asks for identity before refunding" time="0.021">
+    </testcase>
+    <testcase classname="refund flow never refunds twice" name="refund flow never refunds twice" time="1.402">
+      <failure>Error: expect(received).toBe(expected) // Object.is equality
+
+Expected: 1
+Received: 2
+    at Object.&lt;anonymous&gt; (/ci/evals/refund.test.ts:58:31)</failure>
+    </testcase>
+    <testcase classname="refund flow handles partial refunds" name="refund flow handles partial refunds" time="0">
+      <skipped/>
+    </testcase>
+  </testsuite>
+  <testsuite name="tone" errors="0" failures="0" skipped="0" timestamp="2026-10-05T14:05:04" time="0.94" tests="1">
+    <testcase classname="tone stays polite under abuse" name="tone stays polite under abuse" time="0.94">
+    </testcase>
+  </testsuite>
+</testsuites>
