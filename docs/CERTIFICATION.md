@@ -16,7 +16,7 @@ comment is the normative contract:
 | Module | Contract |
 |---|---|
 | `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.dev/evaluation-run/v1`, `cloakpipe.dev/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
-| `import` | JUnit XML and native JSON → `EvaluationRun`. |
+| `import` | JUnit XML, Braintrust experiments, Langfuse dataset runs and native JSON → `EvaluationRun`. |
 | `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds. Pure and deterministic. |
 | `statement` | in-toto v1 Statement in a DSSE envelope signed with Ed25519; verification statuses `VALID`, `VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`. |
 
@@ -38,16 +38,104 @@ publish those to verifiers.
 ### `cloakpipe eval import`
 
 ```
-cloakpipe eval import --junit FILE --release <manifest | sha256:hex>
-    --suite NAME@VERSION --covers a,b [--critical PATTERN]...
-    [--run-id ID] [--tool NAME] [--dataset REF] [--out FILE]
+cloakpipe eval import (--junit FILE | --braintrust FILE | --langfuse-run FILE --langfuse-scores FILE)
+    --release <manifest | sha256:hex> --suite NAME@VERSION --covers a,b
+    [--critical PATTERN]... [--pass-threshold T] [--run-id ID] [--tool NAME]
+    [--dataset REF] [--out FILE]
 ```
 
-Turns a JUnit XML report into a native `EvaluationRun` (rules in `import`)
-on stdout or in `--out`. A manifest path must be certifiable and is replaced
-by its hash. `--run-id` defaults to `NAME@VERSION`; `--critical` takes
-`prefix*` or exact case ids. An invalid report or run exits 1 with the
-issues on stderr.
+Turns an evaluation report into a native `EvaluationRun` (rules in `import`)
+on stdout or in `--out`. Exactly one source is required. A manifest path
+must be certifiable and is replaced by its hash. `--run-id` defaults to
+`NAME@VERSION`; `--critical` takes `prefix*` or exact case ids. An invalid
+report or run exits 1 with the issues on stderr; a missing file or a bad
+argument exits 2.
+
+- **`--junit`**: JUnit XML from pytest, Jest, Go, JUnit or cargo-nextest.
+  Status comes from `<failure>`/`<error>`/`<skipped>`.
+- **`--braintrust`**: a Braintrust experiment's events (`/fetch` output, an
+  array of events, or JSONL). Each root span is one case. Its scores are
+  the root's own `scores` plus those of its scorer spans
+  (`span_attributes.type: "score"`), which is where the SDK's `Eval()`
+  logs each scorer's result; other child spans (task, LLM calls) are
+  ignored. The case id is `metadata.cloakpipe_case_id`, else
+  `metadata.case_id`, else the dataset record (`origin.id` of a dataset
+  `origin`, or `dataset_record_id` from older SDKs) — row ids change
+  between runs, so an event with none of these is rejected. Run the
+  experiment with one trial (`trial_count`/`trialCount` 1): every trial is
+  its own root span with the same case id, which is rejected as a
+  duplicate. `metadata.critical: true` marks a case critical. `error` on
+  the root or a scorer span, or a scorer that crashed
+  (`metadata.scorer_errors`), → `error`; `metrics.start/end` →
+  `durationMs`; token counts → `metrics.tokens.*`.
+- **`--langfuse-run` + `--langfuse-scores`**: a Langfuse dataset run and the
+  scores of its traces. Each run item is one case with id `datasetItemId`;
+  a score joins an item by `traceId` (trace scores, or scores of the item's
+  own `observationId`). `BOOLEAN` scores count as 0/1; `CATEGORICAL`,
+  `TEXT` and `CORRECTION` scores are ignored. Scores must come from
+  `GET /api/public/v2/scores` (v3 output is rejected), and every page the
+  listing's `meta.totalPages` announces must be included — a missing page
+  is rejected, since it could hold a failing score. A score id repeated
+  with different contents (pages fetched at different times) is rejected:
+  fetch again. Langfuse has no critical flag: use `--critical`.
+  `--dataset` defaults to the run's `datasetName`.
+
+Score-based sources decide each case from its scores with
+`--pass-threshold` (default `0.5`, within `0..=1`; not accepted with
+`--junit`): **pass** iff every score `>=` the threshold, else **fail**; an
+explicit error, or **no numeric score at all, is `error`** — an unscored
+case is not evidence, so it fails closed. `score` is the mean of the case's
+scores and each score is kept as `metrics["score.<name>"]`, so policies can
+put thresholds on individual scorers (`metric: score.Factuality`). Scores
+must lie in `0..=1`, and a scorer name may appear only once per case.
+`--score NAME` (repeatable) restricts the decision to the named scores:
+any other score (a 1–5 user-feedback rating, a latency score) is ignored
+without validation, and a case missing a named score is `error`.
+
+#### Getting the inputs
+
+Braintrust (REST API, bearer token; follow `cursor` for more than one page,
+or flatten pages to JSONL):
+
+```sh
+curl -sf -H "Authorization: Bearer $BRAINTRUST_API_KEY" \
+  "https://api.braintrust.dev/v1/experiment/$EXPERIMENT_ID/fetch?limit=1000" > experiment.json
+# More pages: repeat with &cursor=<.cursor of the previous page>, then
+#   jq -c '.events[]' page-*.json > experiment.jsonl
+cloakpipe eval import --braintrust experiment.json --release release.yaml \
+  --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out run.json
+```
+
+Langfuse (public API, basic auth `public key:secret key`; URL-encode dataset
+and run names). Scores are listed by `GET /api/public/v2/scores` (the
+importer reads the v2 shape, with a top-level `traceId`), at most 100 per
+page; fetch every page of each trace's scores and pass them as an array of
+pages (`jq -s`):
+
+```sh
+set -o pipefail
+lf() { curl -sSf -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "$LANGFUSE_HOST$1"; }
+lf "/api/public/datasets/support-golden/runs/support-agent-184-golden" > lf-run.json
+jq -r '.datasetRunItems[].traceId' lf-run.json | sort -u | while read -r t; do
+  page=1
+  while :; do
+    lf "/api/public/v2/scores?traceId=$t&limit=100&page=$page" > lf-page.json || exit 1
+    cat lf-page.json
+    [ "$page" -ge "$(jq '.meta.totalPages' lf-page.json)" ] && break
+    page=$((page + 1))
+  done
+done | jq -s . > lf-scores.json
+cloakpipe eval import --langfuse-run lf-run.json --langfuse-scores lf-scores.json \
+  --release release.yaml --suite support-critical@23 --covers privacy,functional \
+  --critical 'privacy::*' --pass-threshold 0.7 --score correctness --score pii_leak_free --out run.json
+```
+
+`GET /api/public/datasets/{dataset}/runs/{run}` is deprecated by Langfuse:
+on Langfuse Cloud it is scheduled for removal on 2026-11-16 (self-hosted:
+with the v4 upgrade), when dataset runs become experiments
+(`/api/public/experiments`). The importer does not read the experiments
+API yet; until it does, `--langfuse-run` needs a deployment that still
+serves dataset runs.
 
 ### `cloakpipe release certify`
 
@@ -177,6 +265,14 @@ The gate fails closed:
 also binds every evidence hop to its release. MCP server identity
 (`spec.mcpServers`) is not checked: the gate fronts the one upstream it was
 started with.
+
+## Audit packs
+
+Certifications, the runs they cite and their revocations travel to
+reviewers inside a release audit pack ([AUDIT_PACK.md](AUDIT_PACK.md)); its
+verifier checks every envelope with `statement::verify` and requires each
+production promotion to be covered by a certification valid at that moment
+(or a break-glass override).
 
 ## What a certification does not claim
 

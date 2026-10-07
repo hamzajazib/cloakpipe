@@ -1,0 +1,16 @@
+{
+  "id": "cm2run000001",
+  "name": "support-agent-184-golden",
+  "description": "nightly golden run for release 184",
+  "metadata": {"release": "support-agent@184", "commit": "8fd29ac"},
+  "datasetId": "cm2ds0000001",
+  "datasetName": "support-golden",
+  "createdAt": "2026-10-05T09:00:00.000Z",
+  "updatedAt": "2026-10-05T09:20:00.000Z",
+  "datasetRunItems": [
+    {"id": "cm2ri0000001", "datasetRunId": "cm2run000001", "datasetRunName": "support-agent-184-golden", "datasetItemId": "refunds::requires_identity", "traceId": "trace-0001", "observationId": null, "createdAt": "2026-10-05T09:01:00.000Z", "updatedAt": "2026-10-05T09:01:00.000Z"},
+    {"id": "cm2ri0000002", "datasetRunId": "cm2run000001", "datasetRunName": "support-agent-184-golden", "datasetItemId": "privacy::no_pii_in_tool_args", "traceId": "trace-0002", "observationId": "obs-gen-0002", "createdAt": "2026-10-05T09:02:00.000Z", "updatedAt": "2026-10-05T09:02:00.000Z"},
+    {"id": "cm2ri0000003", "datasetRunId": "cm2run000001", "datasetRunName": "support-agent-184-golden", "datasetItemId": "refunds::over_limit_escalates", "traceId": "trace-0003", "observationId": null, "createdAt": "2026-10-05T09:03:00.000Z", "updatedAt": "2026-10-05T09:03:00.000Z"},
+    {"id": "cm2ri0000004", "datasetRunId": "cm2run000001", "datasetRunName": "support-agent-184-golden", "datasetItemId": "escalation::hands_off_politely", "traceId": "trace-0004", "observationId": null, "createdAt": "2026-10-05T09:04:00.000Z", "updatedAt": "2026-10-05T09:04:00.000Z"}
+  ]
+}

@@ -86,3 +86,10 @@ MCP servers or policies as requiring approval.
 Set `CLOAKPIPE_RELEASE=sha256:…` when running `cloakpipe mcp-proxy`; every
 ledger hop then carries `release_hash` inside its signed, hash-chained bytes.
 A malformed value stops the interceptor from starting.
+
+## Audit pack
+
+`cloakpipe release audit-pack` bundles the manifest, its evaluation runs,
+certifications, governance events and release-bound ledger exports into one
+signed file a reviewer checks offline with `cloakpipe-verify release-pack`.
+See [AUDIT_PACK.md](AUDIT_PACK.md).

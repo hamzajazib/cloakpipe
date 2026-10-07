@@ -332,6 +332,7 @@ fn gate_back_dating_detected() {
             AnchorReceiptRef::Log { claimed_time, .. } => {
                 *claimed_time = "2020-01-01T00:00:00Z".into();
             }
+            _ => unreachable!("in-process receipts only"),
         }
     }
     // Bundle's signed_time is 2026-07-02T10:05:00Z (after 2020).
@@ -357,6 +358,7 @@ fn gate_subject_hash_tamper_fails_anchor() {
                 s.insert(0, if c == '0' { 'f' } else { '0' });
                 *subject_hash = s;
             }
+            _ => unreachable!("in-process receipts only"),
         }
     }
     let err = verify_anchors(&bundle).unwrap_err();

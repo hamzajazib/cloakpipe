@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
 repository.workspace = true
-description = "Standalone verifier for CloakPipe evidence bundles — no internal CloakPipe deps"
+description = "Standalone verifier for CloakPipe evidence bundles and release audit packs — no dependency on evidence producers"
 
 [[bin]]
 name = "cloakpipe-verify"
@@ -13,11 +13,31 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 hex = "0.4"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "digest", "pkcs8"] }
 anyhow = "1"
 thiserror = "1"
+# External anchoring (RFC 3161 tokens, Rekor entries), verified offline.
+# The 0.7-generation RustCrypto stack: the newest set with stable releases
+# of every crate (cms 0.3 and rsa 0.10 are still pre-releases).
+der = { version = "0.7", features = ["alloc", "derive", "oid", "pem"] }
+spki = { version = "0.7", features = ["alloc", "pem"] }
+x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
+cms = "0.2"
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha1 = { version = "0.10", features = ["oid"] }
+# Release audit packs (`release-pack`): the manifest hash and certification
+# attestations are checked with the spec crates, not re-implemented. Neither
+# is a producer of ledger evidence; the ledger section is still verified by
+# this crate's own code, with no dependency on `cloakpipe-ledger`.
+cloakpipe-release = { path = "../cloakpipe-release", version = "0.10.0" }
+cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.10.0" }
+serde_json_canonicalizer = "0.3"
+base64 = "0.23"
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
