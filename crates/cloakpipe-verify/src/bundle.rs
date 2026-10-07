@@ -259,6 +259,55 @@ pub enum AnchorReceiptRef {
         /// Hex-encoded Ed25519 public key of the log.
         log_pubkey: String,
     },
+    /// A real RFC 3161 timestamp from an external TSA. The message imprint
+    /// is SHA-256 of the batch head's JSON bytes (`subject_hash`). Verified
+    /// offline against a caller-supplied TSA root (`--tsa-root`); nothing
+    /// in the bundle is trusted to say who the TSA is.
+    Rfc3161 {
+        batch_id: String,
+        subject_hash: Hex32,
+        /// Where the token was obtained (informational, never fetched).
+        tsa_url: String,
+        /// The request nonce, hex (big-endian), which the token must echo.
+        nonce: String,
+        /// The complete DER `TimeStampResp`, base64 (standard alphabet).
+        tsr: String,
+    },
+    /// A Sigstore Rekor (v1 API) `hashedrekord` entry for the batch head,
+    /// signed Ed25519ph by the head's signing key. Verified offline against
+    /// a caller-supplied Rekor public key (`--rekor-key`).
+    Rekor {
+        batch_id: String,
+        subject_hash: Hex32,
+        /// The log the entry was submitted to (informational).
+        rekor_url: String,
+        /// The entry UUID (`[treeID]` + leaf hash, hex).
+        entry_uuid: String,
+        /// The log's response entry, verbatim: body, integratedTime, logID,
+        /// logIndex and verification (SET + inclusion proof + checkpoint).
+        entry: serde_json::Value,
+    },
+}
+
+impl AnchorReceiptRef {
+    pub fn batch_id(&self) -> &str {
+        match self {
+            AnchorReceiptRef::Tsa { batch_id, .. }
+            | AnchorReceiptRef::Log { batch_id, .. }
+            | AnchorReceiptRef::Rfc3161 { batch_id, .. }
+            | AnchorReceiptRef::Rekor { batch_id, .. } => batch_id,
+        }
+    }
+
+    /// The wire tag (`kind`), also the prefix of manifest anchor refs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AnchorReceiptRef::Tsa { .. } => "tsa",
+            AnchorReceiptRef::Log { .. } => "log",
+            AnchorReceiptRef::Rfc3161 { .. } => "rfc3161",
+            AnchorReceiptRef::Rekor { .. } => "rekor",
+        }
+    }
 }
 
 /// The actual signature payload over a batch head.

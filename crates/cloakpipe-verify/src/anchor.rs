@@ -27,6 +27,7 @@ use crate::bundle::{
     AnchorReceiptRef, BatchHead, Bundle, InclusionProofRef, Manifest,
     PolicyPackRef, ProofStepRef,
 };
+use base64::Engine;
 use ed25519_dalek::{Signature as DalekSig, Verifier as DalekVerifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -64,7 +65,36 @@ pub enum AnchorVerifyError {
     BadHex { batch_id: String, field: String },
     #[error("invalid RFC3339 timestamp in anchor for batch `{batch_id}`: {value}")]
     BadTimestamp { batch_id: String, value: String },
+    #[error("bundle carries `{kind}` receipts but no trust input was given for them ({flag})")]
+    MissingTrust { kind: String, flag: String },
+    #[error("batch `{batch_id}` has no verified `{kind}` anchor")]
+    HeadNotAnchored { batch_id: String, kind: String },
+    #[error("record #{seq} is not covered by any anchored batch head")]
+    RecordNotAnchored { seq: u64 },
+    #[error("RFC 3161 receipt for batch `{batch_id}`: {error}")]
+    Rfc3161 { batch_id: String, error: crate::rfc3161::Rfc3161Error },
+    #[error("Rekor receipt for batch `{batch_id}`: {error}")]
+    Rekor { batch_id: String, error: crate::rekor::RekorError },
 }
+
+/// Trust inputs for external anchors. Each is supplied by the verifying
+/// party, never read from the bundle.
+#[derive(Debug, Clone, Default)]
+pub struct AnchorTrust {
+    /// Roots an RFC 3161 TSA certificate must chain to (`--tsa-root`).
+    pub tsa_roots: Option<crate::rfc3161::TrustedRoots>,
+    /// The Rekor log's public key (`--rekor-key`).
+    pub rekor_key: Option<crate::rekor::RekorKey>,
+}
+
+impl AnchorTrust {
+    fn is_empty(&self) -> bool {
+        self.tsa_roots.is_none() && self.rekor_key.is_none()
+    }
+}
+
+const KIND_RFC3161: &str = "rfc3161";
+const KIND_REKOR: &str = "rekor";
 
 /// Mirror of `cloakpipe-anchor::receipt::SignedTreeHead`.
 /// Byte-compatible with the JSON wire format; the verifier defines
@@ -234,13 +264,40 @@ fn verify_log_inclusion(
     &cur == expected_root
 }
 
-/// Verify every anchor receipt in the bundle against the
-/// corresponding batch head and the bundle's records. On success,
-/// returns the count of verified receipts.
+/// Verify every anchor receipt with no external trust inputs. Bundles
+/// that carry RFC 3161 or Rekor receipts fail with
+/// [`AnchorVerifyError::MissingTrust`]; use [`verify_anchors_with_trust`].
 pub fn verify_anchors(bundle: &Bundle) -> Result<usize, AnchorVerifyError> {
-    if bundle.format_version < 2 {
+    verify_anchors_with_trust(bundle, &AnchorTrust::default())
+}
+
+/// Verify every anchor receipt in the bundle against the corresponding
+/// batch head and the bundle's records. On success, returns the count of
+/// verified receipts.
+///
+/// External receipts (`rfc3161`, `rekor`) are checked against `trust`
+/// only; a receipt kind without its trust input is an error, not a skip.
+/// Once anything is externally anchored (or a trust input is given):
+///
+/// - every batch head must carry a verified receipt of every such kind;
+/// - every record must fall inside a batch head and carry a valid Merkle
+///   inclusion proof into it;
+/// - no record time and no head `signed_time` may be later than the
+///   anchored time (`genTime` / `integratedTime`, whole seconds):
+///   anything claimed after the anchor was written after the fact.
+pub fn verify_anchors_with_trust(bundle: &Bundle, trust: &AnchorTrust) -> Result<usize, AnchorVerifyError> {
+    if bundle.format_version < 2 && bundle.anchor_receipts.is_empty() && trust.is_empty() {
         // v1 bundles don't carry anchor receipts.
         return Ok(0);
+    }
+    // (batch_id, kind) pairs with a verified external anchor.
+    let mut anchored: std::collections::BTreeSet<(String, &'static str)> = Default::default();
+    let mut external_kinds: std::collections::BTreeSet<&'static str> = Default::default();
+    if trust.tsa_roots.is_some() {
+        external_kinds.insert(KIND_RFC3161);
+    }
+    if trust.rekor_key.is_some() {
+        external_kinds.insert(KIND_REKOR);
     }
 
     let mut verified = 0usize;
@@ -253,10 +310,7 @@ pub fn verify_anchors(bundle: &Bundle) -> Result<usize, AnchorVerifyError> {
         .collect();
 
     for receipt in &bundle.anchor_receipts {
-        let batch_id = match receipt {
-            AnchorReceiptRef::Tsa { batch_id, .. } => batch_id.clone(),
-            AnchorReceiptRef::Log { batch_id, .. } => batch_id.clone(),
-        };
+        let batch_id = receipt.batch_id().to_string();
         let head = heads_by_id
             .get(batch_id.as_str())
             .ok_or_else(|| AnchorVerifyError::UnknownBatch(batch_id.clone()))?;
@@ -391,12 +445,140 @@ pub fn verify_anchors(bundle: &Bundle) -> Result<usize, AnchorVerifyError> {
 
                 check_no_back_dating(&batch_id, head, claimed_time)?;
             }
+            AnchorReceiptRef::Rfc3161 { subject_hash, nonce, tsr, .. } => {
+                external_kinds.insert(KIND_RFC3161);
+                let roots = trust.tsa_roots.as_ref().ok_or_else(|| AnchorVerifyError::MissingTrust {
+                    kind: KIND_RFC3161.into(),
+                    flag: "--tsa-root".into(),
+                })?;
+                check_subject(&batch_id, subject_hash, &expected_subject)?;
+                let bad = |field: &str| AnchorVerifyError::BadHex { batch_id: batch_id.clone(), field: field.into() };
+                let tsr = base64::engine::general_purpose::STANDARD.decode(tsr).map_err(|_| bad("tsr"))?;
+                let nonce = hex::decode(nonce).map_err(|_| bad("nonce"))?;
+                let ts = crate::rfc3161::verify_timestamp_response(&tsr, &expected_subject, &nonce, roots)
+                    .map_err(|error| AnchorVerifyError::Rfc3161 { batch_id: batch_id.clone(), error })?;
+                check_anchor_time(bundle, head, ts.gen_time_unix)?;
+                anchored.insert((batch_id.clone(), KIND_RFC3161));
+            }
+            AnchorReceiptRef::Rekor { subject_hash, entry_uuid, entry, .. } => {
+                external_kinds.insert(KIND_REKOR);
+                let key = trust.rekor_key.as_ref().ok_or_else(|| AnchorVerifyError::MissingTrust {
+                    kind: KIND_REKOR.into(),
+                    flag: "--rekor-key".into(),
+                })?;
+                check_subject(&batch_id, subject_hash, &expected_subject)?;
+                let signer = head_signer_key(bundle, head)?;
+                let head_bytes = serde_json::to_vec(head).expect("serialize batch head");
+                let v = crate::rekor::verify_rekor_entry(entry_uuid, entry, key, &head_bytes, &signer)
+                    .map_err(|error| AnchorVerifyError::Rekor { batch_id: batch_id.clone(), error })?;
+                check_anchor_time(bundle, head, v.integrated_time)?;
+                anchored.insert((batch_id.clone(), KIND_REKOR));
+            }
         }
 
         verified += 1;
     }
 
+    if !external_kinds.is_empty() {
+        check_coverage(bundle, &anchored, &external_kinds)?;
+    }
+
     Ok(verified)
+}
+
+fn check_subject(batch_id: &str, got: &str, expected: &[u8; 32]) -> Result<(), AnchorVerifyError> {
+    let expected = hex_lower(expected);
+    if got != expected {
+        return Err(AnchorVerifyError::SubjectHashMismatch { batch_id: batch_id.into(), got: got.into(), expected });
+    }
+    Ok(())
+}
+
+/// The head signer's Ed25519 key, from `signer_public_keys`.
+fn head_signer_key(bundle: &Bundle, head: &BatchHead) -> Result<[u8; 32], AnchorVerifyError> {
+    let unknown = || AnchorVerifyError::UnknownKey(head.batch_id.clone());
+    let k = bundle.signer_public_keys.iter().find(|k| k.key_id == head.signature.key_id).ok_or_else(unknown)?;
+    if k.algorithm != "ed25519" || head.signature.algorithm != "ed25519" {
+        return Err(unknown());
+    }
+    decode_hex_32(&k.public_key).ok_or_else(unknown)
+}
+
+/// Nothing covered by `head` may claim a time after `anchor_time`.
+fn check_anchor_time(bundle: &Bundle, head: &BatchHead, anchor_time: i64) -> Result<(), AnchorVerifyError> {
+    let anchor = crate::time::rfc3339_from_unix(anchor_time);
+    let check = |claimed: &str| -> Result<(), AnchorVerifyError> {
+        let t = crate::time::parse_rfc3339_secs(claimed).ok_or_else(|| AnchorVerifyError::BadTimestamp {
+            batch_id: head.batch_id.clone(),
+            value: claimed.to_string(),
+        })?;
+        if t > anchor_time {
+            return Err(AnchorVerifyError::BackDating {
+                batch_id: head.batch_id.clone(),
+                claimed: claimed.to_string(),
+                anchor: anchor.clone(),
+            });
+        }
+        Ok(())
+    };
+    if let Some(st) = &head.signed_time {
+        check(st)?;
+    }
+    for r in bundle.records.iter().filter(|r| head.first_seq <= r.seq && r.seq <= head.last_seq) {
+        let ts = record_time(&r.canonical_bytes).ok_or_else(|| AnchorVerifyError::BadTimestamp {
+            batch_id: head.batch_id.clone(),
+            value: format!("record #{} has no ts", r.seq),
+        })?;
+        check(ts)?;
+    }
+    Ok(())
+}
+
+/// The record's `ts=` line; exactly one is required.
+fn record_time(canonical: &str) -> Option<&str> {
+    let mut it = canonical.lines().filter_map(|l| l.strip_prefix("ts="));
+    let ts = it.next()?;
+    it.next().is_none().then_some(ts)
+}
+
+/// Every head anchored by every external kind in play, every record
+/// inside an anchored head with a valid inclusion proof.
+fn check_coverage(
+    bundle: &Bundle,
+    anchored: &std::collections::BTreeSet<(String, &'static str)>,
+    kinds: &std::collections::BTreeSet<&'static str>,
+) -> Result<(), AnchorVerifyError> {
+    if bundle.batch_heads.is_empty() {
+        let kind = kinds.iter().next().copied().unwrap_or(KIND_RFC3161);
+        return Err(AnchorVerifyError::HeadNotAnchored { batch_id: "(no batch heads)".into(), kind: kind.into() });
+    }
+    for head in &bundle.batch_heads {
+        for kind in kinds {
+            if !anchored.contains(&(head.batch_id.clone(), *kind)) {
+                return Err(AnchorVerifyError::HeadNotAnchored { batch_id: head.batch_id.clone(), kind: (*kind).into() });
+            }
+        }
+    }
+    for (i, r) in bundle.records.iter().enumerate() {
+        let head = bundle
+            .batch_heads
+            .iter()
+            .find(|h| h.first_seq <= r.seq && r.seq <= h.last_seq)
+            .ok_or(AnchorVerifyError::RecordNotAnchored { seq: r.seq })?;
+        let proof = bundle.inclusion_proofs.get(i).and_then(Option::as_ref).ok_or_else(|| {
+            AnchorVerifyError::InclusionProofMissing { seq: r.seq, batch_id: head.batch_id.clone() }
+        })?;
+        let invalid = || AnchorVerifyError::InclusionProofInvalid { seq: r.seq, batch_id: head.batch_id.clone() };
+        if proof.batch_id != head.batch_id || proof.leaf_index != r.seq - head.first_seq {
+            return Err(invalid());
+        }
+        let root = decode_hex_32(&head.merkle_root).ok_or_else(invalid)?;
+        let leaf = decode_hex_32(&r.record_hash).ok_or_else(invalid)?;
+        if !verify_merkle_proof(&leaf, proof, &root) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 /// Verify every per-record inclusion proof in the bundle. Each
@@ -831,17 +1013,7 @@ pub fn verify_manifest(bundle: &Bundle) -> Result<(), ManifestError> {
         let mut parts = ar.splitn(3, ':');
         let kind = parts.next().unwrap_or("");
         let bid = parts.next().unwrap_or("");
-        let found = bundle.anchor_receipts.iter().any(|r| {
-            let r_kind = match r {
-                AnchorReceiptRef::Tsa { .. } => "tsa",
-                AnchorReceiptRef::Log { .. } => "log",
-            };
-            let r_bid = match r {
-                AnchorReceiptRef::Tsa { batch_id, .. } => batch_id.as_str(),
-                AnchorReceiptRef::Log { batch_id, .. } => batch_id.as_str(),
-            };
-            r_kind == kind && r_bid == bid
-        });
+        let found = bundle.anchor_receipts.iter().any(|r| r.kind() == kind && r.batch_id() == bid);
         if !found {
             return Err(ManifestError::UnknownAnchor(ar.clone()));
         }

@@ -5,3 +5,24 @@
 Re-run after any change to `cloakpipe-ledger` record shape or canonicalization.
 The `m2_gate` and `m2_e2e` tests read this file; if the producer schema
 drifts without regenerating, the verifier will (correctly) fail.
+
+## `anchoring/` — recorded external anchors
+
+Real responses, captured on 2026-10-07 by `tools/capture_anchor_fixtures.sh`
+(OpenSSL 3 + curl, independent of CloakPipe's clients) over the batch heads
+that `tests/common/mod.rs` builds deterministically:
+
+| file | what |
+|---|---|
+| `head-honest.json`, `head-future.json` | the exact head bytes anchored (written by `cargo test -p cloakpipe-verify --test anchoring_fixtures -- --ignored`) |
+| `freetsa-*.tsr`, `freetsa-*.nonce` | RFC 3161 `TimeStampResp` from https://freetsa.org/tsr (ECDSA P-384 / SHA-512 signer, RSA-4096 root) and the request nonce |
+| `digicert-honest.tsr`, `.nonce` | RFC 3161 response from http://timestamp.digicert.com (RSA, signer -> intermediate -> root) |
+| `rekor-*.json` | `POST /api/v1/log/entries` responses from https://rekor.sigstore.dev (hashedrekord, Ed25519ph) |
+| `freetsa-root.pem` | freetsa.org root CA, SHA-256 `A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC` |
+| `digicert-trusted-root-g4.pem` | DigiCert Trusted Root G4, SHA-256 `55:2F:7B:DC:F1:A7:AF:9E:6C:E6:72:01:7F:4F:12:AB:F7:72:40:C7:8E:76:1A:C2:03:D1:D9:D2:0A:C8:99:88` |
+| `rekor.pub` | rekor.sigstore.dev log key (`/api/v1/log/publicKey`), log ID `c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d` |
+| `operator.pub.pem` | the test operator key (Ed25519 seed `0x42` x 32) |
+
+The "future" head claims 2027 times; its anchors prove 2026, so it must fail
+as back-dated. Changing `common/mod.rs` changes the heads and requires a
+re-capture.
