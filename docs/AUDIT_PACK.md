@@ -59,7 +59,7 @@ embedded whole (see [Ledger](#ledger)).
 | `spec.release` | The manifest ([AGENT_RELEASE.md](AGENT_RELEASE.md)) and its `sha256:` hash. |
 | `spec.evaluationRuns` | Native `EvaluationRun`s ([CERTIFICATION.md](CERTIFICATION.md)) of this release. |
 | `spec.certifications` | DSSE envelopes from `release certify` or CloakPipe Cloud, blocked decisions included. |
-| `spec.governance.events` | Control-plane history, in non-decreasing `at` order. `at` is RFC 3339; `actor` is non-empty. `fromRelease`, `reason` are optional; `breakGlass` defaults to `false`. `op` is `gt`/`lt`, `action` `alert`/`revoke`. |
+| `spec.governance.events` | Control-plane history, in non-decreasing `at` order, starting with the one `release_registered`. `at` is RFC 3339; `actor` is non-empty. `environment` is exactly one of `draft`, `candidate`, `staging`, `production`, `rollback`. `fromRelease`, `reason` are optional; `breakGlass` defaults to `false`. `op` is `gt`/`lt`, `action` `alert`/`revoke`. |
 | `spec.ledgerExports` | Signed `cloakpipe.bundle` v4 exports (`cloakpipe-ledger::export`), unmodified. |
 | `spec.limitations` | Caveats; the builder always includes the governance limitation below. |
 
@@ -80,21 +80,32 @@ proves the exporter vouched for them, not that `alice@acme` really pressed
 the button. The pack says so (`governance.attestedBy: "exporter"`, the only
 value this version accepts, and a `limitations` entry) and the verifier
 prints it in every report. Certifications and ledger hops, by contrast, are
-signed by their own issuers and verified against their own trust anchors.
+signed by their own issuers and verified against their own trust anchors:
+`--cert-trust` and `--ledger-trust`, never the exporter's `--trust`, and the
+verifier fails if one key is given for two roles. So the exporter cannot
+certify its own production promotion, and a runtime ledger key (typically
+on a less protected proxy host) cannot sign governance history.
 
 ## Verification
 
 ```
-cloakpipe-verify release-pack PACK --trust KEYFILE... [--cert-trust KEYFILE]... [--now RFC3339] [--json]
+cloakpipe-verify release-pack PACK --trust KEYFILE [--ledger-trust KEYFILE] [--cert-trust KEYFILE]
+                                   [--now RFC3339] [--json]
 ```
 
-- `--trust`: exporter and ledger signer public keys (`release keygen` files;
-  `{"keyid", "publicKey"}` is enough, a declared `keyid` must match). At
-  least one is required.
-- `--cert-trust`: certification issuers. Default: the `--trust` keys.
+Each trust flag takes **one** key file (`release keygen` files;
+`{"keyid", "publicKey"}` is enough, a declared `keyid` must match); repeat
+the flag for more keys. One key may not appear under two flags.
+
+- `--trust`: the exporter, whose key signs the pack. At least one is required.
+- `--ledger-trust`: ledger signers (matched by public key, since ledger key
+  ids are not unique). Without one, a pack with ledger exports fails.
+- `--cert-trust`: certification issuers. There is no default: without one,
+  no certification verifies and a non-break-glass production promotion fails.
 - `--now`: verification time (default: the clock). Everything is offline.
-- Exit **0** pass, **1** failed (any check below), **2** usage or an
-  unreadable pack or key file. `--json` prints the report.
+- Exit **0** pass, **1** failed (any check below), **2** usage, an
+  unreadable pack or key file, or a pack over 256 MiB (not read).
+  `--json` prints the report.
 
 Checks (all run; the report lists every failure):
 
@@ -102,7 +113,7 @@ Checks (all run; the report lists every failure):
    (it has no exact JCS form), `apiVersion`/`kind` as above, no unknown
    fields.
 2. **Pack signature**: `digest` recomputes; `signature` verifies under a
-   `--trust` key with that `keyid`.
+   `--trust` key with that `keyid`. No key is trusted for two roles.
 3. **Manifest**: certifiable, and `release.hash` recomputes from it. Every
    other section is checked against the recomputed hash.
 4. **Runs**: valid, `release` is this release, no duplicates.
@@ -112,20 +123,32 @@ Checks (all run; the report lists every failure):
    decision cites must be in the pack (baseline runs are not required, they
    belong to another release). No duplicate statements.
 6. **Events**: in time order, not after `createdAt`, `createdAt` not after
-   `now`; `release_registered` matches the manifest's agent and version (at
-   most once); `release_superseded.toRelease` is another release;
-   `certification_revoked` names a statement in the pack, once;
-   `sentinel_breach.value` really breaches `op threshold`, `calls ≥ 1`.
+   `now`; exactly one `release_registered`, which is the first event and
+   matches the manifest's agent and version; every `environment` is one of
+   the five names above, spelled exactly (`Production`, `prod` or
+   `production ` fail rather than count as an environment that needs no
+   certification); `fromRelease` and `toRelease` are other releases;
+   `certification_revoked` names a statement in the pack, once, and not
+   before that certification's `issuedAt`; `sentinel_breach.value` really
+   breaches `op threshold`, `calls ≥ 1`.
 7. **Promotion consistency**: a `release_promoted` into `production` needs a
    certification for `production` that is certified at that instant
    (signature, validity window, revocations up to then). Otherwise it must
    be `breakGlass: true` with a non-empty `reason`, which passes with a
-   warning; anything else fails.
-8. **Ledger**: each export is v4 (the manifest signs the chain tip), its chain,
+   warning; anything else fails. A release still live in `production` with
+   no certification valid at `now` (revoked or expired) passes with a
+   warning: the history is consistent, but PASS does not mean production
+   runs a certified release.
+8. **Sentinel consistency**: a `sentinel_breach` with `action: revoke` must
+   be matched by a `certification_revoked` event for every certification of
+   its environment that was valid at the breach. The revocation may be dated
+   before or after the breach (CloakPipe Cloud revokes first, and a repeat
+   breach in the same window keeps the window's first time).
+9. **Ledger**: each export is v4 (the manifest signs the chain tip), its chain,
    batch signatures, anchor receipts, inclusion proofs and manifest verify
    (the existing `chain`/`sigs`/`anchors`/`proofs`/`manifest` checks), its
-   manifest signer is a `--trust` key, and at least one hop is bound to this
-   release.
+   manifest signer is a `--ledger-trust` key, at least one hop is bound to
+   this release, and no record (tenant, seq) appears in two exports.
 
 The human summary starts with `PASS` or `FAIL`, then the release, signer,
 runs, certifications, ledger, **environment status** (live/superseded, since
@@ -137,12 +160,23 @@ revocations, sentinel breaches, first and last runtime hop).
 
 A hash chain cannot be cut to one release's hops without breaking its
 proof, so exports are embedded whole. The verifier reads each hop's release
-binding from its signed canonical bytes (`metadata=…release_hash=hash:<hex>;`)
-and reports hops bound to this release and the `other` hops kept for the
-chain. A binding that does not read one way only (`release_hash=` more than
-once, e.g. another key ending in `release_hash`, or not a `hash:<64 hex>;`
-entry) fails the pack. Anchor receipts travel inside the exports and are
-verified there; the pack itself is not anchored.
+binding from its signed canonical bytes and reports hops bound to this
+release and the `other` hops kept for the chain.
+
+The metadata line is the ledger's `key=type:value;` entries in strictly
+increasing key order (`bool`, `int`, `hash`, `id`). `cloakpipe-ledger`
+refuses metadata keys that are empty or contain whitespace, `;` or `=`, and
+opaque ids that contain `;` or `=`, so a line splits into entries one way
+only and an opaque id cannot spell out a forged `release_hash` entry. The
+verifier parses every entry strictly and binds a hop only through the entry
+whose key is exactly `release_hash`, which must be a `hash` (the same rule
+as `LedgerRecord::release_hash()`); a line that does not parse fails the
+pack. Records written before this rule by an older ledger could carry such
+ids; they fail closed rather than being read.
+
+Anchor receipts travel inside the exports and are verified there. The pack
+itself is not anchored, and the pack has no section for separate anchor
+receipts.
 
 ## Producing a pack
 
@@ -176,8 +210,23 @@ let json = pack.to_json_pretty();
 `build` refuses what could never verify (`BuildError`): an empty exporter,
 an uncertifiable manifest, a run or certification for another release, a
 non-RFC 3339 time or an event after `createdAt`, a ledger export without a
-hop for this release. It does not check certification signatures or
-promotion consistency, which need the verifier's trust anchors.
+hop for this release or overlapping an earlier export, no
+`release_registered` event (`MissingRegistration`). It does not check
+certification signatures, environment names, or promotion and sentinel
+consistency, which the verifier does with its trust anchors.
+
+Verifying from Rust:
+
+```rust
+use cloakpipe_verify::pack::{verify_pack_bytes, VerifyOptions};
+
+let report = verify_pack_bytes(&bytes, &VerifyOptions {
+    trusted: vec![exporter],        // pack signature
+    ledger_trusted: vec![ledger],   // ledger export signers
+    cert_trusted: vec![issuer],     // certification issuers
+    now: chrono::Utc::now(),
+});
+```
 
 ## What a pack does not prove
 
@@ -185,5 +234,14 @@ promotion consistency, which need the verifier's trust anchors.
 - That the pack is complete: an exporter can leave out runs,
   certifications, events or whole ledger exports. A ledger export is
   complete only up to its own signed chain tip.
+- That revocations were issued by anyone but the exporter: this version has
+  no signed revocation-statement format, so a revocation is an
+  exporter-attested `certification_revoked` event (as are sentinel
+  breaches). The verifier cannot be given extra revoked statements or keys.
+- When the pack was made: it is not anchored (no transparency-log or TSA
+  receipt over the pack digest). Anchor receipts exist only inside the
+  embedded ledger exports and cover those exports, not the pack.
+- That ledger hop times fall inside the governance history: hop timestamps
+  are not compared with `createdAt` or with the promotions.
 - Anything the included certifications do not claim (see
   [CERTIFICATION.md](CERTIFICATION.md#what-a-certification-does-not-claim)).
