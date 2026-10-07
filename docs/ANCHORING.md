@@ -91,7 +91,8 @@ Fail-closed rules:
    attributes present.
 3. `contentType` = `id-ct-TSTInfo`; `messageDigest` = digest of the TSTInfo;
    ESS `signingCertificate` (SHA-1) / `signingCertificateV2` (default
-   SHA-256), when present, match the signer certificate (hash and serial).
+   SHA-256), when present, match the signer certificate: its hash and, when
+   `issuerSerial` is given, its serial and its issuer (as a directory name).
 4. Signature over the DER signed attributes: RSA PKCS#1 v1.5 (>= 2048 bits)
    or ECDSA P-256 / P-384, with SHA-256/384/512. Anything else (RSA-PSS,
    SHA-1 signatures, other curves) is rejected.
@@ -100,11 +101,17 @@ Fail-closed rules:
 6. Signer certificate: critical extended key usage of exactly
    `id-kp-timeStamping`; key usage (if present) allows signing.
 7. Path from the signer, through certificates carried in the token, to a
-   `--tsa-root` certificate: every signature checks, issuers are CAs within
-   their path length and may sign certificates, every certificate (root
-   included) is valid **at `genTime`**, and no certificate has a critical
-   extension the verifier does not understand. Certificates in the token are
-   never trusted as roots.
+   `--tsa-root` certificate: every signature checks; every issuer, **the
+   `--tsa-root` certificate included**, is a CA (`basicConstraints CA:TRUE`)
+   within its path length, may sign certificates (`keyCertSign` if key usage
+   is present) and, if it restricts its extended key usage, allows
+   `timeStamping` (or any purpose); every certificate (root included) is
+   valid **at `genTime`**; and no certificate on the path, root included,
+   has a critical extension the verifier does not understand. Pinning a
+   non-CA certificate as `--tsa-root` therefore does not make it an issuer.
+   The one exception is pinning the TSA's own signer certificate, which is
+   trusted directly (it still needs the timeStamping EKU of step 6).
+   Certificates in the token are never trusted as roots.
 
 No revocation (CRL/OCSP) checking is done: that needs the network. Pin a
 specific root and re-check revocation out of band if you need it.

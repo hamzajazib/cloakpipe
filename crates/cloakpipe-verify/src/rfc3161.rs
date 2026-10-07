@@ -11,7 +11,7 @@
 //! 3. Signed attributes: `contentType` is `id-ct-TSTInfo`; `messageDigest`
 //!    equals the digest of the encapsulated TSTInfo; an ESS
 //!    `signingCertificate` / `signingCertificateV2`, if present, names the
-//!    signer certificate by hash (and serial, if given).
+//!    signer certificate by hash (and, if given, by issuer name and serial).
 //! 4. The signature over the DER signed attributes verifies under the
 //!    signer certificate's key: RSA PKCS#1 v1.5 (2048 bits or more) or
 //!    ECDSA P-256 / P-384, with SHA-256/384/512.
@@ -20,9 +20,12 @@
 //! 6. The signer certificate has a critical extended key usage of exactly
 //!    `id-kp-timeStamping` and chains, through certificates carried in the
 //!    token, to one of the caller's roots. Every certificate on the path,
-//!    the root included, is valid at `genTime`; issuers are CAs; no
-//!    certificate carries a critical extension this verifier does not
-//!    understand.
+//!    the root included, is valid at `genTime`; every issuer, the root
+//!    included, is a CA within its path length that may sign certificates
+//!    and, if it restricts its extended key usage, allows timeStamping; no
+//!    certificate on the path, the root included, carries a critical
+//!    extension this verifier does not understand. A root that is itself
+//!    the signer certificate (a pinned TSA certificate) is trusted as is.
 
 use crate::time::{parse_generalized_time, rfc3339_from_unix};
 use cms::cert::CertificateChoices;
@@ -89,6 +92,7 @@ const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.84
 const OID_P256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_P384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
 const OID_KP_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+const OID_ANY_EKU: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37.0");
 const OID_EXT_SKI: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const OID_EXT_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.15");
 const OID_EXT_SAN: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
@@ -335,22 +339,37 @@ fn check_signed_attrs(si: &SignerInfo, digest_alg: HashAlg, tst_der: &[u8], sign
 
     let signer_der = signer.to_der().map_err(malformed)?;
     if let Some(v) = attr_value(si, OID_ATTR_SIGNING_CERT)? {
-        let (hash, serial) = first_ess_cert_id(&v.to_der().map_err(malformed)?, false)?;
-        check_ess(HashAlg::Sha1, &hash, serial.as_deref(), &signer_der, signer)?;
+        let (hash, is) = first_ess_cert_id(&v.to_der().map_err(malformed)?, false)?;
+        check_ess(HashAlg::Sha1, &hash, is.as_ref(), &signer_der, signer)?;
     }
     if let Some(v) = attr_value(si, OID_ATTR_SIGNING_CERT_V2)? {
-        let (alg, hash, serial) = first_ess_cert_id_v2(&v.to_der().map_err(malformed)?)?;
-        check_ess(alg, &hash, serial.as_deref(), &signer_der, signer)?;
+        let (alg, hash, is) = first_ess_cert_id_v2(&v.to_der().map_err(malformed)?)?;
+        check_ess(alg, &hash, is.as_ref(), &signer_der, signer)?;
     }
     Ok(())
 }
 
-fn check_ess(alg: HashAlg, hash: &[u8], serial: Option<&[u8]>, signer_der: &[u8], signer: &Certificate) -> Result<()> {
+fn check_ess(
+    alg: HashAlg,
+    hash: &[u8],
+    issuer_serial: Option<&IssuerSerial>,
+    signer_der: &[u8],
+    signer: &Certificate,
+) -> Result<()> {
     if alg.digest(signer_der) != hash {
         return Err(Rfc3161Error::SigningCertMismatch);
     }
-    if let Some(s) = serial {
-        if strip_zeros(s) != strip_zeros(signer.tbs_certificate.serial_number.as_bytes()) {
+    if let Some(is) = issuer_serial {
+        if strip_zeros(&is.serial) != strip_zeros(signer.tbs_certificate.serial_number.as_bytes()) {
+            return Err(Rfc3161Error::SigningCertMismatch);
+        }
+        // The issuer must be named as a directory name equal to the
+        // signer certificate's issuer; any other form is not understood.
+        let names_issuer = is.issuer.iter().any(|g| {
+            matches!(g, x509_cert::ext::pkix::name::GeneralName::DirectoryName(n)
+                if same_name(n, &signer.tbs_certificate.issuer))
+        });
+        if !names_issuer {
             return Err(Rfc3161Error::SigningCertMismatch);
         }
     }
@@ -361,7 +380,7 @@ fn check_ess(alg: HashAlg, hash: &[u8], serial: Option<&[u8]>, signer_der: &[u8]
 /// OPTIONAL }`, `ESSCertID ::= SEQUENCE { certHash OCTET STRING,
 /// issuerSerial IssuerSerial OPTIONAL }`. Returns the first ESSCertID, which
 /// identifies the signer.
-fn first_ess_cert_id(der_bytes: &[u8], _v2: bool) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+fn first_ess_cert_id(der_bytes: &[u8], _v2: bool) -> Result<(Vec<u8>, Option<IssuerSerial>)> {
     let mut r = SliceReader::new(der_bytes).map_err(malformed)?;
     let out = r
         .sequence(|r| {
@@ -387,7 +406,7 @@ fn first_ess_cert_id(der_bytes: &[u8], _v2: bool) -> Result<(Vec<u8>, Option<Vec
 
 /// `ESSCertIDv2 ::= SEQUENCE { hashAlgorithm DEFAULT sha256, certHash,
 /// issuerSerial OPTIONAL }`.
-fn first_ess_cert_id_v2(der_bytes: &[u8]) -> Result<(HashAlg, Vec<u8>, Option<Vec<u8>>)> {
+fn first_ess_cert_id_v2(der_bytes: &[u8]) -> Result<(HashAlg, Vec<u8>, Option<IssuerSerial>)> {
     let mut r = SliceReader::new(der_bytes).map_err(malformed)?;
     let (alg, hash, serial) = r
         .sequence(|r| {
@@ -420,16 +439,24 @@ fn first_ess_cert_id_v2(der_bytes: &[u8]) -> Result<(HashAlg, Vec<u8>, Option<Ve
 
 /// Optional trailing `IssuerSerial ::= SEQUENCE { issuer GeneralNames,
 /// serialNumber INTEGER }`; returns the serial.
-fn issuer_serial<'a, R: Reader<'a>>(r: &mut R) -> der::Result<Option<Vec<u8>>> {
+/// `IssuerSerial ::= SEQUENCE { issuer GeneralNames, serialNumber INTEGER }`.
+fn issuer_serial<'a, R: Reader<'a>>(r: &mut R) -> der::Result<Option<IssuerSerial>> {
     if r.is_finished() {
         return Ok(None);
     }
-    let serial = r.sequence(|is| {
-        let _issuer: AnyRef<'_> = is.decode()?;
+    let is = r.sequence(|is| {
+        let issuer: x509_cert::ext::pkix::name::GeneralNames = is.decode()?;
         let serial: der::asn1::IntRef<'_> = is.decode()?;
-        Ok(serial.as_bytes().to_vec())
+        Ok(IssuerSerial { issuer, serial: serial.as_bytes().to_vec() })
     })?;
-    Ok(Some(serial))
+    Ok(Some(is))
+}
+
+/// The signer certificate's issuer and serial, as named by an ESSCertID.
+#[derive(Debug, Clone)]
+struct IssuerSerial {
+    issuer: x509_cert::ext::pkix::name::GeneralNames,
+    serial: Vec<u8>,
 }
 
 fn verify_cms_signature(si: &SignerInfo, digest_alg: HashAlg, signer: &Certificate) -> Result<()> {
@@ -714,6 +741,19 @@ fn check_ca(issuer: &Certificate, below: usize) -> Result<()> {
     Ok(())
 }
 
+/// A CA that restricts its extended key usage must allow timestamping
+/// (or any purpose); one restricted to, say, code signing cannot vouch for
+/// a TSA.
+fn check_issuer_eku(issuer: &Certificate) -> Result<()> {
+    let fail = |m: &str| Rfc3161Error::UntrustedChain(format!("`{}` {m}", issuer.tbs_certificate.subject));
+    let Some(eku) = extension(issuer, OID_EXT_EKU) else { return Ok(()) };
+    let eku = ExtendedKeyUsage::from_der(eku.extn_value.as_bytes()).map_err(|_| fail("has unreadable EKU"))?;
+    if !eku.0.iter().any(|o| *o == OID_KP_TIME_STAMPING || *o == OID_ANY_EKU) {
+        return Err(fail("is not allowed to certify timeStamping"));
+    }
+    Ok(())
+}
+
 fn signed_by(child: &Certificate, issuer: &Certificate) -> bool {
     if !same_name(&child.tbs_certificate.issuer, &issuer.tbs_certificate.subject) {
         return false;
@@ -740,7 +780,12 @@ fn validate_path(signer: &Certificate, pool: &[Certificate], roots: &TrustedRoot
             return Ok(());
         }
         if let Some(root) = roots.certs.iter().find(|r| signed_by(current, r)) {
+            // Pinning a certificate trusts its key, not its right to issue:
+            // the anchor must itself be a CA that may sign this path.
             check_validity(root, at)?;
+            check_critical_extensions(root)?;
+            check_ca(root, intermediates)?;
+            check_issuer_eku(root)?;
             return Ok(());
         }
         let next = pool
@@ -751,7 +796,48 @@ fn validate_path(signer: &Certificate, pool: &[Certificate], roots: &TrustedRoot
                 Rfc3161Error::UntrustedChain(format!("no trusted issuer for `{}`", current.tbs_certificate.issuer))
             })?;
         check_ca(next, intermediates)?;
+        check_issuer_eku(next)?;
         current = next;
     }
     Err(Rfc3161Error::UntrustedChain("path too long".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x509_cert::ext::pkix::name::GeneralName;
+
+    fn freetsa_signer() -> Certificate {
+        let tsr = include_bytes!("../tests/fixtures/anchoring/freetsa-honest.tsr");
+        let sd = parse_signed_data(&parse_response(tsr).unwrap()).unwrap();
+        let certs = embedded_certs(&sd).unwrap();
+        find_signer_cert(&single_signer(&sd).unwrap().sid, &certs).unwrap().clone()
+    }
+
+    fn is(issuer: Vec<GeneralName>, c: &Certificate) -> IssuerSerial {
+        IssuerSerial { issuer, serial: c.tbs_certificate.serial_number.as_bytes().to_vec() }
+    }
+
+    #[test]
+    fn ess_issuer_serial_must_name_the_signers_issuer() {
+        let c = freetsa_signer();
+        let der = c.to_der().unwrap();
+        let hash = HashAlg::Sha256.digest(&der);
+        assert_ne!(c.tbs_certificate.issuer, c.tbs_certificate.subject);
+        let right = is(vec![GeneralName::DirectoryName(c.tbs_certificate.issuer.clone())], &c);
+        check_ess(HashAlg::Sha256, &hash, Some(&right), &der, &c).expect("matching issuer and serial");
+        let wrong = is(vec![GeneralName::DirectoryName(c.tbs_certificate.subject.clone())], &c);
+        assert_eq!(check_ess(HashAlg::Sha256, &hash, Some(&wrong), &der, &c), Err(Rfc3161Error::SigningCertMismatch));
+        let other_form = is(vec![GeneralName::DnsName(der::asn1::Ia5String::new("freetsa.org").unwrap())], &c);
+        assert_eq!(
+            check_ess(HashAlg::Sha256, &hash, Some(&other_form), &der, &c),
+            Err(Rfc3161Error::SigningCertMismatch)
+        );
+        let mut bad_serial = right.clone();
+        bad_serial.serial.push(1);
+        assert_eq!(
+            check_ess(HashAlg::Sha256, &hash, Some(&bad_serial), &der, &c),
+            Err(Rfc3161Error::SigningCertMismatch)
+        );
+    }
 }

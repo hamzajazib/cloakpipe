@@ -26,3 +26,18 @@ that `tests/common/mod.rs` builds deterministically:
 The "future" head claims 2027 times; its anchors prove 2026, so it must fail
 as back-dated. Changing `common/mod.rs` changes the heads and requires a
 re-capture.
+
+### `anchoring/local/` — tokens from a throwaway local PKI
+
+Built by `tools/make_local_tsa_fixtures.sh` (OpenSSL 3; keys discarded) over
+`head-honest.json`, for path-validation cases no public TSA exercises. Each
+case is `<case>-root.pem` (the trust input), `<case>.tsr`, `<case>.nonce`:
+
+| Case | Chain | Expected |
+|---|---|---|
+| `ca` | CA root -> TSA | verifies (control) |
+| `tsint` | CA root -> CA with EKU timeStamping -> TSA | verifies (control) |
+| `nonca` | root with `CA:FALSE` -> TSA | rejected: anchor is not a CA |
+| `critroot` | CA root with an unknown critical extension -> TSA | rejected |
+| `ekuint` | CA root -> CA with EKU codeSigning only -> TSA | rejected |
+

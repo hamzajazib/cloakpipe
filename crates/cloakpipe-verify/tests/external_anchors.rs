@@ -643,3 +643,39 @@ fn a_non_ascii_rekor_uuid_fails_without_panicking() {
     }
     assert!(verify_anchors_with_trust(&b, &full_trust()).is_err());
 }
+
+// ── Path validation against a local PKI (tools/make_local_tsa_fixtures.sh)
+
+fn local(case: &str) -> Result<cloakpipe_verify::rfc3161::VerifiedTimestamp, Rfc3161Error> {
+    let roots = TrustedRoots::from_pem(&fixture(&format!("local/{case}-root.pem"))).unwrap();
+    verify_timestamp_response(
+        &fixture(&format!("local/{case}.tsr")),
+        &sha256(&head_bytes(&HONEST)),
+        &nonce(&format!("local/{case}")),
+        &roots,
+    )
+}
+
+#[test]
+fn local_control_chains_verify() {
+    local("ca").expect("CA root -> TSA");
+    local("tsint").expect("CA root -> timeStamping CA -> TSA");
+}
+
+#[test]
+fn a_trust_anchor_that_is_not_a_ca_is_refused() {
+    let e = local("nonca").unwrap_err();
+    assert!(matches!(e, Rfc3161Error::UntrustedChain(ref m) if m.contains("not a CA")), "{e}");
+}
+
+#[test]
+fn a_trust_anchor_with_an_unknown_critical_extension_is_refused() {
+    let e = local("critroot").unwrap_err();
+    assert!(matches!(e, Rfc3161Error::UntrustedChain(ref m) if m.contains("critical extension")), "{e}");
+}
+
+#[test]
+fn an_intermediate_restricted_to_another_purpose_is_refused() {
+    let e = local("ekuint").unwrap_err();
+    assert!(matches!(e, Rfc3161Error::UntrustedChain(ref m) if m.contains("timeStamping")), "{e}");
+}
