@@ -8,28 +8,41 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// How scores become a case status (see the module docs of `import`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScoreRules {
     /// A case passes iff every score is `>=` this; must be finite and within
     /// `0..=1`. Default `0.5`.
     pub pass_threshold: f64,
+    /// When non-empty, only scores with these names count; any other score
+    /// is ignored (not validated, not imported), and a case missing one of
+    /// them has no evidence for it and is `Error`. Names must be non-empty
+    /// and distinct. Default: empty (every score counts).
+    pub score_names: Vec<String>,
 }
 
 impl Default for ScoreRules {
     fn default() -> Self {
-        ScoreRules { pass_threshold: 0.5 }
+        ScoreRules { pass_threshold: 0.5, score_names: Vec::new() }
     }
 }
 
 impl ScoreRules {
     /// Problems with the rules themselves.
     pub(super) fn issues(&self) -> Vec<String> {
+        let mut issues = Vec::new();
         let t = self.pass_threshold;
-        if t.is_finite() && (0.0..=1.0).contains(&t) {
-            Vec::new()
-        } else {
-            vec![format!("pass threshold {t} must be a finite number within 0..=1")]
+        if !(t.is_finite() && (0.0..=1.0).contains(&t)) {
+            issues.push(format!("pass threshold {t} must be a finite number within 0..=1"));
         }
+        let mut seen = BTreeSet::new();
+        for name in &self.score_names {
+            if name.is_empty() {
+                issues.push("selected score name must not be empty".into());
+            } else if !seen.insert(name.as_str()) {
+                issues.push(format!("selected score name {name:?} given more than once"));
+            }
+        }
+        issues
     }
 }
 
@@ -158,19 +171,29 @@ pub(super) fn json_error(msg: impl fmt::Display) -> ImportError {
 pub(super) struct CaseScores {
     /// How the case is named in issues.
     who: String,
+    /// Selected score names (empty: all count).
+    selected: Vec<String>,
     names: BTreeSet<String>,
     values: BTreeMap<String, f64>,
 }
 
 impl CaseScores {
-    pub(super) fn new(who: String) -> Self {
-        CaseScores { who, names: BTreeSet::new(), values: BTreeMap::new() }
+    pub(super) fn new(who: String, rules: &ScoreRules) -> Self {
+        CaseScores { who, selected: rules.score_names.clone(), names: BTreeSet::new(), values: BTreeMap::new() }
     }
 
-    /// Note a score name; a name seen twice on one case is an issue, even
-    /// if one occurrence carries no value.
+    /// Whether a score named `name` counts for this case.
+    pub(super) fn counts(&self, name: &str) -> bool {
+        self.selected.is_empty() || self.selected.iter().any(|n| n == name)
+    }
+
+    /// Note a score name; `false` if the score does not count (not
+    /// selected) or was already seen. A counted name seen twice on one case
+    /// is an issue, even if one occurrence carries no value.
     pub(super) fn name(&mut self, name: &str, issues: &mut Vec<String>) -> bool {
-        if self.names.insert(name.to_string()) {
+        if !self.counts(name) {
+            false
+        } else if self.names.insert(name.to_string()) {
             true
         } else {
             issues.push(format!("{}: score {name:?} given more than once", self.who));
@@ -192,8 +215,8 @@ impl CaseScores {
         format!("{}: {what}", self.who)
     }
 
-    /// The case: `Error` on an explicit error or when nothing was scored
-    /// (no evidence: fail closed), else `Pass` iff every score meets the
+    /// The case: `Error` on an explicit error, when nothing was scored or a
+    /// selected score is missing (no evidence: fail closed), else `Pass` iff every score meets the
     /// threshold. `score` is the mean; each score is `metrics["score.<name>"]`.
     pub(super) fn into_case(
         self,
@@ -206,7 +229,8 @@ impl CaseScores {
     ) -> CaseResult {
         let n = self.values.len();
         let score = (n > 0).then(|| self.values.values().sum::<f64>() / n as f64);
-        let status = if error || n == 0 {
+        let missing = self.selected.iter().any(|name| !self.values.contains_key(name));
+        let status = if error || n == 0 || missing {
             CaseStatus::Error
         } else if self.values.values().all(|&s| s >= rules.pass_threshold) {
             CaseStatus::Pass

@@ -11,19 +11,85 @@ use std::collections::BTreeMap;
 pub fn from_braintrust(json: &str, meta: &ImportMeta, rules: &ScoreRules) -> Result<EvaluationRun, ImportError> {
     let events = read_events(json)?;
     let mut issues = rules.issues();
-    let mut cases = Vec::new();
+    // Root spans, and the scorer spans of each root (by the root's span id).
+    let mut roots = Vec::new();
+    let mut scorers: BTreeMap<&str, Vec<(&str, &J)>> = BTreeMap::new();
     for (label, event) in &events {
         if !matches!(event, J::Obj(_)) {
             issues.push(format!("{label}: expected an event object, found {}", event.kind()));
             continue;
         }
-        match read_event(label, event, meta, rules) {
-            Ok(Some(case)) => cases.push(case),
-            Ok(None) => {}
+        match is_root(label, event) {
+            Ok(true) => roots.push((label.as_str(), event)),
+            Ok(false) => {
+                if let Some(root) = scorer_root(event) {
+                    scorers.entry(root).or_default().push((label.as_str(), event));
+                }
+            }
             Err(problems) => issues.extend(problems),
         }
     }
+    let mut cases: Vec<CaseResult> = Vec::new();
+    for (label, event) in roots {
+        let children = root_key(event).and_then(|k| scorers.get(k)).map_or(&[][..], Vec::as_slice);
+        match read_event(label, event, children, meta, rules) {
+            Ok(case) => cases.push(case),
+            Err(problems) => issues.extend(problems),
+        }
+    }
+    let mut seen = BTreeMap::new();
+    for case in &cases {
+        let n = seen.entry(case.id.as_str()).or_insert(0);
+        *n += 1;
+        if *n == 2 {
+            issues.push(format!(
+                "case id {:?} is on more than one root span: an experiment run with trial_count > 1 logs one \
+                 root span per trial; import a run with one trial, or make metadata.cloakpipe_case_id unique \
+                 per trial",
+                case.id
+            ));
+        }
+    }
     build_run(meta, SourceKind::Braintrust, meta.dataset.clone(), cases, issues)
+}
+
+/// Whether `event` is a root span (a case).
+fn is_root(label: &str, event: &J) -> Result<bool, Vec<String>> {
+    let at = |e: String| vec![format!("{label}: {e}")];
+    let get = |key: &str| event.get(key).map_err(at);
+    let is_root = match get("is_root")? {
+        None => false,
+        Some(J::Bool(b)) => *b,
+        Some(other) => return Err(at(format!("is_root: expected a bool, found {}", other.kind()))),
+    };
+    let has_parents = match get("span_parents")? {
+        None => false,
+        Some(J::Arr(parents)) => !parents.is_empty(),
+        Some(other) => return Err(at(format!("span_parents: expected an array, found {}", other.kind()))),
+    };
+    let same_span = match (get("span_id")?, get("root_span_id")?) {
+        (Some(J::Str(a)), Some(J::Str(b))) => a == b,
+        _ => false,
+    };
+    Ok(is_root || !has_parents || same_span)
+}
+
+/// The span id children of root `event` name as their `root_span_id`.
+fn root_key(event: &J) -> Option<&str> {
+    match (event.get("span_id"), event.get("root_span_id")) {
+        (Ok(Some(J::Str(id))), _) | (_, Ok(Some(J::Str(id)))) => Some(id),
+        _ => None,
+    }
+}
+
+/// The `root_span_id` of a scorer span (`span_attributes.type == "score"`),
+/// where the SDK logs each scorer's result; `None` for any other span.
+fn scorer_root(event: &J) -> Option<&str> {
+    let kind = event.get("span_attributes").ok()??.get("type").ok()??;
+    match (kind, event.get("root_span_id")) {
+        (J::Str(k), Ok(Some(J::Str(root)))) if k == "score" => Some(root),
+        _ => None,
+    }
 }
 
 /// The events of `json`, each with a label naming it in issues.
@@ -76,34 +142,16 @@ fn read_jsonl(json: &str, whole: serde_json::Error) -> Result<Vec<(String, J)>, 
     Ok(events)
 }
 
-/// The case of a root-span event; `None` for any other span.
+/// The case of root-span `event`, with the scorer spans of its trace.
 fn read_event(
     label: &str,
     event: &J,
+    children: &[(&str, &J)],
     meta: &ImportMeta,
     rules: &ScoreRules,
-) -> Result<Option<CaseResult>, Vec<String>> {
+) -> Result<CaseResult, Vec<String>> {
     let at = |e: String| vec![format!("{label}: {e}")];
     let get = |key: &str| event.get(key).map_err(at);
-
-    // ── Is it a root span? ──
-    let is_root = match get("is_root")? {
-        None => false,
-        Some(J::Bool(b)) => *b,
-        Some(other) => return Err(at(format!("is_root: expected a bool, found {}", other.kind()))),
-    };
-    let has_parents = match get("span_parents")? {
-        None => false,
-        Some(J::Arr(parents)) => !parents.is_empty(),
-        Some(other) => return Err(at(format!("span_parents: expected an array, found {}", other.kind()))),
-    };
-    let same_span = match (get("span_id")?, get("root_span_id")?) {
-        (Some(J::Str(a)), Some(J::Str(b))) => a == b,
-        _ => false,
-    };
-    if !(is_root || !has_parents || same_span) {
-        return Ok(None);
-    }
 
     // ── Identity ──
     let mut issues = Vec::new();
@@ -116,23 +164,44 @@ fn read_event(
         Some(m) => m.get(key).map_err(|e| at(format!("metadata: {e}"))),
         None => Ok(None),
     };
+    // The dataset record the row was run from: `origin` in current SDKs,
+    // `dataset_record_id` in older ones.
+    let origin = match get("origin")? {
+        None => None,
+        Some(o @ J::Obj(_)) => match o.get("object_type").map_err(|e| at(format!("origin: {e}")))? {
+            Some(J::Str(kind)) if kind == "dataset" => Some(o),
+            _ => None,
+        },
+        Some(other) => return Err(at(format!("origin: expected an object, found {}", other.kind()))),
+    };
+    let origin_id = match origin {
+        Some(o) => match o.get("id").map_err(|e| at(format!("origin: {e}")))? {
+            None => Some(&J::Null),
+            some => some,
+        },
+        None => None,
+    };
     let candidates = [
         ("metadata.cloakpipe_case_id", meta_get("cloakpipe_case_id")?),
         ("metadata.case_id", meta_get("case_id")?),
+        ("origin.id", origin_id),
         ("dataset_record_id", get("dataset_record_id")?),
     ];
     let Some((field, value)) = candidates.into_iter().find_map(|(f, v)| v.map(|v| (f, v))) else {
         return Err(at(
-            "no stable case id: set metadata.cloakpipe_case_id or metadata.case_id, or log from a dataset \
-             (dataset_record_id); row ids differ between runs"
+            "no stable case id: set metadata.cloakpipe_case_id or metadata.case_id, or run from a dataset \
+             (origin.id of a dataset origin, or dataset_record_id); row ids differ between runs"
                 .into(),
         ));
     };
     let id = match value {
-        J::Str(s) if !s.trim().is_empty() => s.clone(),
+        J::Str(s) if s.trim() != s => {
+            return Err(at(format!("{field}: case id {s:?} has leading or trailing whitespace")));
+        }
+        J::Str(s) if !s.is_empty() => s.clone(),
         other => return Err(at(format!("{field}: expected a non-empty string, found {}", describe(other)))),
     };
-    let mut scores = CaseScores::new(format!("{label} (case {id:?})"));
+    let mut scores = CaseScores::new(format!("{label} (case {id:?})"), rules);
 
     // ── Critical ──
     let critical_flag = match metadata.map(|m| has_key(m, "critical")) {
@@ -149,13 +218,65 @@ fn read_event(
     let critical = critical_flag || meta.is_critical(&id);
 
     // ── Error ──
-    let error = get("error")?.is_some_and(|e| !e.is_empty());
+    // A scorer that raised logs no score: the SDK records it only in
+    // `metadata.scorer_errors`. Missing evidence fails the case closed.
+    let mut error =
+        get("error")?.is_some_and(|e| !e.is_empty()) || meta_get("scorer_errors")?.is_some_and(|e| !e.is_empty());
 
     // ── Scores ──
+    // Scorer spans first: current SDKs log each scorer's result there.
+    let mut child_scores: BTreeMap<&str, f64> = BTreeMap::new();
+    for (child_label, child) in children {
+        let problem = |what: String| scores.issue(format_args!("scorer span {child_label}: {what}"));
+        match child.get("error") {
+            Ok(e) => error |= e.is_some_and(|e| !e.is_empty()),
+            Err(e) => issues.push(problem(e)),
+        }
+        match child.get("scores") {
+            Ok(None) => {}
+            Ok(Some(J::Obj(entries))) => {
+                for (name, value) in entries {
+                    if !scores.counts(name) {
+                        continue;
+                    }
+                    match value {
+                        J::Null => {}
+                        J::Num(v) => {
+                            if child_scores.insert(name, *v).is_some() {
+                                issues.push(scores.issue(format_args!("score {name:?} given more than once")));
+                            }
+                        }
+                        other => issues.push(problem(format!(
+                            "score {name:?}: expected a number or null, found {}",
+                            other.kind()
+                        ))),
+                    }
+                }
+            }
+            Ok(Some(other)) => issues.push(problem(format!("scores: expected an object, found {}", other.kind()))),
+            Err(e) => issues.push(problem(e)),
+        }
+    }
     match get("scores")? {
         None => {}
         Some(J::Obj(entries)) => {
             for (name, value) in entries {
+                if !scores.counts(name) {
+                    continue;
+                }
+                // The same value on the root and its scorer span counts once.
+                if let Some(child) = child_scores.get(name.as_str()) {
+                    match value {
+                        J::Null => continue,
+                        J::Num(v) if v == child => continue,
+                        _ => {}
+                    }
+                    issues.push(scores.issue(format_args!(
+                        "score {name:?}: the root span and its scorer span disagree ({} vs {child})",
+                        describe(value)
+                    )));
+                    continue;
+                }
                 if !scores.name(name, &mut issues) {
                     continue;
                 }
@@ -169,6 +290,11 @@ fn read_event(
             }
         }
         Some(other) => issues.push(scores.issue(format_args!("scores: expected an object, found {}", other.kind()))),
+    }
+    for (name, v) in child_scores {
+        if scores.name(name, &mut issues) {
+            scores.value(name, v, &mut issues);
+        }
     }
 
     // ── Metrics ──
@@ -207,12 +333,13 @@ fn read_event(
     if !issues.is_empty() {
         return Err(issues);
     }
-    Ok(Some(scores.into_case(id, critical, error, rules, metrics, duration_ms)))
+    Ok(scores.into_case(id, critical, error, rules, metrics, duration_ms))
 }
 
 fn describe(v: &J) -> String {
     match v {
         J::Str(s) => format!("{s:?}"),
+        J::Num(n) => n.to_string(),
         other => other.kind().to_string(),
     }
 }

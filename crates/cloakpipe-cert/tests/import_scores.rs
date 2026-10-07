@@ -27,7 +27,7 @@ fn rules() -> ScoreRules {
 }
 
 fn threshold(t: f64) -> ScoreRules {
-    ScoreRules { pass_threshold: t }
+    ScoreRules { pass_threshold: t, ..ScoreRules::default() }
 }
 
 fn fixture(name: &str) -> String {
@@ -117,7 +117,7 @@ fn braintrust_fetch_fixture() {
     assert!(identity.critical, "metadata.critical = true");
     approx(identity.score, 0.95);
     assert_eq!(identity.duration_ms, Some(1412));
-    assert_eq!(identity.metrics.get("score.Factuality"), Some(&0.9), "child span scores are not merged");
+    assert_eq!(identity.metrics.get("score.Factuality"), Some(&0.9), "LLM span scores are not merged");
     assert_eq!(identity.metrics.get("score.refund_policy"), Some(&1.0));
     assert!(!identity.metrics.contains_key("score.Levenshtein"), "null scores are not counted");
     assert_eq!(identity.metrics.get("tokens.prompt"), Some(&812.0));
@@ -775,6 +775,270 @@ fn langfuse_critical_by_pattern_only() {
     let run = from_langfuse(&fixture("langfuse_run.json"), &fixture("langfuse_scores.json"), &m, &rules()).unwrap();
     assert!(case(&run, "privacy::no_pii_in_tool_args").critical);
     assert!(!case(&run, "refunds::requires_identity").critical);
+}
+
+// ── Review regressions: Braintrust ──────────────────────────────────────
+
+fn only(names: &[&str]) -> ScoreRules {
+    ScoreRules { score_names: names.iter().map(|n| n.to_string()).collect(), ..ScoreRules::default() }
+}
+
+/// A root span with no scores of its own, as the current SDK logs it.
+fn bt_root(span: &str, metadata: Value) -> Value {
+    json!({"span_id": span, "root_span_id": span, "span_parents": null, "is_root": true, "metadata": metadata,
+           "span_attributes": {"name": "eval", "type": "eval"}})
+}
+
+/// A child span of `root` of span type `kind` carrying `scores`.
+fn bt_child(span: &str, root: &str, kind: &str, scores: Value) -> Value {
+    json!({"span_id": span, "root_span_id": root, "span_parents": [root], "is_root": false,
+           "span_attributes": {"name": span, "type": kind}, "scores": scores})
+}
+
+#[test]
+fn braintrust_sdk_fixture() {
+    let m = ImportMeta { critical: vec![], ..meta() };
+    let run = from_braintrust(&fixture("braintrust_sdk_fetch.json"), &m, &rules()).unwrap();
+    assert_eq!(ids(&run), ["rec-refund-identity", "privacy::no_ssn_echo", "rec-crash"]);
+    let identity = case(&run, "rec-refund-identity");
+    assert_eq!(identity.status, CaseStatus::Pass, "scores come from the scorer spans");
+    assert_eq!(identity.metrics.get("score.Factuality"), Some(&0.8), "not the judge's LLM span");
+    assert_eq!(identity.metrics.get("score.PrivacyLeak"), Some(&1.0));
+    approx(identity.score, 0.9);
+    assert_eq!(identity.duration_ms, Some(2250));
+    let ssn = case(&run, "privacy::no_ssn_echo");
+    assert_eq!(ssn.status, CaseStatus::Fail);
+    assert!(ssn.critical);
+    assert_eq!(case(&run, "rec-crash").status, CaseStatus::Error, "a crashed scorer fails closed");
+}
+
+#[test]
+fn braintrust_case_id_from_dataset_origin() {
+    let e = |extra: Value| {
+        let mut e = json!({"span_parents": null, "scores": {"s": 1}});
+        for (k, v) in extra.as_object().unwrap() {
+            e[k] = v.clone();
+        }
+        e
+    };
+    let origin = |kind: &str, id: &str| json!({"object_type": kind, "object_id": "ds-1", "id": id, "_xact_id": "1"});
+    let run = bt_ok(vec![
+        e(json!({"origin": origin("dataset", "rec-1")})),
+        e(json!({"origin": origin("dataset", "rec-2"), "metadata": {"case_id": "ci"}})),
+        e(json!({"origin": origin("dataset", "rec-3"), "dataset_record_id": "legacy"})),
+        e(json!({"origin": origin("experiment", "row-9"), "dataset_record_id": "legacy-2"})),
+    ]);
+    assert_eq!(ids(&run), ["rec-1", "ci", "rec-3", "legacy-2"]);
+    let msg = expect_invalid(bt(vec![e(json!({"origin": origin("experiment", "row-9")}))]));
+    assert!(msg.contains("origin.id"), "{msg}");
+    let msg = expect_invalid(bt(vec![e(json!({"origin": "rec-1"}))]));
+    assert!(msg.contains("origin"), "{msg}");
+    let msg = expect_invalid(bt(vec![e(json!({"origin": {"object_type": "dataset", "id": 4}}))]));
+    assert!(msg.contains("origin.id"), "{msg}");
+}
+
+#[test]
+fn braintrust_scorer_errors_fail_closed() {
+    let mut e = bt_event("c", json!({"Factuality": 0.9}));
+    e["metadata"]["scorer_errors"] = json!({"PrivacyLeak": "Traceback ... boom"});
+    let c = bt_one(e);
+    assert_eq!(c.status, CaseStatus::Error, "a scorer that crashed is missing evidence");
+    let mut e = bt_event("c", json!({"Factuality": 0.9}));
+    e["metadata"]["scorer_errors"] = json!({});
+    assert_eq!(bt_one(e).status, CaseStatus::Pass);
+}
+
+#[test]
+fn braintrust_scorer_span_scores_belong_to_their_root() {
+    // Children before the root; another root's scorer span; an LLM span with scores.
+    let run = bt_ok(vec![
+        bt_child("s1", "r1", "score", json!({"Factuality": 0.2})),
+        bt_child("l1", "r1", "llm", json!({"Factuality": 1})),
+        bt_root("r1", json!({"case_id": "a"})),
+        bt_root("r2", json!({"case_id": "b"})),
+        bt_child("s2", "r2", "score", json!({"Factuality": 0.9, "Extra": null})),
+        bt_child("s3", "r-missing", "score", json!({"Factuality": 0})),
+    ]);
+    assert_eq!(case(&run, "a").status, CaseStatus::Fail);
+    assert_eq!(case(&run, "a").metrics.get("score.Factuality"), Some(&0.2));
+    assert_eq!(case(&run, "b").status, CaseStatus::Pass);
+    assert_eq!(case(&run, "b").metrics.len(), 1, "{:?}", case(&run, "b").metrics);
+
+    // A root carrying the same value as its scorer span counts it once.
+    let mut root = bt_root("r1", json!({"case_id": "a"}));
+    root["scores"] = json!({"Factuality": 0.7});
+    let c = bt_one_of(vec![root.clone(), bt_child("s1", "r1", "score", json!({"Factuality": 0.7}))]);
+    assert_eq!(c.metrics.get("score.Factuality"), Some(&0.7));
+    // ... but a disagreeing value is a conflict.
+    let msg = expect_invalid(bt(vec![root, bt_child("s1", "r1", "score", json!({"Factuality": 0.1}))]));
+    assert!(msg.contains("\"a\"") && msg.contains("Factuality"), "{msg}");
+    // Two scorer spans with one name.
+    let msg = expect_invalid(bt(vec![
+        bt_root("r1", json!({"case_id": "a"})),
+        bt_child("s1", "r1", "score", json!({"Factuality": 1})),
+        bt_child("s2", "r1", "score", json!({"Factuality": 1})),
+    ]));
+    assert!(msg.contains("Factuality"), "{msg}");
+    // Out-of-range or non-numeric scorer-span scores are invalid.
+    for bad in [json!(2), json!("x")] {
+        let msg = expect_invalid(bt(vec![
+            bt_root("r1", json!({"case_id": "a"})),
+            bt_child("s1", "r1", "score", json!({"Factuality": bad})),
+        ]));
+        assert!(msg.contains("\"a\""), "{msg}");
+    }
+    // A scorer span that errored fails the case closed.
+    let mut failed = bt_child("s1", "r1", "score", json!(null));
+    failed["error"] = json!("RuntimeError: judge timed out");
+    let c = bt_one_of(vec![
+        bt_root("r1", json!({"case_id": "a"})),
+        bt_child("s0", "r1", "score", json!({"Factuality": 1})),
+        failed,
+    ]);
+    assert_eq!(c.status, CaseStatus::Error);
+}
+
+fn bt_one_of(events: Vec<Value>) -> CaseResult {
+    let run = bt_ok(events);
+    assert_eq!(run.cases.len(), 1, "{:?}", ids(&run));
+    run.cases.into_iter().next().unwrap()
+}
+
+#[test]
+fn braintrust_case_ids_with_surrounding_whitespace_are_invalid() {
+    for bad in [" safety-1", "safety-1 ", "\tsafety-1"] {
+        let msg = expect_invalid(bt(vec![bt_event(bad, json!({"a": 1}))]));
+        assert!(msg.contains("whitespace"), "{bad:?}: {msg}");
+    }
+}
+
+#[test]
+fn braintrust_duplicate_case_ids_point_at_trials() {
+    let msg = expect_invalid(bt(vec![bt_event("c1", json!({"F": 0.9})), bt_event("c1", json!({"F": 0.2}))]));
+    assert!(msg.contains("trial"), "{msg}");
+}
+
+#[test]
+fn score_names_select_the_scores_that_count() {
+    let doc = json!([bt_event("c", json!({"acc": 0.9, "latency": 0.1}))]).to_string();
+    let c = from_braintrust(&doc, &meta(), &only(&["acc"])).unwrap().cases.remove(0);
+    assert_eq!(c.status, CaseStatus::Pass);
+    assert_eq!(c.metrics.keys().collect::<Vec<_>>(), ["score.acc"]);
+    approx(c.score, 0.9);
+    // A selected score missing from a case is missing evidence.
+    let c = from_braintrust(&doc, &meta(), &only(&["acc", "safety"])).unwrap().cases.remove(0);
+    assert_eq!(c.status, CaseStatus::Error);
+    // Unselected scores are not validated.
+    let run_json = json!({"datasetRunItems": [lf_item("item-1", "t1", None)]}).to_string();
+    let scores = json!([
+        {"id": "a", "name": "acc", "value": 0.9, "traceId": "t1", "dataType": "NUMERIC"},
+        {"id": "b", "name": "user-feedback", "value": 4, "traceId": "t1", "dataType": "NUMERIC", "source": "ANNOTATION"},
+    ])
+    .to_string();
+    expect_invalid(from_langfuse(&run_json, &scores, &lf_meta(), &rules()));
+    let run = from_langfuse(&run_json, &scores, &lf_meta(), &only(&["acc"])).unwrap();
+    assert_eq!(run.cases[0].status, CaseStatus::Pass);
+    // The selection itself must be sane.
+    for bad in [&[""][..], &["acc", "acc"][..]] {
+        let msg = expect_invalid(from_braintrust(&doc, &meta(), &only(bad)));
+        assert!(msg.contains("score name"), "{bad:?}: {msg}");
+    }
+}
+
+// ── Review regressions: Langfuse ────────────────────────────────────────
+
+fn lf_raw(items: Vec<Value>, scores: Value) -> Result<EvaluationRun, ImportError> {
+    let run = json!({"datasetRunItems": items}).to_string();
+    from_langfuse(&run, &scores.to_string(), &lf_meta(), &rules())
+}
+
+#[test]
+fn langfuse_missing_score_pages_are_invalid() {
+    let s = |id: &str, name: &str, v: f64| json!({"id": id, "name": name, "value": v, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"});
+    let page = |n: u32, total: u32, scores: Vec<Value>| json!({"data": scores, "meta": {"page": n, "limit": 1, "totalItems": total, "totalPages": total}});
+    let items = || vec![lf_item("item-1", "t1", None)];
+    let msg = expect_invalid(lf_raw(items(), page(1, 2, vec![s("s1", "acc", 0.9)])));
+    assert!(msg.contains("page 2"), "{msg}");
+    let msg = expect_invalid(lf_raw(items(), json!([page(2, 2, vec![s("s2", "safety", 0.0)])])));
+    assert!(msg.contains("page 1"), "{msg}");
+    let run = lf_raw(items(), json!([page(1, 2, vec![s("s1", "acc", 0.9)]), page(2, 2, vec![s("s2", "safety", 0.0)])]))
+        .unwrap();
+    assert_eq!(run.cases[0].status, CaseStatus::Fail);
+    // An empty result: page 1 of 0.
+    let run = lf_raw(items(), json!({"data": [], "meta": {"page": 1, "limit": 50, "totalItems": 0, "totalPages": 0}}))
+        .unwrap();
+    assert_eq!(run.cases[0].status, CaseStatus::Error);
+}
+
+#[test]
+fn langfuse_conflicting_repeated_score_ids_are_invalid() {
+    let items = || vec![lf_item("item-1", "t1", None)];
+    let msg = expect_invalid(lf_raw(
+        items(),
+        json!([
+            {"id": "s1", "name": "acc", "value": 0.9, "traceId": "t1", "dataType": "NUMERIC"},
+            {"id": "s1", "name": "safety", "value": 0.0, "traceId": "t1", "dataType": "NUMERIC"},
+        ]),
+    ));
+    assert!(msg.contains("s1"), "{msg}");
+    let msg = expect_invalid(lf_raw(
+        items(),
+        json!([
+            {"id": "s1", "name": "acc", "value": 0.9, "traceId": "other", "dataType": "NUMERIC"},
+            {"id": "s1", "name": "safety", "value": 0.0, "traceId": "t1", "dataType": "NUMERIC"},
+        ]),
+    ));
+    assert!(msg.contains("s1"), "{msg}");
+    // Identical copies (overlapping pages) still count once, whatever their timestamps.
+    let run = lf_raw(
+        items(),
+        json!([
+            {"id": "s1", "name": "acc", "value": 0.9, "traceId": "t1", "dataType": "NUMERIC", "updatedAt": "a"},
+            {"id": "s1", "name": "acc", "value": 0.9, "traceId": "t1", "dataType": "NUMERIC", "updatedAt": "b"},
+        ]),
+    )
+    .unwrap();
+    assert_eq!(run.cases[0].status, CaseStatus::Pass);
+}
+
+#[test]
+fn langfuse_trace_id_must_be_a_string_or_absent() {
+    for bad in [json!(["t1"]), json!(7), json!(true), json!({"id": "t1"})] {
+        let msg = expect_invalid(lf_raw(
+            vec![lf_item("item-1", "t1", None)],
+            json!([
+                {"id": "s2", "name": "acc", "value": 0.9, "traceId": "t1"},
+                {"id": "s3", "name": "safety", "value": 0.0, "traceId": bad},
+            ]),
+        ));
+        assert!(msg.contains("traceId"), "{msg}");
+    }
+}
+
+#[test]
+fn langfuse_case_ids_with_surrounding_whitespace_are_invalid() {
+    let msg = expect_invalid(lf(vec![lf_item(" safety-1", "t1", None)], vec![]));
+    assert!(msg.contains("whitespace"), "{msg}");
+}
+
+#[test]
+fn langfuse_text_and_correction_scores_are_ignored() {
+    let c = lf_one(vec![
+        lf_score("acc", json!(0.9), "t", None, "NUMERIC"),
+        json!({"id": "b", "name": "note", "value": null, "stringValue": "ok", "traceId": "t", "observationId": null, "dataType": "TEXT"}),
+        json!({"id": "c", "name": "fix", "value": null, "stringValue": "x", "traceId": "t", "observationId": null, "dataType": "CORRECTION"}),
+    ]);
+    assert_eq!(c.status, CaseStatus::Pass);
+    assert_eq!(c.metrics.len(), 1);
+}
+
+#[test]
+fn langfuse_v3_scores_are_rejected() {
+    let msg = expect_invalid(lf_raw(
+        vec![lf_item("item-1", "t1", None)],
+        json!({"data": [{"id": "a", "name": "acc", "value": true, "dataType": "BOOLEAN", "subject": {"kind": "trace", "id": "t1"}}], "meta": {"limit": 50}}),
+    ));
+    assert!(msg.contains("v2/scores"), "{msg}");
 }
 
 // ── Never panics ────────────────────────────────────────────────────────

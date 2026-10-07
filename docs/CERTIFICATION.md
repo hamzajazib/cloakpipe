@@ -54,19 +54,31 @@ argument exits 2.
 - **`--junit`**: JUnit XML from pytest, Jest, Go, JUnit or cargo-nextest.
   Status comes from `<failure>`/`<error>`/`<skipped>`.
 - **`--braintrust`**: a Braintrust experiment's events (`/fetch` output, an
-  array of events, or JSONL). Each root span is one case; child spans
-  (LLM calls, scorer spans) are ignored. The case id is
-  `metadata.cloakpipe_case_id`, else `metadata.case_id`, else
-  `dataset_record_id` — row ids change between runs, so an event with none
-  of these is rejected. `metadata.critical: true` marks a case critical.
-  `error` → `error`; `metrics.start/end` → `durationMs`; token counts →
-  `metrics.tokens.*`.
+  array of events, or JSONL). Each root span is one case. Its scores are
+  the root's own `scores` plus those of its scorer spans
+  (`span_attributes.type: "score"`), which is where the SDK's `Eval()`
+  logs each scorer's result; other child spans (task, LLM calls) are
+  ignored. The case id is `metadata.cloakpipe_case_id`, else
+  `metadata.case_id`, else the dataset record (`origin.id` of a dataset
+  `origin`, or `dataset_record_id` from older SDKs) — row ids change
+  between runs, so an event with none of these is rejected. Run the
+  experiment with one trial (`trial_count`/`trialCount` 1): every trial is
+  its own root span with the same case id, which is rejected as a
+  duplicate. `metadata.critical: true` marks a case critical. `error` on
+  the root or a scorer span, or a scorer that crashed
+  (`metadata.scorer_errors`), → `error`; `metrics.start/end` →
+  `durationMs`; token counts → `metrics.tokens.*`.
 - **`--langfuse-run` + `--langfuse-scores`**: a Langfuse dataset run and the
   scores of its traces. Each run item is one case with id `datasetItemId`;
   a score joins an item by `traceId` (trace scores, or scores of the item's
-  own `observationId`). `BOOLEAN` scores count as 0/1, `CATEGORICAL` scores
-  are ignored. Langfuse has no critical flag: use `--critical`. `--dataset`
-  defaults to the run's `datasetName`.
+  own `observationId`). `BOOLEAN` scores count as 0/1; `CATEGORICAL`,
+  `TEXT` and `CORRECTION` scores are ignored. Scores must come from
+  `GET /api/public/v2/scores` (v3 output is rejected), and every page the
+  listing's `meta.totalPages` announces must be included — a missing page
+  is rejected, since it could hold a failing score. A score id repeated
+  with different contents (pages fetched at different times) is rejected:
+  fetch again. Langfuse has no critical flag: use `--critical`.
+  `--dataset` defaults to the run's `datasetName`.
 
 Score-based sources decide each case from its scores with
 `--pass-threshold` (default `0.5`, within `0..=1`; not accepted with
@@ -76,6 +88,9 @@ case is not evidence, so it fails closed. `score` is the mean of the case's
 scores and each score is kept as `metrics["score.<name>"]`, so policies can
 put thresholds on individual scorers (`metric: score.Factuality`). Scores
 must lie in `0..=1`, and a scorer name may appear only once per case.
+`--score NAME` (repeatable) restricts the decision to the named scores:
+any other score (a 1–5 user-feedback rating, a latency score) is ignored
+without validation, and a case missing a named score is `error`.
 
 #### Getting the inputs
 
@@ -92,20 +107,35 @@ cloakpipe eval import --braintrust experiment.json --release release.yaml \
 ```
 
 Langfuse (public API, basic auth `public key:secret key`; URL-encode dataset
-and run names). Scores come in pages; pass one page, or an array of pages
-(`jq -s`), or fetch only the run's traces with `?traceId=`:
+and run names). Scores are listed by `GET /api/public/v2/scores` (the
+importer reads the v2 shape, with a top-level `traceId`), at most 100 per
+page; fetch every page of each trace's scores and pass them as an array of
+pages (`jq -s`):
 
 ```sh
-LF="-sf -u $LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY"
-curl $LF "$LANGFUSE_HOST/api/public/datasets/support-golden/runs/support-agent-184-golden" > lf-run.json
+set -o pipefail
+lf() { curl -sSf -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "$LANGFUSE_HOST$1"; }
+lf "/api/public/datasets/support-golden/runs/support-agent-184-golden" > lf-run.json
 jq -r '.datasetRunItems[].traceId' lf-run.json | sort -u | while read -r t; do
-  curl $LF "$LANGFUSE_HOST/api/public/scores?traceId=$t&limit=100"
+  page=1
+  while :; do
+    lf "/api/public/v2/scores?traceId=$t&limit=100&page=$page" > lf-page.json || exit 1
+    cat lf-page.json
+    [ "$page" -ge "$(jq '.meta.totalPages' lf-page.json)" ] && break
+    page=$((page + 1))
+  done
 done | jq -s . > lf-scores.json
-# or every page: curl $LF "$LANGFUSE_HOST/api/public/scores?page=$n&limit=100" for n in 1..meta.totalPages
 cloakpipe eval import --langfuse-run lf-run.json --langfuse-scores lf-scores.json \
   --release release.yaml --suite support-critical@23 --covers privacy,functional \
-  --critical 'privacy::*' --pass-threshold 0.7 --out run.json
+  --critical 'privacy::*' --pass-threshold 0.7 --score correctness --score pii_leak_free --out run.json
 ```
+
+`GET /api/public/datasets/{dataset}/runs/{run}` is deprecated by Langfuse:
+on Langfuse Cloud it is scheduled for removal on 2026-11-16 (self-hosted:
+with the v4 upgrade), when dataset runs become experiments
+(`/api/public/experiments`). The importer does not read the experiments
+API yet; until it does, `--langfuse-run` needs a deployment that still
+serves dataset runs.
 
 ### `cloakpipe release certify`
 

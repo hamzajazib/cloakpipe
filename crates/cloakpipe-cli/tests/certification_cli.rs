@@ -376,6 +376,85 @@ fn eval_import_langfuse_joins_run_items_and_scores() {
 }
 
 #[test]
+fn eval_import_braintrust_reads_sdk_scorer_spans_and_dataset_origin() {
+    let file = import_fixture("braintrust_sdk_fetch.json");
+    let g = golden();
+    let (code, out, err) =
+        run(&["eval", "import", "--braintrust", &file, "--release", &g, "--suite", "s@1", "--covers", "privacy"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let identity = case_of(&v, "rec-refund-identity");
+    assert_eq!(identity["status"], "pass", "{v}");
+    assert_eq!(identity["metrics"]["score.Factuality"], 0.8);
+    assert_eq!(case_of(&v, "privacy::no_ssn_echo")["status"], "fail");
+    assert_eq!(case_of(&v, "rec-crash")["status"], "error", "scorer_errors fail closed");
+}
+
+#[test]
+fn eval_import_score_selects_the_scores_that_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = write(&dir, "run.json", r#"{"datasetRunItems": [{"datasetItemId": "item-1", "traceId": "t1"}]}"#);
+    let s = write(
+        &dir,
+        "scores.json",
+        r#"{"data": [
+            {"id": "a", "name": "acc", "value": 0.9, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"},
+            {"id": "b", "name": "user-feedback", "value": 4, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"}
+        ], "meta": {"page": 1, "limit": 50, "totalItems": 2, "totalPages": 1}}"#,
+    );
+    let g = golden();
+    let base = ["eval", "import", "--langfuse-run", &r, "--langfuse-scores", &s, "--release", &g, "--suite", "s@1"];
+    let mut args = base.to_vec();
+    args.extend_from_slice(&["--covers", "privacy"]);
+    let (code, _, err) = run(&args);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("user-feedback"), "{err}");
+    args.extend_from_slice(&["--score", "acc"]);
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "item-1")["status"], "pass");
+    args.extend_from_slice(&["--score", "safety"]);
+    let (code, out, err) = run(&args);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "item-1")["status"], "error", "a selected score is missing");
+    let j = fixture("passing.junit.xml");
+    let (code, _, err) =
+        run(&["eval", "import", "--junit", &j, "--release", &g, "--suite", "s@1", "--covers", "p", "--score", "acc"]);
+    assert_eq!(code, 2, "{err}");
+}
+
+#[test]
+fn eval_import_langfuse_rejects_missing_score_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = write(&dir, "run.json", r#"{"datasetRunItems": [{"datasetItemId": "item-1", "traceId": "t1"}]}"#);
+    let s = write(
+        &dir,
+        "scores.json",
+        r#"{"data": [{"id": "s1", "name": "acc", "value": 0.9, "traceId": "t1", "observationId": null, "dataType": "NUMERIC"}],
+            "meta": {"page": 1, "limit": 1, "totalItems": 2, "totalPages": 2}}"#,
+    );
+    let g = golden();
+    let (code, out, err) = run(&[
+        "eval",
+        "import",
+        "--langfuse-run",
+        &r,
+        "--langfuse-scores",
+        &s,
+        "--release",
+        &g,
+        "--suite",
+        "s@1",
+        "--covers",
+        "privacy",
+    ]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("page 2"), "{err}");
+}
+
+#[test]
 fn eval_import_needs_exactly_one_source() {
     let (j, b) = (fixture("passing.junit.xml"), import_fixture("braintrust_fetch.json"));
     let (r, s) = (import_fixture("langfuse_run.json"), import_fixture("langfuse_scores.json"));

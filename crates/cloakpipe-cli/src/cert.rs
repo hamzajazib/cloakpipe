@@ -205,15 +205,20 @@ pub struct ImportArgs {
     /// Braintrust experiment events: /v1/experiment/{id}/fetch output, an array of events or JSONL
     #[arg(long, value_name = "FILE")]
     braintrust: Option<PathBuf>,
-    /// Langfuse dataset run: /api/public/datasets/{dataset}/runs/{run} output
+    /// Langfuse dataset run: /api/public/datasets/{dataset}/runs/{run} output (deprecated by Langfuse;
+    /// see docs/CERTIFICATION.md)
     #[arg(long, value_name = "FILE", requires = "langfuse_scores")]
     langfuse_run: Option<PathBuf>,
-    /// Langfuse scores for the run: /api/public/scores output (a page, or an array of pages)
+    /// Langfuse scores for the run: GET /api/public/v2/scores output (a page, or an array of every page)
     #[arg(long, value_name = "FILE", requires = "langfuse_run", conflicts_with_all = ["junit", "braintrust"])]
     langfuse_scores: Option<PathBuf>,
     /// Score-based sources: a case passes iff every score is >= this, 0..=1 [default: 0.5]
     #[arg(long, value_name = "T", value_parser = unit_interval, allow_negative_numbers = true, conflicts_with = "junit")]
     pass_threshold: Option<f64>,
+    /// Score-based sources: count only this score name (repeatable); other scores are ignored and a
+    /// case missing a named score is an error [default: every score counts]
+    #[arg(long = "score", value_name = "NAME", conflicts_with = "junit")]
+    score_names: Vec<String>,
     /// Evaluated release: a manifest path (must be certifiable) or sha256:<hex>
     #[arg(long)]
     release: String,
@@ -260,7 +265,10 @@ fn import(a: ImportArgs) -> Res<i32> {
         .rsplit_once('@')
         .filter(|(n, v)| !n.trim().is_empty() && !v.trim().is_empty())
         .ok_or_else(|| usage(format_args!("--suite {:?}: expected NAME@VERSION", a.suite)))?;
-    let rules = ScoreRules { pass_threshold: a.pass_threshold.unwrap_or(ScoreRules::default().pass_threshold) };
+    let rules = ScoreRules {
+        pass_threshold: a.pass_threshold.unwrap_or(ScoreRules::default().pass_threshold),
+        score_names: a.score_names.clone(),
+    };
     // Read every input before resolving the release: I/O errors come first.
     let source = match (&a.junit, &a.braintrust, &a.langfuse_run, &a.langfuse_scores) {
         (Some(junit), ..) => Source::Junit(junit, read(junit)?),

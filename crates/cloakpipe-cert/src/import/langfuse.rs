@@ -41,24 +41,43 @@ pub fn from_langfuse(
 
     // Scores by trace id, de-duplicated by score id (pages may overlap).
     let mut by_trace: BTreeMap<&str, Vec<(String, &J)>> = BTreeMap::new();
-    let mut seen_ids = BTreeSet::new();
+    let mut seen_ids: BTreeMap<&str, (String, &J)> = BTreeMap::new();
     for (label, score) in score_objects(&scores_doc, &mut issues) {
         if !matches!(score, J::Obj(_)) {
             issues.push(format!("{label}: expected a score object, found {}", score.kind()));
             continue;
         }
-        let fields = (score.get("id"), score.get("traceId"));
+        let fields = (score.get("id"), score.get("traceId"), score.get("subject"));
         match fields {
-            (Err(e), _) | (_, Err(e)) => issues.push(format!("{label}: {e}")),
-            (Ok(id), Ok(trace)) => {
+            (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => issues.push(format!("{label}: {e}")),
+            (Ok(_), Ok(None), Ok(Some(_))) => issues.push(format!(
+                "{label}: a score with `subject` and no `traceId` is GET /api/public/v3/scores output, which is \
+                 not supported; fetch scores from GET /api/public/v2/scores"
+            )),
+            (Ok(id), Ok(trace), Ok(_)) => {
                 if let Some(J::Str(id)) = id {
-                    if !seen_ids.insert(id.as_str()) {
-                        continue;
+                    match seen_ids.get(id.as_str()) {
+                        Some((first, earlier)) => {
+                            if !same_score(earlier, score) {
+                                issues.push(format!(
+                                    "{label}: score id {id:?} repeats {first} with different contents (a stale \
+                                     page?); fetch the scores again"
+                                ));
+                            }
+                            continue;
+                        }
+                        None => {
+                            seen_ids.insert(id.as_str(), (label.clone(), score));
+                        }
                     }
                 }
-                // Scores without a trace (session or dataset-run scores) cannot join.
-                if let Some(J::Str(trace)) = trace {
-                    by_trace.entry(trace.as_str()).or_default().push((label, score));
+                match trace {
+                    Some(J::Str(trace)) => by_trace.entry(trace.as_str()).or_default().push((label, score)),
+                    // Scores without a trace (session or dataset-run scores) cannot join.
+                    None => {}
+                    Some(other) => {
+                        issues.push(format!("{label}: traceId: expected a string or null, found {}", other.kind()))
+                    }
                 }
             }
         }
@@ -66,7 +85,7 @@ pub fn from_langfuse(
 
     let mut cases = Vec::with_capacity(parsed.len());
     for item in parsed {
-        let mut scores = CaseScores::new(format!("case {:?}", item.case_id));
+        let mut scores = CaseScores::new(format!("case {:?}", item.case_id), rules);
         for (label, score) in by_trace.get(item.trace_id.as_str()).into_iter().flatten() {
             let mut problem = |what: String| issues.push(scores.issue(format_args!("{label}: {what}")));
             match score.get("observationId") {
@@ -94,7 +113,8 @@ pub fn from_langfuse(
                     continue;
                 }
             };
-            if data_type == "CATEGORICAL" {
+            // Not numeric: categorical labels, free text, corrections.
+            if matches!(data_type, "CATEGORICAL" | "TEXT" | "CORRECTION") {
                 continue;
             }
             let name = match score.get("name") {
@@ -108,6 +128,9 @@ pub fn from_langfuse(
                     continue;
                 }
             };
+            if !scores.counts(name) {
+                continue;
+            }
             let value = match (data_type, score.get("value")) {
                 (_, Err(e)) => Err(e),
                 ("NUMERIC", Ok(Some(J::Num(v)))) => Ok(*v),
@@ -161,6 +184,9 @@ fn read_item(item: &J) -> Result<Item, String> {
         other => Err(format!("{key}: expected a non-empty string, found {}", other.map_or("null", J::kind))),
     };
     let case_id = string("datasetItemId")?;
+    if case_id.trim() != case_id {
+        return Err(format!("datasetItemId: case id {case_id:?} has leading or trailing whitespace"));
+    }
     let trace_id = string("traceId")?;
     let observation_id = match item.get("observationId")? {
         None => None,
@@ -170,18 +196,25 @@ fn read_item(item: &J) -> Result<Item, String> {
     Ok(Item { case_id, trace_id, observation_id })
 }
 
+/// Whether two score objects sharing an id say the same thing.
+fn same_score(a: &J, b: &J) -> bool {
+    ["name", "value", "traceId", "observationId", "dataType", "stringValue"].iter().all(|k| a.get(k) == b.get(k))
+}
+
 /// Score objects from a scores page `{"data": [...]}`, a bare array of
 /// scores, or an array of pages; each with a label naming it in issues.
+/// Every page a page's `meta` says exists must be present.
 fn score_objects<'a>(doc: &'a J, issues: &mut Vec<String>) -> Vec<(String, &'a J)> {
     let mut out = Vec::new();
+    let mut pages = Pages::default();
     match doc {
-        J::Obj(_) => page_scores("scores".into(), doc, &mut out, issues),
+        J::Obj(_) => page_scores("scores".into(), doc, &mut out, &mut pages, issues),
         J::Arr(elements) => {
             for (i, element) in elements.iter().enumerate() {
                 let label = format!("scores[{i}]");
                 match element {
                     J::Obj(entries) if entries.iter().any(|(k, _)| k == "data") => {
-                        page_scores(label, element, &mut out, issues)
+                        page_scores(label, element, &mut out, &mut pages, issues)
                     }
                     J::Obj(_) => out.push((label, element)),
                     other => {
@@ -192,11 +225,67 @@ fn score_objects<'a>(doc: &'a J, issues: &mut Vec<String>) -> Vec<(String, &'a J
         }
         other => issues.push(format!("scores: expected a page of scores or an array, found {}", other.kind())),
     }
+    pages.check(issues);
     out
 }
 
+/// Page numbers seen, by listing (`totalPages`, `totalItems`, `limit`).
+#[derive(Default)]
+struct Pages(BTreeMap<(u64, Option<u64>, Option<u64>), BTreeSet<u64>>);
+
+impl Pages {
+    /// Note `meta` of page `label`; pages without `page` and `totalPages`
+    /// numbers cannot be checked.
+    fn note(&mut self, label: &str, page: &J, issues: &mut Vec<String>) {
+        let meta = match page.get("meta") {
+            Ok(Some(meta @ J::Obj(_))) => meta,
+            Ok(_) => return,
+            Err(e) => return issues.push(format!("{label}: {e}")),
+        };
+        let int = |key: &str| match meta.get(key) {
+            Ok(Some(J::Num(n))) if n.fract() == 0.0 && *n >= 0.0 && *n <= 1e15 => Ok(Some(*n as u64)),
+            Ok(None) => Ok(None),
+            Ok(Some(other)) => Err(format!("{label}.meta.{key}: expected a whole number, found {}", describe(other))),
+            Err(e) => Err(format!("{label}.meta: {e}")),
+        };
+        match (int("page"), int("totalPages"), int("totalItems"), int("limit")) {
+            (Ok(Some(n)), Ok(Some(total)), Ok(items), Ok(limit)) => {
+                self.0.entry((total, items, limit)).or_default().insert(n);
+            }
+            (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), _) | (.., Err(e)) => issues.push(e),
+            _ => {}
+        }
+    }
+
+    fn check(&self, issues: &mut Vec<String>) {
+        for (&(total, ..), seen) in &self.0 {
+            let missing: Vec<String> = (1..=total).filter(|n| !seen.contains(n)).map(|n| n.to_string()).collect();
+            if !missing.is_empty() {
+                issues.push(format!(
+                    "scores are incomplete: page {} of {total} missing (meta.totalPages = {total}); pass every page",
+                    missing.join(", ")
+                ));
+            }
+        }
+    }
+}
+
+fn describe(v: &J) -> String {
+    match v {
+        J::Num(n) => n.to_string(),
+        other => other.kind().to_string(),
+    }
+}
+
 /// The scores of one page `{"data": [...], "meta": {...}}`.
-fn page_scores<'a>(label: String, page: &'a J, out: &mut Vec<(String, &'a J)>, issues: &mut Vec<String>) {
+fn page_scores<'a>(
+    label: String,
+    page: &'a J,
+    out: &mut Vec<(String, &'a J)>,
+    pages: &mut Pages,
+    issues: &mut Vec<String>,
+) {
+    pages.note(&label, page, issues);
     match page.get("data") {
         Ok(Some(J::Arr(scores))) => {
             out.extend(scores.iter().enumerate().map(|(i, s)| (format!("{label}.data[{i}]"), s)))

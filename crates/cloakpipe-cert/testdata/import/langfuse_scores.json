@@ -7,7 +7,7 @@
       {"id": "sc-0004", "timestamp": "2026-10-05T09:01:08.000Z", "projectId": "cm2proj0001", "environment": "default", "name": "helpfulness", "value": 0.1, "stringValue": null, "source": "EVAL", "authorUserId": null, "comment": "scored a child generation", "configId": null, "queueId": null, "traceId": "trace-0001", "observationId": "obs-gen-0001", "sessionId": null, "datasetRunId": null, "dataType": "NUMERIC", "createdAt": "2026-10-05T09:01:08.000Z", "updatedAt": "2026-10-05T09:01:08.000Z"},
       {"id": "sc-0005", "timestamp": "2026-10-05T09:02:05.000Z", "projectId": "cm2proj0001", "environment": "default", "name": "correctness", "value": 0.7, "stringValue": null, "source": "EVAL", "authorUserId": null, "comment": null, "configId": null, "queueId": null, "traceId": "trace-0002", "observationId": null, "sessionId": null, "datasetRunId": null, "dataType": "NUMERIC", "createdAt": "2026-10-05T09:02:05.000Z", "updatedAt": "2026-10-05T09:02:05.000Z"}
     ],
-    "meta": {"page": 1, "limit": 5, "totalItems": 9, "totalPages": 2}
+    "meta": {"page": 1, "limit": 5, "totalItems": 10, "totalPages": 2}
   },
   {
     "data": [

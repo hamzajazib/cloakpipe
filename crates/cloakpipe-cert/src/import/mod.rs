@@ -36,10 +36,13 @@
 //! **Scores** (shared by `from_braintrust` and `from_langfuse`): eval
 //! platforms report per-case scores, not verdicts. With [`ScoreRules`]
 //! (`pass_threshold`, default 0.5, must be finite and within `0..=1`, else
-//! `ImportError::Invalid`):
-//! - Status: an explicit error → `Error`; no numeric score at all → `Error`
-//!   (unscored is no evidence: fail closed); otherwise `Pass` iff every
-//!   score is `>= pass_threshold`, else `Fail`. Nothing is `Skipped`.
+//! `ImportError::Invalid`; `score_names`, default empty = every score
+//! counts, else only scores with these names count and all others are
+//! ignored without validation):
+//! - Status: an explicit error → `Error`; no numeric score at all, or a
+//!   selected score name missing → `Error` (unscored is no evidence: fail
+//!   closed); otherwise `Pass` iff every score is `>= pass_threshold`, else
+//!   `Fail`. Nothing is `Skipped`.
 //! - `score` = arithmetic mean of the case's scores; each score is also
 //!   `metrics["score.<name>"]` (name verbatim).
 //! - A score outside `0..=1`, or a score name given twice on one case (even
@@ -59,17 +62,31 @@
 //!   line; a JSONL parse error names the line). A lone object without
 //!   `events` is a one-line JSONL file. A leading BOM is ignored.
 //! - Only root spans are cases: `is_root == true`, or `span_parents`
-//!   absent/`null`/`[]`, or `span_id == root_span_id`. Other spans (LLM
-//!   calls, scorer spans) are ignored entirely; their scores are not merged.
+//!   absent/`null`/`[]`, or `span_id == root_span_id`.
 //!   `is_root` must be a bool and `span_parents` an array when present.
+//! - Scorer spans (`span_attributes.type == "score"`) are where current
+//!   SDKs log each scorer's result: their `scores` and `error` belong to the
+//!   root whose `span_id` is their `root_span_id` (in any order in the
+//!   input). Every other non-root span (task, LLM calls, an LLM judge's own
+//!   calls) is ignored entirely; its scores are not merged. A score name on
+//!   two scorer spans of one root is `Invalid`; the same name on the root
+//!   and a scorer span counts once if the root's value is `null` or equal,
+//!   else `Invalid`. Scorer spans whose root is not in the input are
+//!   ignored.
 //! - Case id: the first present (non-`null`) of `metadata.cloakpipe_case_id`,
-//!   `metadata.case_id`, `dataset_record_id`; it must be a non-empty string.
+//!   `metadata.case_id`, `origin.id` when `origin.object_type == "dataset"`
+//!   (the dataset record, current SDKs), `dataset_record_id` (older SDKs);
+//!   it must be a non-empty string without leading or trailing whitespace.
 //!   None present → `Invalid`: the row `id` changes between runs, so it is
-//!   never used.
+//!   never used. `origin` must be an object when present. An experiment
+//!   run with `trial_count > 1` has one root per trial and so duplicate
+//!   case ids (`Invalid`, saying so).
 //! - `scores`: object of name → number | `null`; `null` means not scored
 //!   and is not counted; any other type is `Invalid`. Absent/`null` = no
 //!   scores.
-//! - `error`: anything but absent, `null`, `""`, `[]` or `{}` → `Error`.
+//! - `error` on the root or a scorer span, or a non-empty
+//!   `metadata.scorer_errors` (a scorer that raised logs no score): anything
+//!   but absent, `null`, `""`, `[]` or `{}` → `Error`.
 //! - `metrics.start`/`metrics.end` (unix seconds) → `duration_ms` when both
 //!   are numbers and `end >= start`; `metrics.prompt_tokens`,
 //!   `completion_tokens`, `tokens` → `metrics["tokens.prompt"]`,
@@ -81,19 +98,26 @@
 //! **Langfuse** (`from_langfuse`) — a dataset run plus its scores:
 //! - `run_json`: `GET /api/public/datasets/{dataset}/runs/{run}`, an object
 //!   with a `datasetRunItems` array. Each item is a case with
-//!   `id = datasetItemId` (non-empty string, else `Invalid`); `traceId` must
-//!   be a non-empty string and `observationId` a string or `null`.
-//! - `scores_json`: `GET /api/public/scores` output — one page
+//!   `id = datasetItemId` (non-empty string without leading or trailing
+//!   whitespace, else `Invalid`); `traceId` must be a non-empty string and
+//!   `observationId` a string or `null`.
+//! - `scores_json`: `GET /api/public/v2/scores` output — one page
 //!   `{"data": [...], "meta": {...}}`, a bare array of score objects, or an
-//!   array of pages. Scores repeating an `id` already seen (overlapping
-//!   pages) count once.
+//!   array of pages. When a page's `meta` has `page` and `totalPages`, every
+//!   page `1..=totalPages` of that listing (same `totalPages`, `totalItems`
+//!   and `limit`) must be present, else `Invalid` (a missing page could
+//!   hold a failing score). A score repeating an `id` already seen
+//!   (overlapping pages) counts once if its `name`, `value`, `traceId`,
+//!   `observationId`, `dataType` and `stringValue` are the same, else
+//!   `Invalid`. `traceId` must be a string when present. v3 output (scores
+//!   with a `subject` and no `traceId`) is `Invalid`.
 //! - Join: a score belongs to an item when `traceId` matches and the score's
 //!   `observationId` is `null` (a trace score) or equals the item's
 //!   `observationId`. Scores of other traces, or with no `traceId` (session
 //!   or dataset-run scores), are ignored.
 //! - `dataType`: `NUMERIC` (or absent) → `value` must be a number;
-//!   `BOOLEAN` → `value` must be 0 or 1; `CATEGORICAL` → ignored (not
-//!   numeric); anything else → `Invalid`. A joined score needs a non-empty
+//!   `BOOLEAN` → `value` must be 0 or 1; `CATEGORICAL`, `TEXT`,
+//!   `CORRECTION` → ignored (not numeric); anything else → `Invalid`. A joined score needs a non-empty
 //!   `name`.
 //! - Langfuse has no error flag on a run item, so status comes from scores
 //!   alone (an item with no numeric score is `Error`), and no critical
