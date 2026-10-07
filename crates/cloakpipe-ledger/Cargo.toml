@@ -21,9 +21,11 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = { workspace = true }
 zeroize = { workspace = true }
 tempfile = "3"
+cloakpipe-anchor = { path = "../cloakpipe-anchor" }
 
 [dev-dependencies]
 proptest = "1"
+cloakpipe-verify = { path = "../cloakpipe-verify" }
 
 [[bin]]
 name = "ledger-export-fixture"
