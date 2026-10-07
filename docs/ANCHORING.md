@@ -61,6 +61,11 @@ Options: `--tsa-url` (DigiCert: `http://timestamp.digicert.com` with root
 Exit codes: 0 anchored, 1 refused / anchor failed (nothing written), 2 usage
 or I/O.
 
+Replies are capped at 1 MiB (a declared or streamed body over the cap is
+refused before verification) and redirects are never followed: a 3xx from
+`--tsa-url` / `--rekor-url` is an error, so a reply cannot silently move off
+the configured endpoint.
+
 Each Rekor submission is **public and permanent**. It contains a hash of the
 head, a signature and the operator's public key; no record content.
 

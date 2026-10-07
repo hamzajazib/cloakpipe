@@ -22,6 +22,12 @@ pub const DIGICERT_TSA_URL: &str = "http://timestamp.digicert.com";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Largest reply read from a TSA or Rekor. Real replies are a few KiB
+/// (DigiCert's token with its chain is ~6 KiB, a Rekor entry ~10 KiB); a
+/// hostile or misconfigured endpoint must not stream unbounded data into
+/// memory before verification even starts.
+pub const MAX_REPLY_BYTES: u64 = 1 << 20;
+
 /// DER `TimeStampReq`:
 ///
 /// ```text
@@ -126,6 +132,10 @@ pub(crate) fn post(
 pub(crate) fn http(timeout: Duration) -> Result<reqwest::blocking::Client, AnchorError> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
+        // A redirect is answered as the error it is: the configured URL is
+        // the endpoint, and a 3xx must not silently move the request (e.g.
+        // off https or to another host).
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("cloakpipe-anchor/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| AnchorError::Unavailable(e.to_string()))
@@ -143,7 +153,16 @@ pub(crate) fn read_reply(
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let bytes = resp.bytes().map_err(|e| AnchorError::Unavailable(format!("{url}: {e}")))?;
+    let too_large = || AnchorError::Submit(format!("{url}: reply too large (over {MAX_REPLY_BYTES} bytes)"));
+    if resp.content_length().is_some_and(|n| n > MAX_REPLY_BYTES) {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(resp, MAX_REPLY_BYTES + 1), &mut bytes)
+        .map_err(|e| AnchorError::Unavailable(format!("{url}: {e}")))?;
+    if bytes.len() as u64 > MAX_REPLY_BYTES {
+        return Err(too_large());
+    }
     if !status.is_success() {
         let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
         return Err(AnchorError::Submit(format!("{url}: HTTP {status}: {snippet}")));
@@ -151,5 +170,5 @@ pub(crate) fn read_reply(
     if ctype != want_type {
         return Err(AnchorError::Submit(format!("{url}: expected {want_type}, got `{ctype}`")));
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }

@@ -204,3 +204,61 @@ fn rekor_client_refuses_entries_it_cannot_verify() {
     let e = RekorClient::new(url, rekor_key()).anchor_head(&head, &operator()).unwrap_err();
     assert!(matches!(e, AnchorError::Submit(_)), "{e}");
 }
+
+// ── Hostile endpoints ───────────────────────────────────────────────────
+
+/// A server that answers one request with `head` and then streams zeros
+/// until the client hangs up (or `limit` bytes). Returns the base URL.
+fn stream_forever(head: String, limit: usize) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut buf = [0u8; 8192];
+        let _ = s.read(&mut buf);
+        if s.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        let chunk = [0u8; 64 * 1024];
+        let mut sent = 0;
+        while sent < limit && s.write_all(&chunk).is_ok() {
+            sent += chunk.len();
+        }
+    });
+    url
+}
+
+#[test]
+fn an_endless_reply_is_cut_off() {
+    let nonce = recorded_nonce("freetsa-honest");
+    // No Content-Length: the body ends only when the server closes. 64 MiB
+    // would be a lot to buffer; the client must stop long before.
+    let url = stream_forever(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nConnection: close\r\n\r\n".into(),
+        64 << 20,
+    );
+    let e = TsaClient::new(url, freetsa_roots()).anchor_head_with_nonce(&honest_head(), &nonce).unwrap_err();
+    assert!(matches!(e, AnchorError::Submit(ref m) if m.contains("too large")), "{e}");
+    // A declared length over the cap is refused before reading.
+    let url = stream_forever(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1073741824\r\nConnection: close\r\n\r\n"
+            .into(),
+        1 << 20,
+    );
+    let e = RekorClient::new(url, rekor_key()).anchor_head(&honest_head(), &operator()).unwrap_err();
+    assert!(matches!(e, AnchorError::Submit(ref m) if m.contains("too large")), "{e}");
+}
+
+#[test]
+fn redirects_are_not_followed() {
+    // The redirect target would serve a perfectly valid token.
+    let (target, seen) = serve(vec![Reply::new(200, "application/timestamp-reply", fixture("freetsa-honest.tsr"))]);
+    let mut redirect = Reply::new(307, "text/plain", vec![]);
+    redirect.headers.push(("Location".into(), format!("{target}/tsr")));
+    let (url, _) = serve(vec![redirect]);
+    let nonce = recorded_nonce("freetsa-honest");
+    let e = TsaClient::new(format!("{url}/tsr"), freetsa_roots()).anchor_head_with_nonce(&honest_head(), &nonce).unwrap_err();
+    assert!(matches!(e, AnchorError::Submit(ref m) if m.contains("307")), "{e}");
+    assert!(seen.try_recv().is_err(), "the redirect target was contacted");
+}
