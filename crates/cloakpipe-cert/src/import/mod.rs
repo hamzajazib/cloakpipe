@@ -32,6 +32,82 @@
 //! **Native JSON** (`from_json`): the [`EvaluationRun`] JSON format itself
 //! (camelCase, unknown fields rejected), validated with
 //! [`EvaluationRun::validate`].
+//!
+//! **Scores** (shared by `from_braintrust` and `from_langfuse`): eval
+//! platforms report per-case scores, not verdicts. With [`ScoreRules`]
+//! (`pass_threshold`, default 0.5, must be finite and within `0..=1`, else
+//! `ImportError::Invalid`):
+//! - Status: an explicit error → `Error`; no numeric score at all → `Error`
+//!   (unscored is no evidence: fail closed); otherwise `Pass` iff every
+//!   score is `>= pass_threshold`, else `Fail`. Nothing is `Skipped`.
+//! - `score` = arithmetic mean of the case's scores; each score is also
+//!   `metrics["score.<name>"]` (name verbatim).
+//! - A score outside `0..=1`, or a score name given twice on one case (even
+//!   if one occurrence is `null`), is `ImportError::Invalid` naming the case.
+//! - Critical: the source's own flag (if it has one) OR an
+//!   [`ImportMeta::critical`] pattern.
+//! - Duplicate case ids → `ImportError::Invalid`; malformed JSON →
+//!   `ImportError::Json`; zero cases is allowed. A JSON object key the
+//!   importer reads that appears twice is `Invalid` (never last-wins);
+//!   unknown fields are ignored. `source = {kind, tool: meta.tool}`; the run
+//!   must pass [`EvaluationRun::validate`]. Never panics on any input.
+//!
+//! **Braintrust** (`from_braintrust`) — an experiment's events, as returned
+//! by `POST/GET /v1/experiment/{id}/fetch` or the SDK:
+//! - Accepts `{"events": [...]}` (other keys such as `cursor` ignored), a
+//!   top-level array of events, or JSONL (one event object per non-blank
+//!   line; a JSONL parse error names the line). A lone object without
+//!   `events` is a one-line JSONL file. A leading BOM is ignored.
+//! - Only root spans are cases: `is_root == true`, or `span_parents`
+//!   absent/`null`/`[]`, or `span_id == root_span_id`. Other spans (LLM
+//!   calls, scorer spans) are ignored entirely; their scores are not merged.
+//!   `is_root` must be a bool and `span_parents` an array when present.
+//! - Case id: the first present (non-`null`) of `metadata.cloakpipe_case_id`,
+//!   `metadata.case_id`, `dataset_record_id`; it must be a non-empty string.
+//!   None present → `Invalid`: the row `id` changes between runs, so it is
+//!   never used.
+//! - `scores`: object of name → number | `null`; `null` means not scored
+//!   and is not counted; any other type is `Invalid`. Absent/`null` = no
+//!   scores.
+//! - `error`: anything but absent, `null`, `""`, `[]` or `{}` → `Error`.
+//! - `metrics.start`/`metrics.end` (unix seconds) → `duration_ms` when both
+//!   are numbers and `end >= start`; `metrics.prompt_tokens`,
+//!   `completion_tokens`, `tokens` → `metrics["tokens.prompt"]`,
+//!   `["tokens.completion"]`, `["tokens.total"]` when numbers. Other metrics
+//!   are not imported. `metrics` and `metadata` must be objects when present.
+//! - `metadata.critical`: `true`/`false`; present with any other value
+//!   (including `null`) → `Invalid`.
+//!
+//! **Langfuse** (`from_langfuse`) — a dataset run plus its scores:
+//! - `run_json`: `GET /api/public/datasets/{dataset}/runs/{run}`, an object
+//!   with a `datasetRunItems` array. Each item is a case with
+//!   `id = datasetItemId` (non-empty string, else `Invalid`); `traceId` must
+//!   be a non-empty string and `observationId` a string or `null`.
+//! - `scores_json`: `GET /api/public/scores` output — one page
+//!   `{"data": [...], "meta": {...}}`, a bare array of score objects, or an
+//!   array of pages. Scores repeating an `id` already seen (overlapping
+//!   pages) count once.
+//! - Join: a score belongs to an item when `traceId` matches and the score's
+//!   `observationId` is `null` (a trace score) or equals the item's
+//!   `observationId`. Scores of other traces, or with no `traceId` (session
+//!   or dataset-run scores), are ignored.
+//! - `dataType`: `NUMERIC` (or absent) → `value` must be a number;
+//!   `BOOLEAN` → `value` must be 0 or 1; `CATEGORICAL` → ignored (not
+//!   numeric); anything else → `Invalid`. A joined score needs a non-empty
+//!   `name`.
+//! - Langfuse has no error flag on a run item, so status comes from scores
+//!   alone (an item with no numeric score is `Error`), and no critical
+//!   flag: critical cases come from [`ImportMeta::critical`] patterns only.
+//!   No `duration_ms` or other metrics are imported.
+//! - `dataset` = [`ImportMeta::dataset`], else the run's `datasetName`.
+
+mod braintrust;
+mod langfuse;
+mod scores;
+
+pub use braintrust::from_braintrust;
+pub use langfuse::from_langfuse;
+pub use scores::ScoreRules;
 
 use crate::model::{
     CaseResult, CaseStatus, EvaluationRun, EvaluatorRef, RunSource, SourceKind, SuiteRef, API_VERSION, RUN_KIND,
@@ -40,7 +116,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use std::collections::BTreeMap;
 
-/// Run-level metadata a JUnit file does not carry.
+/// Run-level metadata the imported report does not carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportMeta {
     /// Becomes [`EvaluationRun::run_id`].
@@ -90,7 +166,7 @@ pub enum ImportError {
 pub fn from_junit(xml: &str, meta: &ImportMeta) -> Result<EvaluationRun, ImportError> {
     let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
     let parsed = JunitParser::default().parse(xml)?;
-    let mut issues = parsed.issues;
+    let issues = parsed.issues;
 
     let cases = parsed
         .cases
@@ -101,6 +177,18 @@ pub fn from_junit(xml: &str, meta: &ImportMeta) -> Result<EvaluationRun, ImportE
         })
         .collect();
 
+    build_run(meta, SourceKind::Junit, meta.dataset.clone(), cases, issues)
+}
+
+/// The run of `cases` with its fields from `meta`; `Invalid` with `issues`
+/// plus any [`EvaluationRun::validate`] problems unless both are empty.
+fn build_run(
+    meta: &ImportMeta,
+    kind: SourceKind,
+    dataset: Option<String>,
+    cases: Vec<CaseResult>,
+    mut issues: Vec<String>,
+) -> Result<EvaluationRun, ImportError> {
     let run = EvaluationRun {
         api_version: API_VERSION.to_string(),
         kind: RUN_KIND.to_string(),
@@ -108,9 +196,9 @@ pub fn from_junit(xml: &str, meta: &ImportMeta) -> Result<EvaluationRun, ImportE
         release: meta.release.clone(),
         suite: meta.suite.clone(),
         covers: meta.covers.clone(),
-        dataset: meta.dataset.clone(),
+        dataset,
         evaluators: meta.evaluators.clone(),
-        source: RunSource { kind: SourceKind::Junit, tool: meta.tool.clone() },
+        source: RunSource { kind, tool: meta.tool.clone() },
         cases,
     };
     issues.extend(run.validate());
@@ -407,7 +495,14 @@ fn finite(value: &str) -> Result<f64, String> {
 
 /// `time` in seconds to whole milliseconds; `None` if not a usable duration.
 fn seconds_to_ms(time: &str) -> Option<u64> {
-    let secs = time.trim().parse::<f64>().ok().filter(|s| s.is_finite() && s.is_sign_positive())?;
+    secs_to_ms(time.trim().parse::<f64>().ok().filter(|s| s.is_sign_positive())?)
+}
+
+/// Seconds to whole milliseconds; `None` if negative, non-finite or too large.
+fn secs_to_ms(secs: f64) -> Option<u64> {
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
     let ms = (secs * 1000.0).round();
     // `u64::MAX as f64` rounds up to 2^64, so `<` excludes every overflow.
     (ms < u64::MAX as f64).then_some(ms as u64)
