@@ -91,7 +91,10 @@ argument exits 2.
   `itemCount`, items of another experiment, a repeated `experimentItemId`,
   items fetched without `fields=scores`, and an item listing 50 scores (the
   maximum `scoreLimit`, so more may have been cut off). Experiment-level
-  scores are aggregates and are ignored. `--dataset` defaults to the
+  scores are aggregates and are ignored. With `--score`, unselected scores
+  are not validated at all (an unknown `dataType` on one is ignored). Fetch
+  once the experiment has finished: items still arriving make the count
+  differ from `itemCount`, which is rejected. `--dataset` defaults to the
   experiment's `datasetId`. Langfuse has no critical flag: use
   `--critical`.
 - **`--langfuse-run` + `--langfuse-scores`** (deprecated, see below): a

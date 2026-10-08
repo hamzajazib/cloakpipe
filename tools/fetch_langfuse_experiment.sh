@@ -42,7 +42,9 @@ trap 'rm -rf "$tmp"' EXIT
 lf() { # PATH [curl -G args...]
   local path=$1
   shift
-  curl -sSfG --retry 3 -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "${LANGFUSE_HOST%/}$path" "$@"
+  # Credentials go through a config on a pipe, not argv (visible in ps).
+  curl -sSfG --retry 3 -K <(printf 'user = "%s:%s"\n' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY") \
+    "${LANGFUSE_HOST%/}$path" "$@"
 }
 
 lf /api/public/experiments \
@@ -54,6 +56,8 @@ lf /api/public/experiments \
 # maximum scoreLimit of 50 (an item with 50 is rejected as possibly cut off).
 n=0
 cursor=
+seen=" "
+max_pages=$(($(jq '.data[0].itemCount // 0' "$out/lf-experiment.json") / 100 + 2))
 while :; do
   args=(
     --data-urlencode "experimentId=$experiment_id"
@@ -69,10 +73,15 @@ while :; do
   lf /api/public/experiment-items "${args[@]}" > "$page"
   next=$(jq -r '.meta.cursor // empty' "$page")
   [ -z "$next" ] && break
-  if [ "$next" = "$cursor" ]; then
-    echo "error: page $n repeats the previous cursor" >&2
+  case "$seen" in *" $next "*)
+    echo "error: page $n returns a cursor already seen" >&2
+    exit 1
+  esac
+  if [ "$n" -ge "$max_pages" ]; then
+    echo "error: more than $max_pages pages for the experiment's itemCount; is it still running?" >&2
     exit 1
   fi
+  seen="$seen$next "
   cursor=$next
 done
 jq -s . "$tmp"/page-*.json > "$out/lf-experiment-items.json"
