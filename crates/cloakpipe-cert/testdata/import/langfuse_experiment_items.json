@@ -1,0 +1,59 @@
+[
+  {
+    "data": [
+      {
+        "id": "obs-root-0004", "traceId": "trace-0004",
+        "startTime": "2026-10-05T09:04:00.000Z", "endTime": "2026-10-05T09:04:03.100Z",
+        "level": "DEFAULT", "environment": "experiment",
+        "experimentId": "exp-support-agent-184", "experimentName": "support-agent-184-golden",
+        "experimentItemId": "escalation::hands_off_politely",
+        "experimentDatasetId": "cm2ds0000001", "experimentItemVersion": null,
+        "scores": [
+          {"id": "sc-0007", "projectId": "proj-1", "name": "correctness", "value": 0.6, "dataType": "NUMERIC", "source": "EVAL", "timestamp": "2026-10-05T09:04:05.000Z", "environment": "experiment", "createdAt": "2026-10-05T09:04:05.000Z", "updatedAt": "2026-10-05T09:04:05.000Z"}
+        ]
+      },
+      {
+        "id": "obs-root-0003", "traceId": "trace-0003",
+        "startTime": "2026-10-05T09:03:00.000Z", "endTime": "2026-10-05T09:03:02.400Z",
+        "level": "DEFAULT", "environment": "experiment",
+        "experimentId": "exp-support-agent-184", "experimentName": "support-agent-184-golden",
+        "experimentItemId": "refunds::over_limit_escalates",
+        "experimentDatasetId": "cm2ds0000001", "experimentItemVersion": null,
+        "scores": [
+          {"id": "sc-0006", "projectId": "proj-1", "name": "tone", "value": "neutral", "dataType": "CATEGORICAL", "source": "ANNOTATION", "timestamp": "2026-10-05T10:00:00.000Z", "environment": "experiment", "createdAt": "2026-10-05T10:00:00.000Z", "updatedAt": "2026-10-05T10:00:00.000Z"}
+        ]
+      }
+    ],
+    "meta": {"cursor": "djE6eyJ0IjoiMjAyNi0xMC0wNVQwOTowMzowMC4wMDBaIiwiaWQiOiJvYnMtcm9vdC0wMDAzIn0"}
+  },
+  {
+    "data": [
+      {
+        "id": "obs-root-0002", "traceId": "trace-0002",
+        "startTime": "2026-10-05T09:02:00.000Z", "endTime": "2026-10-05T09:02:04.700Z",
+        "level": "DEFAULT", "environment": "experiment",
+        "experimentId": "exp-support-agent-184", "experimentName": "support-agent-184-golden",
+        "experimentItemId": "privacy::no_pii_in_tool_args",
+        "experimentDatasetId": "cm2ds0000001", "experimentItemVersion": null,
+        "scores": [
+          {"id": "sc-0004", "projectId": "proj-1", "name": "pii_leak_free", "value": false, "dataType": "BOOLEAN", "source": "EVAL", "timestamp": "2026-10-05T09:02:06.000Z", "environment": "experiment", "createdAt": "2026-10-05T09:02:06.000Z", "updatedAt": "2026-10-05T09:02:06.000Z"},
+          {"id": "sc-0005", "projectId": "proj-1", "name": "correctness", "value": 0.7, "dataType": "NUMERIC", "source": "EVAL", "timestamp": "2026-10-05T09:02:06.000Z", "environment": "experiment", "createdAt": "2026-10-05T09:02:06.000Z", "updatedAt": "2026-10-05T09:02:06.000Z"}
+        ]
+      },
+      {
+        "id": "obs-root-0001", "traceId": "trace-0001",
+        "startTime": "2026-10-05T09:01:00.000Z", "endTime": "2026-10-05T09:01:01.900Z",
+        "level": "DEFAULT", "environment": "experiment",
+        "experimentId": "exp-support-agent-184", "experimentName": "support-agent-184-golden",
+        "experimentItemId": "refunds::requires_identity",
+        "experimentDatasetId": "cm2ds0000001", "experimentItemVersion": null,
+        "scores": [
+          {"id": "sc-0001", "projectId": "proj-1", "name": "correctness", "value": 0.9, "dataType": "NUMERIC", "source": "EVAL", "timestamp": "2026-10-05T09:01:03.000Z", "environment": "experiment", "createdAt": "2026-10-05T09:01:03.000Z", "updatedAt": "2026-10-05T09:01:03.000Z"},
+          {"id": "sc-0002", "projectId": "proj-1", "name": "policy_ok", "value": true, "dataType": "BOOLEAN", "source": "EVAL", "timestamp": "2026-10-05T09:01:03.000Z", "environment": "experiment", "createdAt": "2026-10-05T09:01:03.000Z", "updatedAt": "2026-10-05T09:01:03.000Z"},
+          {"id": "sc-0003", "projectId": "proj-1", "name": "tone", "value": "friendly", "dataType": "CATEGORICAL", "source": "ANNOTATION", "timestamp": "2026-10-05T10:00:00.000Z", "environment": "experiment", "createdAt": "2026-10-05T10:00:00.000Z", "updatedAt": "2026-10-05T10:00:00.000Z"}
+        ]
+      }
+    ],
+    "meta": {}
+  }
+]

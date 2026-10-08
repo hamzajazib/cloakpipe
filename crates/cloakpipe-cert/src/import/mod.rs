@@ -127,10 +127,12 @@
 
 mod braintrust;
 mod langfuse;
+mod langfuse_experiment;
 mod scores;
 
 pub use braintrust::from_braintrust;
 pub use langfuse::from_langfuse;
+pub use langfuse_experiment::from_langfuse_experiment;
 pub use scores::ScoreRules;
 
 use crate::model::{
