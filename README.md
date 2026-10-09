@@ -463,6 +463,7 @@ point). Full details: [CERTIFICATION.md](docs/CERTIFICATION.md#what-a-certificat
 | Evidence and anchoring | [docs/ANCHORING.md](docs/ANCHORING.md) | [cloakpipe.co/docs/evidence](https://cloakpipe.co/docs/evidence) |
 | Release audit packs | [docs/AUDIT_PACK.md](docs/AUDIT_PACK.md) | [cloakpipe.co/docs/audit-pack](https://cloakpipe.co/docs/audit-pack) |
 | Integrations, FAQ | [integrations/](integrations) | [integrations](https://cloakpipe.co/docs/integrations), [FAQ](https://cloakpipe.co/docs/faq) |
+| Release history | [CHANGELOG.md](CHANGELOG.md) | [GitHub releases](https://github.com/rohansx/cloakpipe/releases) |
 
 ## Project status and roadmap
 
