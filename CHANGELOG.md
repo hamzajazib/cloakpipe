@@ -36,6 +36,11 @@ may contain breaking changes; these are marked **Breaking**.
   and Langfuse dataset runs with a configurable `--pass-threshold`
   ([#15](https://github.com/rohansx/cloakpipe/pull/15)). Malformed, duplicate or
   conflicting input is rejected rather than guessed.
+- **Langfuse experiments import.** `cloakpipe eval import --langfuse-experiment
+  FILE --langfuse-experiment-items FILE` reads the Langfuse experiments API,
+  which replaces dataset runs, with cursor pagination, item-count and duplicate
+  checks, and `tools/fetch_langfuse_experiment.sh` to download every page.
+  ([#20](https://github.com/rohansx/cloakpipe/pull/20))
 - **MCP tool gate.** `cloakpipe mcp-proxy --manifest ... --certification ...`
   only forwards a `tools/call` when the tool is declared in the release manifest
   and the release's certification verifies at the moment of the call (trusted
@@ -99,6 +104,12 @@ may contain breaking changes; these are marked **Breaking**.
 - README rewritten around Evaluate, Certify, Enforce, Prove, with every quick-start
   command verified against `main`; `CONTRIBUTING.md` refreshed.
   ([#18](https://github.com/rohansx/cloakpipe/pull/18))
+
+### Deprecated
+
+- Langfuse dataset-run import (`--langfuse-run` / `--langfuse-scores`). Langfuse
+  removes those endpoints on Langfuse Cloud on 2026-11-16 (self-hosted: v4); use
+  `--langfuse-experiment` instead. ([#20](https://github.com/rohansx/cloakpipe/pull/20))
 
 ### Removed
 
