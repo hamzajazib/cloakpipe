@@ -33,7 +33,8 @@
 //! (camelCase, unknown fields rejected), validated with
 //! [`EvaluationRun::validate`].
 //!
-//! **Scores** (shared by `from_braintrust` and `from_langfuse`): eval
+//! **Scores** (shared by `from_braintrust`, `from_langfuse_experiment` and
+//! `from_langfuse`): eval
 //! platforms report per-case scores, not verdicts. With [`ScoreRules`]
 //! (`pass_threshold`, default 0.5, must be finite and within `0..=1`, else
 //! `ImportError::Invalid`; `score_names`, default empty = every score
@@ -95,7 +96,51 @@
 //! - `metadata.critical`: `true`/`false`; present with any other value
 //!   (including `null`) → `Invalid`.
 //!
-//! **Langfuse** (`from_langfuse`) — a dataset run plus its scores:
+//! **Langfuse experiments** (`from_langfuse_experiment`) — Langfuse v4
+//! public API (Langfuse Cloud, self-hosted v4+), an experiment plus its
+//! items with their scores:
+//! - `experiment_json`: `GET /api/public/experiments?id=<id>&fromStartTime=…`,
+//!   an `ExperimentsResponse` page `{"data": [experiment], "meta": {…}}`
+//!   holding exactly one experiment, or the bare experiment object. `id`
+//!   must be a non-empty string, `itemCount` a whole number, `datasetId` a
+//!   string or `null`; experiment-level scores are ignored (they summarize
+//!   the run, not a case).
+//! - `items_json`: every page of
+//!   `GET /api/public/experiment-items?experimentId=<id>&fromStartTime=…&fields=core,dataset,scores&scoreLimit=50`,
+//!   one `ExperimentItemsResponse` page `{"data": [...], "meta": {...}}` or
+//!   an array of pages in fetch order. Pagination is by cursor: a page
+//!   whose `meta.cursor` is a non-empty string has a next page. Fail
+//!   closed: the last page must have no cursor (else the items are
+//!   incomplete), every earlier page must have one, cursors must be
+//!   distinct, and every page needs an object `meta` (bare items, without
+//!   pages, are `Invalid`). The number of items must equal the
+//!   experiment's `itemCount` (fetch both with the same
+//!   `fromStartTime`/`toStartTime`), which also catches a dropped middle
+//!   page.
+//! - Each item is a case with `id = experimentItemId` (the dataset item id
+//!   for a Langfuse dataset; non-empty, no leading or trailing whitespace);
+//!   `traceId` must be a non-empty string and `experimentId` must equal the
+//!   experiment's `id` (else `Invalid`: files from different experiments).
+//!   A repeated `experimentItemId` is `Invalid`. `level == "ERROR"` → `Error`
+//!   (`level` must be a string when present).
+//! - `scores`: an array of `ScoreV3` objects or absent/`null` (no scores);
+//!   Langfuse returns the item's own and its trace's scores here. If no item
+//!   has a `scores` key at all, the items were fetched without
+//!   `fields=scores`: `Invalid`. An item listing 50 or more scores (the
+//!   maximum `scoreLimit`) may have been truncated: `Invalid`.
+//! - `dataType` is required: `NUMERIC` → `value` must be a number;
+//!   `BOOLEAN` → `value` must be a bool (`true` = 1, `false` = 0);
+//!   `CATEGORICAL`, `TEXT`, `CORRECTION` → ignored; anything else →
+//!   `Invalid`. A counted score needs a non-empty `name`; the same name
+//!   twice on one item (e.g. a trace and an observation score) is
+//!   `Invalid`.
+//! - No critical flag: critical cases come from [`ImportMeta::critical`]
+//!   patterns only. No `duration_ms` or other metrics are imported.
+//! - `dataset` = [`ImportMeta::dataset`], else the experiment's `datasetId`.
+//!
+//! **Langfuse dataset runs** (`from_langfuse`, deprecated upstream: Langfuse
+//! Cloud removes these endpoints on 2026-11-16, self-hosted with v4; use
+//! `from_langfuse_experiment`) — a dataset run plus its scores:
 //! - `run_json`: `GET /api/public/datasets/{dataset}/runs/{run}`, an object
 //!   with a `datasetRunItems` array. Each item is a case with
 //!   `id = datasetItemId` (non-empty string without leading or trailing
@@ -127,10 +172,12 @@
 
 mod braintrust;
 mod langfuse;
+mod langfuse_experiment;
 mod scores;
 
 pub use braintrust::from_braintrust;
 pub use langfuse::from_langfuse;
+pub use langfuse_experiment::from_langfuse_experiment;
 pub use scores::ScoreRules;
 
 use crate::model::{

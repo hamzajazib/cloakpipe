@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "id": "exp-support-agent-184",
+      "name": "support-agent-184-golden",
+      "description": "nightly golden run for release 184",
+      "startTime": "2026-10-05T09:00:00.000Z",
+      "endTime": "2026-10-05T09:20:00.000Z",
+      "itemCount": 4,
+      "datasetId": "cm2ds0000001"
+    }
+  ],
+  "meta": {}
+}

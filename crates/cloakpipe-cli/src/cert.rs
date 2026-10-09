@@ -9,7 +9,9 @@
 use crate::release::{load, load_valid, EXIT_INVALID, EXIT_IO, EXIT_OK};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, Subcommand};
-use cloakpipe_cert::import::{from_braintrust, from_junit, from_langfuse, ImportError, ImportMeta, ScoreRules};
+use cloakpipe_cert::import::{
+    from_braintrust, from_junit, from_langfuse, from_langfuse_experiment, ImportError, ImportMeta, ScoreRules,
+};
 use cloakpipe_cert::policy::{decide, DecisionInput};
 use cloakpipe_cert::statement::{self, Certification, Envelope, TrustedKey, VerifyContext};
 use cloakpipe_cert::{CertificationPolicy, EvaluationRun, Outcome, SuiteRef};
@@ -192,12 +194,12 @@ fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
 
 #[derive(Subcommand)]
 pub enum EvalCommands {
-    /// Import JUnit XML, a Braintrust experiment or a Langfuse dataset run as a native EvaluationRun
+    /// Import JUnit XML, a Braintrust experiment or a Langfuse experiment as a native EvaluationRun
     Import(ImportArgs),
 }
 
 #[derive(Args)]
-#[command(group = clap::ArgGroup::new("source").required(true).args(["junit", "braintrust", "langfuse_run"]))]
+#[command(group = clap::ArgGroup::new("source").required(true).args(["junit", "braintrust", "langfuse_experiment", "langfuse_run"]))]
 pub struct ImportArgs {
     /// JUnit XML report
     #[arg(long, value_name = "FILE")]
@@ -205,11 +207,24 @@ pub struct ImportArgs {
     /// Braintrust experiment events: /v1/experiment/{id}/fetch output, an array of events or JSONL
     #[arg(long, value_name = "FILE")]
     braintrust: Option<PathBuf>,
-    /// Langfuse dataset run: /api/public/datasets/{dataset}/runs/{run} output (deprecated by Langfuse;
-    /// see docs/CERTIFICATION.md)
+    /// Langfuse experiment: GET /api/public/experiments?id=<id> output (one experiment)
+    #[arg(long, value_name = "FILE", requires = "langfuse_experiment_items")]
+    langfuse_experiment: Option<PathBuf>,
+    /// Langfuse experiment items with scores: every page of
+    /// GET /api/public/experiment-items?experimentId=<id>&fields=core,dataset,scores (a page, or an array of pages)
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "langfuse_experiment",
+        conflicts_with_all = ["junit", "braintrust", "langfuse_run", "langfuse_scores"]
+    )]
+    langfuse_experiment_items: Option<PathBuf>,
+    /// Deprecated: Langfuse dataset run, /api/public/datasets/{dataset}/runs/{run} output (removed on
+    /// Langfuse Cloud on 2026-11-16 and in self-hosted v4; use --langfuse-experiment)
     #[arg(long, value_name = "FILE", requires = "langfuse_scores")]
     langfuse_run: Option<PathBuf>,
-    /// Langfuse scores for the run: GET /api/public/v2/scores output (a page, or an array of every page)
+    /// Deprecated: Langfuse scores for --langfuse-run, GET /api/public/v2/scores output (a page, or an
+    /// array of every page)
     #[arg(long, value_name = "FILE", requires = "langfuse_run", conflicts_with_all = ["junit", "braintrust"])]
     langfuse_scores: Option<PathBuf>,
     /// Score-based sources: a case passes iff every score is >= this, 0..=1 [default: 0.5]
@@ -237,7 +252,7 @@ pub struct ImportArgs {
     /// Producing tool, e.g. pytest
     #[arg(long)]
     tool: Option<String>,
-    /// Dataset reference (Langfuse default: the run's datasetName)
+    /// Dataset reference (Langfuse default: the experiment's datasetId, or the dataset run's datasetName)
     #[arg(long)]
     dataset: Option<String>,
     /// Write the run here instead of stdout
@@ -270,11 +285,14 @@ fn import(a: ImportArgs) -> Res<i32> {
         score_names: a.score_names.clone(),
     };
     // Read every input before resolving the release: I/O errors come first.
-    let source = match (&a.junit, &a.braintrust, &a.langfuse_run, &a.langfuse_scores) {
+    let source = match (&a.junit, &a.braintrust, &a.langfuse_experiment, &a.langfuse_experiment_items) {
         (Some(junit), ..) => Source::Junit(junit, read(junit)?),
         (_, Some(bt), ..) => Source::Braintrust(bt, read(bt)?),
-        (_, _, Some(run), Some(scores)) => Source::Langfuse(run, read(run)?, read(scores)?),
-        _ => return Err(usage("one of --junit, --braintrust or --langfuse-run is required")),
+        (_, _, Some(exp), Some(items)) => Source::LangfuseExperiment(items, read(exp)?, read(items)?),
+        _ => match (&a.langfuse_run, &a.langfuse_scores) {
+            (Some(run), Some(scores)) => Source::Langfuse(run, read(run)?, read(scores)?),
+            _ => return Err(usage("one of --junit, --braintrust, --langfuse-experiment or --langfuse-run is required")),
+        },
     };
     let release = release_target(&a.release)?;
     let meta = ImportMeta {
@@ -290,6 +308,7 @@ fn import(a: ImportArgs) -> Res<i32> {
     let (path, result) = match &source {
         Source::Junit(path, xml) => (path, from_junit(xml, &meta)),
         Source::Braintrust(path, json) => (path, from_braintrust(json, &meta, &rules)),
+        Source::LangfuseExperiment(path, exp, items) => (path, from_langfuse_experiment(exp, items, &meta, &rules)),
         Source::Langfuse(path, run, scores) => (path, from_langfuse(run, scores, &meta, &rules)),
     };
     let run = match result {
@@ -314,7 +333,9 @@ fn import(a: ImportArgs) -> Res<i32> {
 enum Source<'a> {
     Junit(&'a PathBuf, String),
     Braintrust(&'a PathBuf, String),
-    /// The run file, its contents, and the scores' contents.
+    /// The items file, the experiment's contents, and the items' contents.
+    LangfuseExperiment(&'a PathBuf, String, String),
+    /// The run file, its contents, and the scores' contents (deprecated upstream).
     Langfuse(&'a PathBuf, String, String),
 }
 

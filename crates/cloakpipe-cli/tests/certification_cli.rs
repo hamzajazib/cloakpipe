@@ -454,6 +454,95 @@ fn eval_import_langfuse_rejects_missing_score_pages() {
     assert!(err.contains("page 2"), "{err}");
 }
 
+fn import_langfuse_experiment(extra: &[&str]) -> (i32, String, String) {
+    let (e, i) = (import_fixture("langfuse_experiment.json"), import_fixture("langfuse_experiment_items.json"));
+    let release = golden();
+    let mut args = vec![
+        "eval", "import", "--langfuse-experiment", &e, "--langfuse-experiment-items", &i, "--release", &release,
+        "--suite", "support-critical@23", "--covers", "privacy,functional",
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+#[test]
+fn eval_import_langfuse_experiment_turns_items_into_cases() {
+    let (code, out, err) = import_langfuse_experiment(&["--critical", "privacy::*"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["source"], serde_json::json!({"kind": "langfuse"}));
+    assert_eq!(v["dataset"], "cm2ds0000001", "defaults to the experiment's datasetId");
+    assert_eq!(v["cases"].as_array().unwrap().len(), 4);
+    let identity = case_of(&v, "refunds::requires_identity");
+    assert_eq!(identity["status"], "pass");
+    assert_eq!(identity["metrics"]["score.policy_ok"], 1.0);
+    let pii = case_of(&v, "privacy::no_pii_in_tool_args");
+    assert_eq!(pii["status"], "fail");
+    assert_eq!(pii["critical"], true);
+    assert_eq!(case_of(&v, "refunds::over_limit_escalates")["status"], "error", "unscored fails closed");
+    assert_eq!(case_of(&v, "escalation::hands_off_politely")["status"], "pass");
+
+    let (code, out, err) = import_langfuse_experiment(&["--dataset", "dataset:support-golden@9", "--pass-threshold", "0.95"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["dataset"], "dataset:support-golden@9", "--dataset wins");
+    assert_eq!(case_of(&v, "refunds::requires_identity")["status"], "fail", "correctness 0.9 < 0.95");
+
+    let (code, out, err) = import_langfuse_experiment(&["--score", "correctness"]);
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(case_of(&v, "privacy::no_pii_in_tool_args")["status"], "pass", "pii_leak_free not selected");
+}
+
+#[test]
+fn eval_import_langfuse_experiment_rejects_an_unfinished_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = import_fixture("langfuse_experiment.json");
+    // Only the first page of the fixture: its meta.cursor points at a page that was not fetched.
+    let items: Value = serde_json::from_str(&std::fs::read_to_string(import_fixture("langfuse_experiment_items.json")).unwrap()).unwrap();
+    let first = write(&dir, "page-1.json", &items[0].to_string());
+    let g = golden();
+    let (code, out, err) = run(&[
+        "eval", "import", "--langfuse-experiment", &e, "--langfuse-experiment-items", &first, "--release", &g,
+        "--suite", "s@1", "--covers", "privacy",
+    ]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("page-1.json: invalid evaluation run"), "{err}");
+    assert!(err.contains("incomplete"), "{err}");
+    assert!(err.contains("itemCount"), "{err}");
+}
+
+#[test]
+fn eval_import_langfuse_experiment_needs_both_files() {
+    let (e, i) = (import_fixture("langfuse_experiment.json"), import_fixture("langfuse_experiment_items.json"));
+    let (r, s) = (import_fixture("langfuse_run.json"), import_fixture("langfuse_scores.json"));
+    let b = import_fixture("braintrust_fetch.json");
+    let g = golden();
+    let base = ["eval", "import", "--release", &g, "--suite", "s@1", "--covers", "privacy"];
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["--langfuse-experiment", &e],
+        vec!["--langfuse-experiment-items", &i],
+        vec!["--langfuse-experiment", &e, "--langfuse-experiment-items", &i, "--braintrust", &b],
+        vec!["--langfuse-experiment", &e, "--langfuse-experiment-items", &i, "--langfuse-run", &r, "--langfuse-scores", &s],
+        vec!["--langfuse-experiment", &e, "--langfuse-scores", &s],
+        vec!["--langfuse-run", &r, "--langfuse-experiment-items", &i],
+    ];
+    for extra in cases {
+        let mut args = base.to_vec();
+        args.extend_from_slice(&extra);
+        let (code, out, err) = run(&args);
+        assert_eq!(code, 2, "{extra:?} should be a usage error: {out}{err}");
+        assert!(out.is_empty(), "{out}");
+    }
+    let (code, _, err) = run(&[
+        "eval", "import", "--langfuse-experiment", &e, "--langfuse-experiment-items", "/nonexistent/items.json",
+        "--release", &g, "--suite", "s@1", "--covers", "privacy",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("/nonexistent/items.json"), "{err}");
+}
+
 #[test]
 fn eval_import_needs_exactly_one_source() {
     let (j, b) = (fixture("passing.junit.xml"), import_fixture("braintrust_fetch.json"));

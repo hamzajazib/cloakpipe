@@ -16,7 +16,7 @@ comment is the normative contract:
 | Module | Contract |
 |---|---|
 | `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.co/evaluation-run/v1`, `cloakpipe.co/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
-| `import` | JUnit XML, Braintrust experiments, Langfuse dataset runs and native JSON → `EvaluationRun`. |
+| `import` | JUnit XML, Braintrust experiments, Langfuse experiments (and legacy dataset runs) and native JSON → `EvaluationRun`. |
 | `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds. Pure and deterministic. |
 | `statement` | in-toto v1 Statement in a DSSE envelope signed with Ed25519; verification statuses `VALID`, `VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`. |
 
@@ -44,7 +44,9 @@ publish those to verifiers.
 ### `cloakpipe eval import`
 
 ```
-cloakpipe eval import (--junit FILE | --braintrust FILE | --langfuse-run FILE --langfuse-scores FILE)
+cloakpipe eval import (--junit FILE | --braintrust FILE
+                       | --langfuse-experiment FILE --langfuse-experiment-items FILE
+                       | --langfuse-run FILE --langfuse-scores FILE)
     --release <manifest | sha256:hex> --suite NAME@VERSION --covers a,b
     [--critical PATTERN]... [--pass-threshold T] [--run-id ID] [--tool NAME]
     [--dataset REF] [--out FILE]
@@ -74,8 +76,29 @@ argument exits 2.
   the root or a scorer span, or a scorer that crashed
   (`metadata.scorer_errors`), → `error`; `metrics.start/end` →
   `durationMs`; token counts → `metrics.tokens.*`.
-- **`--langfuse-run` + `--langfuse-scores`**: a Langfuse dataset run and the
-  scores of its traces. Each run item is one case with id `datasetItemId`;
+- **`--langfuse-experiment` + `--langfuse-experiment-items`**: a Langfuse
+  experiment (`GET /api/public/experiments?id=…`, Langfuse Cloud and
+  self-hosted v4+) and every page of its items fetched with
+  `fields=core,dataset,scores` (`GET /api/public/experiment-items`, a page
+  or an array of pages in fetch order). Each item is one case with id
+  `experimentItemId` (the dataset item id); its scores are the ones Langfuse
+  returns inline — the item's own and its trace's. `BOOLEAN` scores count
+  as 0/1; `CATEGORICAL`, `TEXT` and `CORRECTION` scores are ignored; an
+  item with `level: ERROR` is `error`. Fails closed on anything that could
+  hide a failing case: a last page that still has a `meta.cursor` (more
+  pages exist), an earlier page without one, a repeated cursor, a page
+  without `meta`, an item count different from the experiment's
+  `itemCount`, items of another experiment, a repeated `experimentItemId`,
+  items fetched without `fields=scores`, and an item listing 50 scores (the
+  maximum `scoreLimit`, so more may have been cut off). Experiment-level
+  scores are aggregates and are ignored. With `--score`, unselected scores
+  are not validated at all (an unknown `dataType` on one is ignored). Fetch
+  once the experiment has finished: items still arriving make the count
+  differ from `itemCount`, which is rejected. `--dataset` defaults to the
+  experiment's `datasetId`. Langfuse has no critical flag: use
+  `--critical`.
+- **`--langfuse-run` + `--langfuse-scores`** (deprecated, see below): a
+  Langfuse dataset run and the scores of its traces. Each run item is one case with id `datasetItemId`;
   a score joins an item by `traceId` (trace scores, or scores of the item's
   own `observationId`). `BOOLEAN` scores count as 0/1; `CATEGORICAL`,
   `TEXT` and `CORRECTION` scores are ignored. Scores must come from
@@ -112,8 +135,33 @@ cloakpipe eval import --braintrust experiment.json --release release.yaml \
   --suite support-critical@23 --covers privacy,functional --critical 'privacy::*' --out run.json
 ```
 
-Langfuse (public API, basic auth `public key:secret key`; URL-encode dataset
-and run names). Scores are listed by `GET /api/public/v2/scores` (the
+Langfuse experiments (public API, basic auth `public key:secret key`):
+`tools/fetch_langfuse_experiment.sh` fetches the experiment and follows
+`meta.cursor` through every page of its items, using the same
+`fromStartTime`/`toStartTime` window for both requests (the importer
+compares the item count with the experiment's `itemCount`):
+
+```sh
+export LANGFUSE_HOST=https://cloud.langfuse.com LANGFUSE_PUBLIC_KEY=pk-lf-… LANGFUSE_SECRET_KEY=sk-lf-…
+# Experiment id by name (fromStartTime is required by the API):
+curl -sSfG -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" "$LANGFUSE_HOST/api/public/experiments" \
+  --data-urlencode fromStartTime=2026-10-01T00:00:00Z --data-urlencode name=support-agent-184-golden \
+  | jq '.data[] | {id, name, itemCount}'
+tools/fetch_langfuse_experiment.sh "$EXPERIMENT_ID" 2026-10-01T00:00:00Z
+# → lf-experiment.json, lf-experiment-items.json
+cloakpipe eval import --langfuse-experiment lf-experiment.json \
+  --langfuse-experiment-items lf-experiment-items.json \
+  --release release.yaml --suite support-critical@23 --covers privacy,functional \
+  --critical 'privacy::*' --pass-threshold 0.7 --score correctness --score pii_leak_free --out run.json
+```
+
+By hand, the script is: `GET /api/public/experiments?id=<id>&fromStartTime=<from>&toStartTime=<to>`
+saved as is, then `GET /api/public/experiment-items?experimentId=<id>&fromStartTime=<from>&toStartTime=<to>&fields=core,dataset,scores&limit=100&scoreLimit=50`,
+repeated with `&cursor=<meta.cursor of the previous page>` until a page has
+no `meta.cursor`, and every page collected in order with `jq -s .`.
+
+Legacy Langfuse dataset runs (deprecated; URL-encode dataset and run
+names). Scores are listed by `GET /api/public/v2/scores` (the
 importer reads the v2 shape, with a top-level `traceId`), at most 100 per
 page; fetch every page of each trace's scores and pass them as an array of
 pages (`jq -s`):
@@ -136,12 +184,12 @@ cloakpipe eval import --langfuse-run lf-run.json --langfuse-scores lf-scores.jso
   --critical 'privacy::*' --pass-threshold 0.7 --score correctness --score pii_leak_free --out run.json
 ```
 
-`GET /api/public/datasets/{dataset}/runs/{run}` is deprecated by Langfuse:
-on Langfuse Cloud it is scheduled for removal on 2026-11-16 (self-hosted:
-with the v4 upgrade), when dataset runs become experiments
-(`/api/public/experiments`). The importer does not read the experiments
-API yet; until it does, `--langfuse-run` needs a deployment that still
-serves dataset runs.
+`--langfuse-run`/`--langfuse-scores` are deprecated: Langfuse removes
+`GET /api/public/datasets/{dataset}/runs/{run}` and `GET /api/public/v2/scores`
+on Langfuse Cloud on 2026-11-16 (self-hosted: with the v4 upgrade), when
+dataset runs become experiments. They keep working against deployments
+that still serve those endpoints; use `--langfuse-experiment` for
+everything else.
 
 ### `cloakpipe release certify`
 
