@@ -61,6 +61,7 @@ For larger changes (new features, architectural changes), please open an issue f
 - Use [Conventional Commits](https://www.conventionalcommits.org/) style messages, e.g. `fix(verify): ...`, `feat(cli): ...`, `docs: ...`.
 - Follow existing code style -- no need to reformat files you didn't change.
 - Keep PRs focused. One feature or fix per PR.
+- Add an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for user-facing changes.
 - Write tests for new functionality.
 
 ## Security
