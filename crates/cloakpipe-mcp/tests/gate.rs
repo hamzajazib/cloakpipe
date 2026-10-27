@@ -253,8 +253,8 @@ mod contracts {
         let g = gate_with(Some(task()));
         let cases = [
             (with(|a| a["tenant"] = json!("other-co")), Denial::ScopeMismatch { path: Some("/tenant".into()) }),
-            (with(|a| a["tenant_override"] = json!("x")), Denial::ArgumentNotAllowed { path: None }),
-            (with(|a| a["patch"]["owner"] = json!("x")), Denial::ArgumentNotAllowed { path: Some("/patch".into()) }),
+            (with(|a| a["tenant_override"] = json!("x")), Denial::UndeclaredArgument { path: None }),
+            (with(|a| a["patch"]["owner"] = json!("x")), Denial::UndeclaredArgument { path: Some("/patch".into()) }),
             (with(|a| a["patch"]["stage"] = json!("closed-won")), Denial::ArgumentInvalid { path: Some("/patch/stage".into()) }),
             (with(|a| {
                 a.as_object_mut().unwrap().remove("record");
@@ -419,7 +419,7 @@ mod contracts {
     fn contract_denial_codes_are_stable() {
         let p = || Some("/patch/stage".to_string());
         assert_eq!(Denial::ArgumentMissing { path: p() }.code(), "argument_missing");
-        assert_eq!(Denial::ArgumentNotAllowed { path: None }.code(), "argument_not_allowed");
+        assert_eq!(Denial::UndeclaredArgument { path: None }.code(), "undeclared_argument");
         assert_eq!(Denial::ArgumentInvalid { path: p() }.code(), "argument_invalid");
         assert_eq!(Denial::ScopeMismatch { path: p() }.code(), "scope_mismatch");
         assert_eq!(Denial::TaskContextMissing { path: p() }.code(), "task_context_missing");

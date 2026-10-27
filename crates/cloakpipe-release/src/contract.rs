@@ -165,7 +165,7 @@ pub enum ViolationCode {
     /// A required argument is absent.
     ArgumentMissing,
     /// An argument the contract does not list (its name is not reported).
-    ArgumentNotAllowed,
+    UndeclaredArgument,
     /// A value breaks its constraint.
     ArgumentInvalid,
     /// A `bindTo` value differs from the task context.
@@ -178,7 +178,7 @@ impl ViolationCode {
     pub fn code(self) -> &'static str {
         match self {
             ViolationCode::ArgumentMissing => "argument_missing",
-            ViolationCode::ArgumentNotAllowed => "argument_not_allowed",
+            ViolationCode::UndeclaredArgument => "undeclared_argument",
             ViolationCode::ArgumentInvalid => "argument_invalid",
             ViolationCode::ScopeMismatch => "scope_mismatch",
             ViolationCode::TaskContextMissing => "task_context_missing",
@@ -475,7 +475,7 @@ fn check_object(
     task: Option<&Value>,
 ) -> Result<(), Violation> {
     if !additional && o.keys().any(|k| !properties.is_some_and(|p| p.contains_key(k))) {
-        return Err(Violation::at(ViolationCode::ArgumentNotAllowed, path));
+        return Err(Violation::at(ViolationCode::UndeclaredArgument, path));
     }
     let mut missing: Vec<&String> = required.iter().filter(|r| !o.contains_key(r.as_str())).collect();
     missing.sort();

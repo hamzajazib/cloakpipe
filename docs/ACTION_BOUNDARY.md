@@ -135,7 +135,7 @@ covers behave as before. Refusals use the usual JSON-RPC error `-32001`:
 | Reason | When | `path` |
 | --- | --- | --- |
 | `argument_missing` | a required argument is absent | the missing argument |
-| `argument_not_allowed` | an argument the contract does not list | the object holding it (none at the top level); the name is never echoed |
+| `undeclared_argument` | an argument the contract does not list | the object holding it (none at the top level); the name is never echoed |
 | `argument_invalid` | a value breaks its constraint, or the arguments are not an object | the contract path |
 | `scope_mismatch` | a `bindTo` value differs from the task context | the argument |
 | `task_context_missing` | a `bindTo` needs a task context, or a key it does not have | the argument |

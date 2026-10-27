@@ -136,10 +136,10 @@ fn a_missing_task_context_or_key_is_a_denial() {
 fn unknown_arguments_are_refused_without_naming_them() {
     let mut a = good_args();
     a["tenant_override"] = json!("other-co");
-    assert_eq!(check(&crm(), &a), Err((ViolationCode::ArgumentNotAllowed, None)));
+    assert_eq!(check(&crm(), &a), Err((ViolationCode::UndeclaredArgument, None)));
     let mut a = good_args();
     a["patch"]["owner"] = json!("mallory");
-    assert_eq!(check(&crm(), &a), Err((ViolationCode::ArgumentNotAllowed, Some("/patch".into()))));
+    assert_eq!(check(&crm(), &a), Err((ViolationCode::UndeclaredArgument, Some("/patch".into()))));
 }
 
 #[test]
@@ -249,13 +249,13 @@ fn checks_are_deterministic_whatever_the_argument_order() {
     let a: Value = serde_json::from_str(r#"{"zzz": 1, "tenant": "x", "record": "lead-42", "patch": {}}"#).unwrap();
     let b: Value = serde_json::from_str(r#"{"patch": {}, "record": "lead-42", "tenant": "x", "zzz": 1}"#).unwrap();
     assert_eq!(check(&crm(), &a), check(&crm(), &b));
-    assert_eq!(check(&crm(), &a).unwrap_err().0, ViolationCode::ArgumentNotAllowed);
+    assert_eq!(check(&crm(), &a).unwrap_err().0, ViolationCode::UndeclaredArgument);
 }
 
 #[test]
 fn violation_codes_are_stable() {
     assert_eq!(ViolationCode::ArgumentMissing.code(), "argument_missing");
-    assert_eq!(ViolationCode::ArgumentNotAllowed.code(), "argument_not_allowed");
+    assert_eq!(ViolationCode::UndeclaredArgument.code(), "undeclared_argument");
     assert_eq!(ViolationCode::ArgumentInvalid.code(), "argument_invalid");
     assert_eq!(ViolationCode::ScopeMismatch.code(), "scope_mismatch");
     assert_eq!(ViolationCode::TaskContextMissing.code(), "task_context_missing");

@@ -83,7 +83,7 @@ pub enum Denial {
     ArgumentMissing { path: Option<String> },
     /// An argument the contract does not list. Its name is never reported;
     /// `path` is the object holding it (`None` at the top level).
-    ArgumentNotAllowed { path: Option<String> },
+    UndeclaredArgument { path: Option<String> },
     /// A value breaks its constraint (`path`: the contract path, never the value).
     ArgumentInvalid { path: Option<String> },
     /// A `bindTo` argument differs from the trusted task context.
@@ -126,7 +126,7 @@ impl Denial {
             #[cfg(feature = "certification")]
             Denial::WrongEnvironment(_) => "wrong_environment".into(),
             Denial::ArgumentMissing { .. } => ViolationCode::ArgumentMissing.code().into(),
-            Denial::ArgumentNotAllowed { .. } => ViolationCode::ArgumentNotAllowed.code().into(),
+            Denial::UndeclaredArgument { .. } => ViolationCode::UndeclaredArgument.code().into(),
             Denial::ArgumentInvalid { .. } => ViolationCode::ArgumentInvalid.code().into(),
             Denial::ScopeMismatch { .. } => ViolationCode::ScopeMismatch.code().into(),
             Denial::TaskContextMissing { .. } => ViolationCode::TaskContextMissing.code().into(),
@@ -155,7 +155,7 @@ impl Denial {
     pub fn path(&self) -> Option<&str> {
         match self {
             Denial::ArgumentMissing { path }
-            | Denial::ArgumentNotAllowed { path }
+            | Denial::UndeclaredArgument { path }
             | Denial::ArgumentInvalid { path }
             | Denial::ScopeMismatch { path }
             | Denial::TaskContextMissing { path } => path.as_deref(),
@@ -169,7 +169,7 @@ impl From<contract::Violation> for Denial {
         let path = v.path;
         match v.code {
             ViolationCode::ArgumentMissing => Denial::ArgumentMissing { path },
-            ViolationCode::ArgumentNotAllowed => Denial::ArgumentNotAllowed { path },
+            ViolationCode::UndeclaredArgument => Denial::UndeclaredArgument { path },
             ViolationCode::ArgumentInvalid => Denial::ArgumentInvalid { path },
             ViolationCode::ScopeMismatch => Denial::ScopeMismatch { path },
             ViolationCode::TaskContextMissing => Denial::TaskContextMissing { path },

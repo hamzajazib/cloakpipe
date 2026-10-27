@@ -85,7 +85,7 @@ is still checked on the raw arguments.
   legitimate email is refused and the gate shows that the binding comes from
   the task context, not the model.
 - Add an argument the contract does not list (`"cc": "x@y.example"`) to call
-  1: refused as `argument_not_allowed`.
+  1: refused as `undeclared_argument`.
 - Edit `support-tools.contract.yaml` (say, raise `maxLength`): the proxy
   refuses to start, because the release binds the contract's digest. It
   prints the new `policy:tool-contract/...` reference to put in

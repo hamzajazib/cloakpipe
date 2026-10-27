@@ -415,7 +415,7 @@ cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
 A release can also bind **tool contracts** (`--tool-contract`, with a
 trusted `--task-context`): argument-level rules that decide whether this
 exact call may run, checked on the raw arguments before masking. Reasons
-`argument_missing`, `argument_not_allowed`, `argument_invalid`,
+`argument_missing`, `undeclared_argument`, `argument_invalid`,
 `scope_mismatch` and `task_context_missing` carry the contract path as
 `gate_path`. A contract tool with `requiresApproval: true` also needs a
 signed approval receipt for the exact call (`--approvals`,
