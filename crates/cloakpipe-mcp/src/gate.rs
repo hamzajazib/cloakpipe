@@ -50,9 +50,24 @@
 //! the operations store given to [`ToolGate::with_operations`], so a call
 //! whose outcome is unknown is never silently re-executed. A gate with such
 //! a tool and no store is not [`ToolGate::ready`].
+//!
+//! A v1 manifest may reference a Cedar policy (`policy:`, see
+//! [`cloakpipe_policy`]). [`ToolGate::with_policy`] parses it (an invalid
+//! policy refuses to start) and gives it the persistent call counters; until
+//! then the gate is not [`ToolGate::ready`] and refuses every call as
+//! `fail_closed`. The decision order is contract -> Cedar -> approval: a
+//! call that passes its contract is evaluated with Cedar (no satisfied
+//! permit, or a satisfied forbid: `policy_denied`, with the satisfied
+//! forbids' ids; any evaluation error: `fail_closed`), and needs an approval
+//! receipt when the manifest's `approval:` rule holds *or* every satisfied
+//! permit carries `@approval("<route>")` (its routes join the manifest's
+//! `approvers`). Without `policy:`, Cedar is skipped. The interceptor
+//! counts each call it forwards ([`ToolGate::record_forwarded`]) for the
+//! policy's `context.counters`.
 
 #[cfg(feature = "certification")]
 use cloakpipe_cert::statement::{verify, Status, VerifyContext};
+use cloakpipe_policy::{CallInput, Counters, PolicyDecision, PolicyEngine, PolicyError};
 use cloakpipe_receipt::approval::{verify_approval, ApprovalCheck, ApprovalError};
 use cloakpipe_receipt::dsse::{Envelope, TrustedKey};
 use cloakpipe_receipt::dsse::parse_rfc3339;
@@ -126,6 +141,12 @@ pub enum Denial {
     /// A side-effecting call reusing the JSON-RPC id of a call still in
     /// flight: the replies could not be told apart.
     RequestIdInUse,
+    /// The Cedar policy refuses the call: no permit holds, or a forbid does
+    /// (`policies`: the satisfied forbids' ids, from the policy file).
+    PolicyDenied { policies: Vec<String> },
+    /// A gate stage could not decide (a Cedar evaluation error, the counter
+    /// store failing, a policy not loaded): the call is refused.
+    FailClosed,
 }
 
 impl Denial {
@@ -152,6 +173,8 @@ impl Denial {
             Denial::OperationsUnavailable => "operations_unavailable".into(),
             Denial::RequestIdMissing => "request_id_missing".into(),
             Denial::RequestIdInUse => "request_id_in_use".into(),
+            Denial::PolicyDenied { .. } => "policy_denied".into(),
+            Denial::FailClosed => "fail_closed".into(),
         }
     }
 
@@ -159,6 +182,15 @@ impl Denial {
     pub fn operation_id(&self) -> Option<&str> {
         match self {
             Denial::OperationConflict { operation_id } | Denial::ReconcileBeforeRetry { operation_id } => Some(operation_id),
+            _ => None,
+        }
+    }
+
+    /// The policies that determined a `policy_denied` (ids from the policy
+    /// file, so safe to record).
+    pub fn policies(&self) -> Option<&[String]> {
+        match self {
+            Denial::PolicyDenied { policies } => Some(policies),
             _ => None,
         }
     }
@@ -251,6 +283,11 @@ pub enum GateConfigError {
     OperationsStore(String),
     /// The task context is not a JSON object.
     TaskContextNotObject,
+    /// The manifest's Cedar policy is invalid.
+    Policy(String),
+    /// The manifest references a Cedar policy that was not loaded
+    /// ([`ToolGate::with_policy`]).
+    PolicyNotLoaded,
 }
 
 impl std::fmt::Display for GateConfigError {
@@ -270,11 +307,29 @@ impl std::fmt::Display for GateConfigError {
             ),
             GateConfigError::OperationsStore(e) => write!(f, "operations store: {e}"),
             GateConfigError::TaskContextNotObject => write!(f, "the task context must be a JSON object"),
+            GateConfigError::Policy(e) => write!(f, "{e}"),
+            GateConfigError::PolicyNotLoaded => {
+                write!(f, "the manifest references a Cedar policy, which was not loaded with its counter store")
+            }
         }
     }
 }
 
 impl std::error::Error for GateConfigError {}
+
+/// The manifest's Cedar policy and the counters it reads.
+struct PolicyState {
+    engine: PolicyEngine,
+    counters: Mutex<Counters>,
+}
+
+/// What Cedar said about a call that passed its contract.
+enum PolicyVerdict {
+    /// No policy, or a plain permit.
+    Allow,
+    /// Every satisfied permit carries `@approval`; these are the routes.
+    RequireApproval(Vec<String>),
+}
 
 /// Legacy (`certification` feature): the certification a gate requires.
 #[cfg(feature = "certification")]
@@ -294,6 +349,10 @@ pub struct ToolGate {
     version: String,
     /// The v1 manifest's policy file digest, if it references one.
     policy_digest: Option<String>,
+    /// The manifest's policy file (as declared, and its bytes), if any.
+    policy_source: Option<(String, Vec<u8>)>,
+    /// The loaded policy; `None` with a `policy_source`: refuse every call.
+    policy: Option<PolicyState>,
     tools: BTreeSet<String>,
     /// `None`: the release manifest alone decides (the default).
     #[cfg(feature = "certification")]
@@ -341,6 +400,8 @@ impl ToolGate {
             release_name: manifest.metadata.agent.clone(),
             version: manifest.metadata.version.clone(),
             policy_digest: None,
+            policy_source: None,
+            policy: None,
             tools,
             #[cfg(feature = "certification")]
             certification: None,
@@ -365,6 +426,8 @@ impl ToolGate {
             release_name: manifest.release.clone(),
             version: manifest.version.clone(),
             policy_digest: manifest.policy_digest().map(|d| d.to_string()),
+            policy_source: manifest.policy.as_ref().map(|p| (p.path.display().to_string(), p.source.clone())),
+            policy: None,
             tools: manifest.tools().keys().cloned().collect(),
             #[cfg(feature = "certification")]
             certification: None,
@@ -387,6 +450,111 @@ impl ToolGate {
         }
         self.task = task;
         Ok(self)
+    }
+
+    /// Load the manifest's Cedar policy, with `counters` for its
+    /// `context.counters` (and where forwarded calls are counted). An
+    /// invalid policy is an error: the gate must not start. Without a
+    /// `policy:` in the manifest this changes nothing.
+    pub fn with_policy(mut self, counters: Counters) -> Result<Self, GateConfigError> {
+        let Some((path, source)) = &self.policy_source else { return Ok(self) };
+        let src = std::str::from_utf8(source).map_err(|_| GateConfigError::Policy(format!("policy {path}: not UTF-8")))?;
+        let engine = PolicyEngine::parse(src).map_err(|e| GateConfigError::Policy(format!("policy {path}: {e}")))?;
+        self.policy = Some(PolicyState { engine, counters: Mutex::new(counters) });
+        Ok(self)
+    }
+
+    /// Whether the manifest references a Cedar policy.
+    pub fn has_policy(&self) -> bool {
+        self.policy_source.is_some()
+    }
+
+    /// The loaded policy's ids (`@id`, else `policyN`), sorted.
+    pub fn policy_ids(&self) -> Vec<String> {
+        self.policy.as_ref().map(|p| p.engine.policy_ids()).unwrap_or_default()
+    }
+
+    /// Count a call to `tool` the interceptor is about to forward at `now`
+    /// (RFC 3339), for the policy's `context.counters`. `Ok(None)` without a
+    /// policy. A counter store failure is `fail_closed`: an uncounted call
+    /// could slip past a rate limit. Returns the id to
+    /// [`Self::forget_forwarded`] if the call is not forwarded after all.
+    pub fn record_forwarded(&self, tool: &str, now: &str) -> Result<Option<i64>, Denial> {
+        let Some(policy) = &self.policy else {
+            return if self.policy_source.is_some() { Err(Denial::FailClosed) } else { Ok(None) };
+        };
+        let now = unix(now)?;
+        let counters = policy.counters.lock().map_err(|_| Denial::FailClosed)?;
+        counters.record(&self.release_name, tool, now).map(Some).map_err(|e| {
+            tracing::error!(error = %e, "call counter store failed");
+            Denial::FailClosed
+        })
+    }
+
+    /// Withdraw a call [`Self::record_forwarded`] counted that was not
+    /// forwarded (answered from the operations store, or refused by it).
+    pub fn forget_forwarded(&self, id: i64) {
+        let Some(policy) = &self.policy else { return };
+        if let Err(e) = policy.counters.lock().map_err(|_| "poisoned".to_string()).and_then(|c| c.forget(id).map_err(|e| e.0)) {
+            // Over-counting is the safe direction: log and go on.
+            tracing::warn!(error = %e, "could not withdraw a counted call");
+        }
+    }
+
+    /// Evaluate the Cedar policy for a call that passed its contract.
+    fn evaluate_policy(&self, tool: &str, arguments: Option<&Value>, now: &str) -> Result<PolicyVerdict, Denial> {
+        let Some(policy) = &self.policy else {
+            return if self.policy_source.is_some() { Err(Denial::FailClosed) } else { Ok(PolicyVerdict::Allow) };
+        };
+        let now_unix = unix(now)?;
+        let release: ReleaseHash = self.release.parse().map_err(|_| Denial::FailClosed)?;
+        let fp = fingerprint(&release, tool, arguments.unwrap_or(&Value::Null)).to_string();
+        let counters = {
+            let store = policy.counters.lock().map_err(|_| Denial::FailClosed)?;
+            store.snapshot(&self.release_name, self.tools.iter().map(String::as_str), now_unix).map_err(|e| {
+                tracing::error!(error = %e, "call counter store failed");
+                Denial::FailClosed
+            })?
+        };
+        let input = CallInput {
+            release: &self.release_name,
+            tool,
+            fingerprint: &fp,
+            args: arguments,
+            task: self.task.as_ref(),
+            counters: &counters,
+            now_unix,
+        };
+        match policy.engine.evaluate(&input) {
+            Ok(PolicyDecision::Allow { .. }) => Ok(PolicyVerdict::Allow),
+            Ok(PolicyDecision::RequireApproval { approvers, .. }) => Ok(PolicyVerdict::RequireApproval(approvers)),
+            Ok(PolicyDecision::Deny { policies }) => Err(Denial::PolicyDenied { policies }),
+            Err(e @ (PolicyError::Evaluation { .. } | PolicyError::Input(_) | PolicyError::Parse(_))) => {
+                // Policy ids and value-free reasons only.
+                tracing::warn!(tool, reason = %e, "Cedar could not decide: fail closed");
+                Err(Denial::FailClosed)
+            }
+        }
+    }
+
+    /// Whether a call that passed its contract needs approval, and the routes:
+    /// the manifest's rule or Cedar's `@approval` (either one requires it).
+    fn approval_needed(&self, rule: &ToolRule, arguments: Option<&Value>, verdict: &PolicyVerdict) -> Option<Vec<String>> {
+        let manifest = rule.needs_approval(arguments);
+        let mut routes: Vec<String> =
+            if manifest { rule.approval.as_ref().map(|a| a.approvers.clone()).unwrap_or_default() } else { Vec::new() };
+        match verdict {
+            PolicyVerdict::RequireApproval(cedar) => {
+                for r in cedar {
+                    if !routes.contains(r) {
+                        routes.push(r.clone());
+                    }
+                }
+                Some(routes)
+            }
+            PolicyVerdict::Allow if manifest => Some(routes),
+            PolicyVerdict::Allow => None,
+        }
     }
 
     /// Legacy (`certification` feature): also refuse every call unless
@@ -467,12 +635,15 @@ impl ToolGate {
     }
 
     /// Can the gate run? A contract tool with `sideEffect: true` needs an
-    /// operations store.
+    /// operations store, and a manifest policy must be loaded.
     pub fn ready(&self) -> Result<(), GateConfigError> {
         if self.operations.is_none() {
             if let Some((tool, _)) = self.rules.iter().find(|(_, r)| r.side_effect) {
                 return Err(GateConfigError::OperationsRequired { tool: tool.clone() });
             }
+        }
+        if self.policy_source.is_some() && self.policy.is_none() {
+            return Err(GateConfigError::PolicyNotLoaded);
         }
         Ok(())
     }
@@ -505,11 +676,16 @@ impl ToolGate {
     /// For a call that needs approval: the routes and the fingerprint an
     /// approval broker needs. `None` when the call needs no approval (an
     /// undeclared tool, no approval rule, or a `when` that does not hold).
+    ///
+    /// The routes are the manifest's `approvers`, then the `@approval`
+    /// values of the Cedar permits that hold now.
     pub fn approval_request(&self, tool: &str, arguments: Option<&Value>) -> Option<ApprovalRequest> {
-        let rule = self.rules.get(tool).filter(|r| self.tools.contains(tool) && r.needs_approval(arguments))?;
+        let rule = self.rules.get(tool).filter(|_| self.tools.contains(tool))?;
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let verdict = self.evaluate_policy(tool, arguments, &now).ok()?;
+        let approvers = self.approval_needed(rule, arguments, &verdict)?;
         let release: ReleaseHash = self.release.parse().ok()?;
         let fp = fingerprint(&release, tool, arguments.unwrap_or(&Value::Null));
-        let approvers = rule.approval.as_ref().map(|a| a.approvers.clone()).unwrap_or_default();
         Some(ApprovalRequest { approvers, fingerprint: fp.to_string() })
     }
 
@@ -538,8 +714,10 @@ impl ToolGate {
             return Err(Denial::ContractMissing);
         }
         let Some(rule) = self.rules.get(tool) else { return Ok(Authorization::default()) };
+        // Contract, then Cedar, then approval: the first refusal wins.
         rule.check(arguments, self.task.as_ref())?;
-        let needs_approval = rule.needs_approval(arguments);
+        let verdict = self.evaluate_policy(tool, arguments, now)?;
+        let needs_approval = self.approval_needed(rule, arguments, &verdict).is_some();
         let raw = arguments;
         let arguments = arguments.unwrap_or(&Value::Null);
         let approval = if needs_approval { Some(self.approve(rule, tool, arguments, now)?) } else { None };
@@ -590,7 +768,10 @@ impl ToolGate {
         }
         let raw = arguments;
         let arguments = arguments.unwrap_or(&Value::Null);
-        let approval = if rule.needs_approval(raw) { self.approve(rule, tool, arguments, now).ok() } else { None };
+        // Cedar's @approval counts too; a call it cannot decide has no receipt.
+        let verdict = self.evaluate_policy(tool, raw, now).unwrap_or(PolicyVerdict::Allow);
+        let needs_approval = self.approval_needed(rule, raw, &verdict).is_some();
+        let approval = if needs_approval { self.approve(rule, tool, arguments, now).ok() } else { None };
         self.operation_key(rule, tool, raw, approval.as_ref()).map(Some)
     }
 
@@ -672,6 +853,11 @@ impl ToolGate {
             }
         }
     }
+}
+
+/// Seconds since the epoch of an RFC 3339 time; unreadable: `fail_closed`.
+fn unix(now: &str) -> Result<i64, Denial> {
+    parse_rfc3339(now).map(|t| t.timestamp()).ok_or(Denial::FailClosed)
 }
 
 /// Whether a receipt's validity window (`notAfter - approvedAt`) fits the
