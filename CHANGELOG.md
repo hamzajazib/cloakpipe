@@ -45,7 +45,9 @@ may contain breaking changes; these are marked **Breaking**.
   `tools/call`, messages refused unread, side-effect outcomes
   committed/failed/unknown, replays and `operations reconcile`). Entries
   carry seq, ts, release, tool, a keyed `args_fingerprint` (never raw
-  values), decision, reason, policy_version, mode, task_id and outcome,
+  values), decision, reason, policy_version (the manifest digest),
+  policy_digest (the Cedar policy file's sha256, when the manifest has
+  one), mode, task_id and outcome,
   are hash-chained, and each is signed with Ed25519 by the gate signing key
   (`--signing-key` / `CLOAKPIPE_SIGNING_KEY`, else
   `$CLOAKPIPE_HOME/gate.key`, created owner-only on first use with its

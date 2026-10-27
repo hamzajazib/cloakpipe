@@ -204,3 +204,47 @@ fn other_messages_are_not_decisions() {
     assert!(r.seen.contains("tools/list"));
     assert!(r.entries.is_empty(), "{:?}", r.entries);
 }
+
+/// A v1 manifest whose Cedar policy permits `read_ticket` and forbids
+/// `send_email`, with its counters in `dir`.
+fn cedar_gate(dir: &Path) -> ToolGate {
+    std::fs::write(
+        dir.join("support.cedar"),
+        "@id(\"reads\")\npermit (principal, action == Action::\"read_ticket\", resource);\n\n\
+         @id(\"no-email\")\nforbid (principal, action == Action::\"send_email\", resource);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("cloakpipe.manifest.yaml"),
+        "release: support-agent\nversion: 2026.10.3\npolicy: ./support.cedar\ntools:\n  \
+         read_ticket:\n    args:\n      ticket_id: { type: string, required: true }\n  \
+         send_email:\n    args:\n      to: { type: string, required: true }\n",
+    )
+    .unwrap();
+    let m = cloakpipe_release::v1::Manifest::parse_path(&dir.join("cloakpipe.manifest.yaml")).unwrap();
+    let g = ToolGate::from_manifest(GateMode::Enforce, &m)
+        .with_policy(cloakpipe_mcp::Counters::open(dir.join("state.db")).unwrap())
+        .unwrap();
+    g.ready().unwrap();
+    g
+}
+
+#[test]
+fn entries_carry_the_policy_digest_when_a_policy_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let gate = cedar_gate(dir.path());
+    let digest = gate.policy_digest().expect("the manifest names a policy");
+    let lines = [call(1, "read_ticket", json!({"ticket_id": "T-1"})), call(2, "send_email", json!({"to": "a@b.example"}))];
+    let r = run(gate, &lines, None);
+    assert_eq!(r.entries.len(), 2, "{:#?}", r.entries);
+    assert_eq!((r.entries[0].decision, r.entries[1].reason.as_str()), (Decision::Allow, "policy_denied"));
+    for e in &r.entries {
+        assert_eq!(e.policy_digest.as_deref(), Some(digest.as_str()), "{e:#?}");
+        assert_eq!(e.policy_version.as_deref(), Some(r.release.as_str()), "still the manifest digest");
+    }
+    verify(&r.entries);
+
+    // Without a policy there is no policy digest to record.
+    let r = run(support_gate(GateMode::Enforce), &[call(1, "refund", json!({"amount": 5}))], None);
+    assert_eq!(r.entries[0].policy_digest, None);
+}

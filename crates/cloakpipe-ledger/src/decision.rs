@@ -23,8 +23,8 @@
 //! - `decision` (`allow` / `deny` / `require_approval`), `reason` (a denial
 //!   code, `ok`, or `reconciled`), `path` (the contract path of an argument
 //!   denial)
-//! - `policy_version` (the manifest digest for now), `policy_digest`
-//!   (reserved for the policy engine)
+//! - `policy_version` (the manifest digest), `policy_digest` (the sha256 of
+//!   the manifest's Cedar policy file, null without one)
 //! - `mode` (`enforce` / `shadow`: in shadow the decision is what enforce
 //!   would have done), `forwarded` (whether the call reached the tool),
 //!   `outcome`

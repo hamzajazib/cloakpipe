@@ -463,8 +463,8 @@ and are still read. An entry is one flat JSON object:
   `tool: null`), `replay`, `outcome` or `reconcile`.
 - `decision`: `allow`, `deny` or `require_approval`; `reason` is the denial
   code, or `ok`.
-- `policy_version` is the manifest digest for now; `policy_digest` is
-  reserved for the policy engine.
+- `policy_version` is the manifest digest; `policy_digest` is the sha256 of
+  the manifest's Cedar policy file (`policy:`), or null when it has none.
 - `args_fingerprint` is the call fingerprint keyed with HMAC-SHA256 under a
   key derived from the gate signing key. The raw fingerprint is a plain hash
   of the arguments, so a low-entropy value could be guessed from it; keyed,

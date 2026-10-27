@@ -853,6 +853,8 @@ const FAIL_CLOSED: &str = "fail_closed";
 #[derive(Clone)]
 struct EntryBase {
     release: String,
+    /// The digest of the manifest's Cedar policy file, when it has one.
+    policy_digest: Option<String>,
     mode: Mode,
     task_id: Option<String>,
 }
@@ -863,7 +865,12 @@ impl EntryBase {
             GateMode::Enforce => Mode::Enforce,
             GateMode::Shadow => Mode::Shadow,
         };
-        Self { release: gate.release().to_string(), mode, task_id: gate.task_id().map(str::to_string) }
+        Self {
+            release: gate.release().to_string(),
+            policy_digest: gate.policy_digest(),
+            mode,
+            task_id: gate.task_id().map(str::to_string),
+        }
     }
 
     /// A tool call entry (`allow`, `ok`, not forwarded until set).
@@ -871,6 +878,7 @@ impl EntryBase {
         DecisionDraft {
             release: Some(self.release.clone()),
             tool,
+            policy_digest: self.policy_digest.clone(),
             mode: Some(self.mode),
             task_id: self.task_id.clone(),
             ..DecisionDraft::call()
@@ -894,6 +902,7 @@ fn record_outcome(decisions: &SharedDecisions, base: &EntryBase, op: &InFlight, 
     let draft = DecisionDraft {
         release: Some(base.release.clone()),
         tool: Some(op.tool.clone()).filter(|t| !t.is_empty()),
+        policy_digest: base.policy_digest.clone(),
         mode: Some(base.mode),
         task_id: base.task_id.clone(),
         operation_id: Some(op.operation_id.clone()),
