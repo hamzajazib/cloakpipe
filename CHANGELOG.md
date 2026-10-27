@@ -19,10 +19,33 @@ may contain breaking changes; these are marked **Breaking**.
 - crates.io metadata on every crate (`homepage`, `readme`, `keywords`,
   `categories`) and versions on all path dependencies; `cloakpipe-local`,
   `cloakleak` and `cloakleak-cli` are `publish = false`.
+- **Single-file manifest, `cloakpipe.manifest.yaml`** (`cloakpipe_release::v1`,
+  `schemas/cloakpipe.manifest.schema.json`): top-level `release`, `version`,
+  optional `policy` (a file path; its bytes are digested as `policy_digest`)
+  and `tools`. Closed by default: a declared tool takes only the `args` it
+  lists (none without `args`), each optional unless `required: true`.
+  Constraint keys `type`, `pattern`, `enum`, `const`, `min_len`, `max_len`,
+  `min`, `max`, `items`, `properties`, plus `one_of_context` (task context
+  paths; string or array values) with an `or_pattern` fallback. Per tool:
+  `side_effect` / `effect: read|write|irreversible`, an `idempotency_key`
+  template (`"{ticket_id}:{sha256(body)}"`) that names the operation, and
+  `approval: {when, approvers, ttl}` with a small condition language
+  (`amount > 100 && currency == 'EUR'`). Everything is checked at load, so
+  a bad rule stops the gate at start-up. The manifest digest is sha256 over
+  the JCS form of the parsed document.
+- `cloakpipe mcp-proxy --manifest` auto-detects the format (top-level
+  `release`: v1; `apiVersion`: legacy). An `approval_required` refusal now
+  carries the tool's `approvers` routes and the call `fingerprint`, and a
+  receipt valid for longer than the tool's `ttl` is `approval_invalid`.
+  `approve` and `action fingerprint` take a v1 manifest too.
+- `cloakpipe manifest validate <file>` and `cloakpipe manifest hash <file>
+  [--json]` (release, version, manifest_digest, policy_digest).
 - `examples/support-agent/`: a support agent whose prompt-injected
   `send_email` to an attacker is refused (`scope_mismatch` on `/to`, bound to
-  `task.customer_email`), with a stdlib-only mock MCP server and the exact
-  commands and output. The test suite runs it.
+  the ticket's customer), on one `cloakpipe.manifest.yaml` with an
+  idempotent `send_email` and a refund that needs approval over 100, a
+  stdlib-only mock MCP server and the exact commands and output. The test
+  suite runs it.
 - `AgentRelease::gate_issues()` (`cloakpipe-release`): what the tool gate
   needs from a release (known `apiVersion`/`kind`, agent name, well-formed
   and distinct `tool:` and `policy:` references), without the certification
@@ -46,6 +69,12 @@ may contain breaking changes; these are marked **Breaking**.
 - The workspace and crate descriptions describe the tool-call gate
   ("Self-hosted policy-enforcement gate for AI agent tool calls") instead of
   a privacy proxy.
+- **Breaking:** the denial for an argument the contract does not declare is
+  `undeclared_argument` (was `argument_not_allowed`), for legacy tool
+  contracts too.
+- **Deprecated:** the AgentRelease + ToolContract pair (`--tool-contract`).
+  It still works for this release, with a warning on stderr; `--tool-contract`
+  with a v1 manifest is a usage error, since its contracts are inline.
 - **Breaking (`cloakpipe mcp-proxy`): PII masking is opt-in.** By default
   the proxy forwards tool-call arguments and results unchanged: the gate
   allows or refuses a call and never rewrites an allowed one, so a tool now
