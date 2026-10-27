@@ -11,7 +11,7 @@
 //! that is not pending, or an in_flight one without `--force`), 2 usage or
 //! I/O error.
 
-use crate::cert::{invalid, usage, Res};
+use crate::keys::{invalid, usage, Res};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
 use cloakpipe_mcp::operations::{OperationState, OperationStore, ReconcileError};
@@ -61,7 +61,7 @@ pub struct ReconcileArgs {
 }
 
 pub fn run(cmd: OperationsCommands) -> i32 {
-    crate::cert::finish(match cmd {
+    crate::keys::finish(match cmd {
         OperationsCommands::List(a) => list(&a),
         OperationsCommands::Reconcile(a) => reconcile(&a),
     })

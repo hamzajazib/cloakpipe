@@ -323,7 +323,8 @@ pub async fn proxy_anthropic_messages(
         .unwrap())
 }
 
-/// Proxy handler for /v1/embeddings.
+/// Proxy handler for /v1/embeddings (`rag` feature).
+#[cfg(feature = "rag")]
 pub async fn proxy_embeddings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -512,6 +513,7 @@ async fn pseudonymize_messages(
 }
 
 /// Pseudonymize embedding input (string or array of strings).
+#[cfg(feature = "rag")]
 async fn pseudonymize_embedding_input(
     state: &AppState,
     body: &mut Value,

@@ -15,18 +15,19 @@ name = "cloakpipe"
 path = "src/main.rs"
 
 [dependencies]
-cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0", features = ["gliner-pii", "ner"] }
+cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }
 cloakpipe-proxy = { path = "../cloakpipe-proxy", version = "0.11.0" }
 cloakpipe-audit = { path = "../cloakpipe-audit", version = "0.11.0" }
-cloakpipe-tree = { path = "../cloakpipe-tree", version = "0.11.0" }
-cloakpipe-vector = { path = "../cloakpipe-vector", version = "0.11.0" }
+cloakpipe-tree = { path = "../cloakpipe-tree", version = "0.11.0", optional = true }
+cloakpipe-vector = { path = "../cloakpipe-vector", version = "0.11.0", optional = true }
 cloakpipe-mcp = { path = "../cloakpipe-mcp", version = "0.11.0" }
 cloakpipe-release = { path = "../cloakpipe-release", version = "0.11.0" }
-cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.11.0" }
+# Legacy: only the `certification` feature builds the certification commands.
+cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.11.0", optional = true }
 cloakpipe-receipt = { path = "../cloakpipe-receipt", version = "0.11.0" }
 cloakpipe-anchor = { path = "../cloakpipe-anchor", version = "0.11.0" }
 cloakpipe-ledger = { path = "../cloakpipe-ledger", version = "0.11.0" }
-cloakpipe-verify = { path = "../cloakpipe-verify", version = "0.11.0", features = ["release-pack"] }
+cloakpipe-verify = { path = "../cloakpipe-verify", version = "0.11.0" }
 ed25519-dalek = "2"
 sha2 = "0.10"
 hex = "0.4"
@@ -47,11 +48,22 @@ shell-words = "1"
 uuid.workspace = true
 
 [features]
-# Legacy (source only, off by default): `mcp-proxy` takes --certification,
-# --trust, --trust-key, --revoked-statement, --revoked-key and --environment
-# and refuses every call unless the release holds a certification that
-# verifies now. Removed in a later release.
-certification = ["cloakpipe-mcp/certification"]
+# The default build is the lean gate: mcp-proxy, its evidence tooling and
+# regex PII detection (`start`, `scan`, `mcp`, `mcp-proxy --transform pii`).
+default = []
+# Everything below.
+full = ["ner", "rag", "certification"]
+# Neural NER detectors (ONNX Runtime + tokenizers, GLiNER-PII sidecar client)
+# for the PII paths; without it they detect with regex only.
+ner = ["cloakpipe-core/ner", "cloakpipe-core/gliner-pii", "cloakpipe-proxy/ner"]
+# RAG tooling: the `tree` and `vector` subcommands and the proxy's
+# /v1/embeddings and /tree/* routes.
+rag = ["dep:cloakpipe-tree", "dep:cloakpipe-vector", "cloakpipe-proxy/rag"]
+# Legacy certification: `eval`, `release certify | verify-cert | audit-pack`,
+# and mcp-proxy's --certification, --trust, --trust-key, --revoked-statement,
+# --revoked-key and --environment, which refuse every call unless the release
+# holds a certification that verifies now. Removed in a later release.
+certification = ["dep:cloakpipe-cert", "cloakpipe-mcp/certification", "cloakpipe-verify/release-pack"]
 
 [dev-dependencies]
 rusqlite = { workspace = true }
@@ -61,3 +73,15 @@ serde_json.workspace = true
 base64 = "0.23"
 sha2 = "0.10"
 hex = "0.4"
+
+[[test]]
+name = "certification_cli"
+required-features = ["certification"]
+
+[[test]]
+name = "audit_pack_cli"
+required-features = ["certification"]
+
+[[test]]
+name = "legacy_namespace_cli"
+required-features = ["certification"]

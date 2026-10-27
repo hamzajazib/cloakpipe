@@ -11,9 +11,9 @@ categories = ["web-programming::http-server"]
 description = "OpenAI- and Anthropic-compatible LLM egress proxy for CloakPipe: PII pseudonymization in requests, rehydration in responses"
 
 [dependencies]
-cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0", features = ["gliner-pii", "ner"] }
+cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }
 cloakpipe-audit = { path = "../cloakpipe-audit", version = "0.11.0" }
-cloakpipe-tree = { path = "../cloakpipe-tree", version = "0.11.0" }
+cloakpipe-tree = { path = "../cloakpipe-tree", version = "0.11.0", optional = true }
 tokio.workspace = true
 axum.workspace = true
 hyper.workspace = true
@@ -31,3 +31,14 @@ uuid.workspace = true
 anyhow.workspace = true
 http-body-util.workspace = true
 
+[features]
+default = []
+# Neural NER detectors (ONNX Runtime + tokenizers, GLiNER-PII sidecar client).
+# Off by default: the proxy detects PII with regex alone.
+ner = ["cloakpipe-core/ner", "cloakpipe-core/gliner-pii"]
+# RAG endpoints: /v1/embeddings and the CloakTree /tree/* routes.
+rag = ["dep:cloakpipe-tree"]
+
+[dev-dependencies]
+tempfile = "3"
+toml.workspace = true

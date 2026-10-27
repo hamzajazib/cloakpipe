@@ -495,6 +495,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
 }
 
 /// CloakTree commands — vectorless document retrieval.
+#[cfg(feature = "rag")]
 pub async fn tree(config_path: &str, action: crate::TreeCommands) -> Result<()> {
     let config = if std::path::Path::new(config_path).exists() {
         load_config(config_path)?
@@ -692,6 +693,7 @@ pub async fn tree(config_path: &str, action: crate::TreeCommands) -> Result<()> 
 }
 
 /// ADCPE vector encryption commands.
+#[cfg(feature = "rag")]
 pub async fn vector(action: crate::VectorCommands) -> Result<()> {
     match action {
         crate::VectorCommands::Encrypt { input, output, dim } => {
@@ -763,6 +765,7 @@ pub async fn vector(action: crate::VectorCommands) -> Result<()> {
 }
 
 /// Resolve the ADCPE vector encryption key from env.
+#[cfg(feature = "rag")]
 fn resolve_vector_key() -> Result<[u8; 32]> {
     let env_var = "CLOAKPIPE_VECTOR_KEY";
     match std::env::var(env_var) {

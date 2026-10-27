@@ -4,7 +4,7 @@
 //! Exit codes follow `release`: 0 ok, 1 invalid input (manifest, arguments,
 //! task context, undeclared tool), 2 usage or I/O error.
 
-use crate::cert::{invalid, now_arg, read, rfc3339, signing_key, usage, Res};
+use crate::keys::{invalid, now_arg, read, rfc3339, signing_key, usage, Res};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
 use cloakpipe_receipt::approval::{is_valid_operation_id, OPERATION_ID_FORBIDDEN, parse_json_strict, sign_approval, Approval};
@@ -66,12 +66,12 @@ pub struct ApproveArgs {
 
 pub fn run(cmd: ActionCommands) -> i32 {
     match cmd {
-        ActionCommands::Fingerprint(a) => crate::cert::finish(fingerprint_cmd(&a)),
+        ActionCommands::Fingerprint(a) => crate::keys::finish(fingerprint_cmd(&a)),
     }
 }
 
 pub fn approve(a: ApproveArgs) -> i32 {
-    crate::cert::finish(approve_inner(&a))
+    crate::keys::finish(approve_inner(&a))
 }
 
 /// The manifest and the fingerprint of the call `tool(arguments file)`.

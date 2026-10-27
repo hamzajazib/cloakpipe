@@ -26,6 +26,26 @@ use crate::config::NerBackend;
 use crate::{DetectedEntity, config::DetectionConfig};
 use anyhow::Result;
 
+/// A config can ask for an NER backend this build does not contain (the
+/// `ner` and `gliner-pii` features are off by default). Detection then runs
+/// on the regex layers alone; say so rather than degrade silently.
+fn warn_if_ner_unavailable(config: &DetectionConfig) {
+    if !config.ner.enabled {
+        return;
+    }
+    let built = match config.ner.backend {
+        crate::config::NerBackend::GlinerPii => cfg!(feature = "gliner-pii"),
+        _ => cfg!(feature = "ner"),
+    };
+    if !built {
+        tracing::warn!(
+            backend = ?config.ner.backend,
+            "[detection.ner] is enabled, but this build has no NER (built without the `ner` feature); \
+             detecting with regex only. Rebuild with `--features ner` to use NER."
+        );
+    }
+}
+
 /// The combined detection engine that runs all layers.
 pub struct Detector {
     pattern_detector: patterns::PatternDetector,
@@ -50,6 +70,7 @@ pub struct Detector {
 impl Detector {
     /// Create a new detector from configuration.
     pub fn from_config(config: &DetectionConfig) -> Result<Self> {
+        warn_if_ner_unavailable(config);
         Ok(Self {
             pattern_detector: patterns::PatternDetector::new(config)?,
             financial_detector: financial::FinancialDetector::new(config)?,

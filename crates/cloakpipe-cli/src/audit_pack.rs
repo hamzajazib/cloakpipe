@@ -5,7 +5,7 @@
 //! verify (wrong release, malformed run/envelope/event/ledger export,
 //! uncertifiable manifest, key without a private part), 2 usage or I/O.
 
-use crate::cert::{finish, invalid, now_arg, read, rfc3339, signing_key, usage, Res};
+use crate::keys::{finish, invalid, now_arg, read, rfc3339, signing_key, usage, Res};
 use crate::release::{load, EXIT_OK};
 use clap::Args;
 use cloakpipe_cert::statement::Envelope;

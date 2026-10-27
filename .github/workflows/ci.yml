@@ -27,35 +27,46 @@ jobs:
         run: cargo build -p cloakpipe-core
       - name: Test core (default features)
         run: cargo test -p cloakpipe-core
-      # Full workspace — cloakpipe-cli and cloakpipe-proxy pull in the
-      # `ner` (ort + tokenizers) and `gliner-pii` features.
+      # Default workspace = the lean `cloakpipe` binary: gate + evidence +
+      # regex PII. NER, RAG and certification are off (see the `full` job).
       - name: Build workspace
         run: cargo build --workspace
       - name: Test workspace
         run: cargo test --workspace
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # The workspace build unifies features, and cloakpipe-cli turns on
-      # cloakpipe-verify's `release-pack`, so test the verifier on its own
-      # both ways: default (no certification code) and with release packs.
+      # cloakpipe-cli turns on cloakpipe-verify's `release-pack` only with
+      # `certification`, so test the verifier on its own both ways: default
+      # (no certification code) and with release packs.
       - name: Test verifier (default features, no release-pack)
         run: cargo test -p cloakpipe-verify
       - name: Test verifier (release-pack)
         run: |
           cargo test -p cloakpipe-verify --features release-pack
           cargo clippy -p cloakpipe-verify --all-targets --features release-pack -- -D warnings
-      # Includes mcp_does_not_depend_on_cert: the default gate (cloakpipe-mcp)
-      # must not pull in the certification pipeline.
-      - name: Dependency boundary (no cloakpipe-cert under the gate and evidence crates)
+      # The default gate (cloakpipe-mcp) and the evidence crates must not pull
+      # in the certification pipeline, and the default `cloakpipe` binary
+      # (cloakpipe-cli, cloakpipe-proxy) must not pull in ort, tokenizers,
+      # the RAG crates or cloakpipe-cert.
+      - name: Dependency boundary (gate, evidence crates and the lean default binary)
         run: ./tools/check_dep_boundary.sh
+      - name: Lean default binary (no ort, no cloakpipe-cert)
+        run: |
+          tree=$(cargo tree -q -e normal -p cloakpipe-cli --prefix none)
+          if grep -E '^(ort|cloakpipe-cert) ' <<<"$tree"; then
+            echo "the default cloakpipe-cli build must not depend on ort or cloakpipe-cert"
+            exit 1
+          fi
 
-  test-legacy-features:
-    # Legacy code behind cargo features that are off by default. `certification`
-    # restores the 0.11 mcp-proxy behaviour (every call refused unless the
-    # release holds a valid certification); its tests are
-    # #[cfg(feature = "certification")] and run only here. Kept until the
-    # certification code is removed.
-    name: test legacy features (certification)
+  test-full-features:
+    # Everything behind cargo features that are off by default: `ner` (ONNX
+    # Runtime + tokenizers NER detectors), `rag` (tree/vector commands, the
+    # proxy's RAG routes) and the legacy `certification` (eval, release
+    # certify / verify-cert / audit-pack, and the 0.11 mcp-proxy behaviour of
+    # refusing every call unless the release holds a valid certification).
+    # `full` turns them all on; tests behind #[cfg(feature = ...)] and the
+    # required-features test targets run only here.
+    name: test full features (ner, rag, certification)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,10 +74,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Test workspace (--features certification)
-        run: cargo test --workspace --features certification
-      - name: Clippy (--features certification, deny warnings)
-        run: cargo clippy --workspace --all-targets --features certification -- -D warnings
+      - name: Test workspace (--features full)
+        run: cargo test --workspace --features full
+      - name: Clippy (--features full, deny warnings)
+        run: cargo clippy --workspace --all-targets --features full -- -D warnings
+      - name: Each feature builds on its own (clippy, deny warnings)
+        run: |
+          for f in ner rag certification; do
+            cargo clippy -p cloakpipe-cli -p cloakpipe-proxy --all-targets --features "cloakpipe-cli/$f" -- -D warnings
+          done
 
   cloakleak-gate:
     name: cloakleak zero-leak gate
@@ -262,8 +278,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build CLI
-        run: cargo build -p cloakpipe-cli
+      - name: Build CLI (certification is off by default)
+        run: cargo build -p cloakpipe-cli --features certification
       - name: Generate a throwaway signing key
         run: |
           mkdir -p "$WORK"
@@ -368,7 +384,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins --features cloakpipe-verify/release-pack
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins --features cloakpipe-cli/certification,cloakpipe-verify/release-pack
       - name: Evidence for one release (keys, run, certification, ledger export, events)
         run: |
           mkdir -p "$WORK"
@@ -457,7 +473,7 @@ jobs:
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, test-legacy-features, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
+    needs: [test, test-full-features, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -470,7 +486,7 @@ jobs:
             const body = `## v2 gate results
 
             - [x] build + test + clippy
-            - [x] legacy features (certification) test + clippy
+            - [x] full features (ner, rag, certification) test + clippy
             - [x] cloakleak zero-leak gate (prose + tool_json)
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
             - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)

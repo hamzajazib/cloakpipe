@@ -58,8 +58,13 @@ fn setup(dir: &Path) -> (String, String) {
 }
 
 /// keygen + JUnit import + certify the release → (envelope, key file).
+/// Without the `certification` feature there is nothing to certify with and
+/// nothing reads the envelope (see `cert_flags`): only the key is made.
 fn certify(dir: &Path, release: &str) -> (String, String) {
     run_ok(dir, &["release", "keygen", "--out", &p(dir, "key.json")]);
+    if !cfg!(feature = "certification") {
+        return (p(dir, "cert.dsse.json"), p(dir, "key.json"));
+    }
     run_ok(dir, &[
         "eval", "import", "--junit", &root("tests/fixtures/certification/passing.junit.xml"), "--release", release,
         "--suite", "support-critical@23", "--covers", "privacy,functional", "--out", &p(dir, "run.json"),
