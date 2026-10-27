@@ -1,5 +1,9 @@
 # CloakPipe — Technical Specification (v2)
 
+> **Legacy.** The 2025 technical specification of the PII privacy proxy.
+> Parts of it were never built. Kept for history; see the
+> [README](../../README.md) for the current product.
+
 ## Language & Runtime
 
 **Rust** (2021 edition, MSRV 1.75+) — rationale unchanged from v1.

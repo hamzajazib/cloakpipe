@@ -11,7 +11,7 @@
 //!   (re-exported from `cloakpipe-receipt`, where it now lives; the DSSE
 //!   items of [`statement`] are re-exported from there too).
 //!
-//! The contract is specified in `docs/CERTIFICATION.md`.
+//! The contract is specified in `docs/legacy/CERTIFICATION.md`.
 
 pub use cloakpipe_receipt::approval;
 pub mod import;

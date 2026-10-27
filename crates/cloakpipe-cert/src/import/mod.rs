@@ -1,6 +1,6 @@
 //! Import external evaluation results as [`EvaluationRun`]s.
 //!
-//! Contract (see docs/CERTIFICATION.md §Import):
+//! Contract (see docs/legacy/CERTIFICATION.md §Import):
 //!
 //! **JUnit XML** (`from_junit`) — the de-facto CI format (pytest, Jest, Go,
 //! JUnit, cargo-nextest):

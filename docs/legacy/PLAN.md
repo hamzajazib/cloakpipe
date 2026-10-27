@@ -1,5 +1,9 @@
 # CloakPipe — Implementation Plan (v2)
 
+> **Legacy.** The 2025 implementation plan of the PII privacy proxy. It is
+> kept for history; it does not describe the current product or its
+> commands. See the [README](../../README.md).
+
 ## Guiding Principles
 
 1. **Ship the proxy first, CloakTree second.** The proxy + regex detection is the foundation everything else builds on.

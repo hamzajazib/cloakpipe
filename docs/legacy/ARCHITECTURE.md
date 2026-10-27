@@ -1,5 +1,9 @@
 # CloakPipe — Architecture Document (v2)
 
+> **Legacy.** The 2025 architecture of the PII privacy proxy (CloakTree,
+> CloakVector, TEE plans). Kept for history; the current architecture is in
+> the [README](../../README.md) and [ACTION_BOUNDARY.md](../ACTION_BOUNDARY.md).
+
 ## System Overview
 
 CloakPipe is a Rust privacy middleware for LLM and RAG pipelines. It operates as an HTTP proxy with two retrieval modes (**CloakTree** for structured documents, **CloakVector** for multi-document corpora), five privacy tiers, and optional hardware isolation via TEEs.

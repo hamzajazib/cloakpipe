@@ -1135,9 +1135,12 @@ fn certify_reports_boundary_incomplete_for_unlabelled_authorization_cases() {
 
 #[test]
 fn certification_doc_shows_the_tested_boundary_policy() {
-    // The policy in docs/CERTIFICATION.md is the fixture these tests run.
-    let doc = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/CERTIFICATION.md"))
-        .unwrap();
+    // The policy in docs/legacy/CERTIFICATION.md is the fixture these tests run.
+    let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/legacy/CERTIFICATION.md");
+    let doc = std::fs::read_to_string(doc_path).unwrap();
     let policy = std::fs::read_to_string(fixture("boundary/policy.yaml")).unwrap();
-    assert!(doc.contains(&format!("```yaml\n{policy}```")), "docs/CERTIFICATION.md must embed boundary/policy.yaml");
+    assert!(
+        doc.contains(&format!("```yaml\n{policy}```")),
+        "docs/legacy/CERTIFICATION.md must embed boundary/policy.yaml"
+    );
 }

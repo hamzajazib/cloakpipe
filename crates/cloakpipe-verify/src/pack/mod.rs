@@ -1,7 +1,7 @@
 //! Release audit packs: everything a security reviewer needs about one Agent
 //! Release, in one signed JSON document that verifies offline.
 //!
-//! The contract is `docs/AUDIT_PACK.md`; this doc comment is its summary.
+//! The contract is `docs/legacy/AUDIT_PACK.md`; this doc comment is its summary.
 //!
 //! ```text
 //! {

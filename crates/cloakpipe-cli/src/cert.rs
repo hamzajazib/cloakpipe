@@ -2,7 +2,7 @@
 //! `cloakpipe release certify | verify-cert` and `cloakpipe eval import`.
 //!
 //! The decision and attestation logic lives in `cloakpipe-cert`
-//! (docs/CERTIFICATION.md); this module only loads inputs, calls it and
+//! (docs/legacy/CERTIFICATION.md); this module only loads inputs, calls it and
 //! reports. Exit codes follow `release`: 0 ok / certified, 1 invalid input,
 //! blocked or not certified, 2 usage or I/O error.
 

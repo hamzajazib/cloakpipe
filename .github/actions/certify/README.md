@@ -4,7 +4,7 @@ Certifies an Agent Release against a CloakPipe `CertificationPolicy`, using
 evaluation runs as evidence, and signs the decision as a DSSE-wrapped in-toto
 attestation. The decision is deterministic and the attestation verifies
 offline (`cloakpipe release verify-cert`). See
-[docs/CERTIFICATION.md](../../../docs/CERTIFICATION.md).
+[docs/legacy/CERTIFICATION.md](../../../docs/legacy/CERTIFICATION.md).
 
 The action installs the CLI (`cargo install --git … cloakpipe-cli --locked`),
 runs `cloakpipe release certify`, writes a job summary, and sets outputs. It

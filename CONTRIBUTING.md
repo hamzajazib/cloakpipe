@@ -41,9 +41,14 @@ it out explicitly in your PR.
 ## Project Structure
 
 CloakPipe is a Cargo workspace; see the crate map in the [README](README.md#architecture).
-Normative specifications live in [`docs/`](docs): `AGENT_RELEASE.md`,
-`CERTIFICATION.md`, `ANCHORING.md` and `AUDIT_PACK.md`. If you change a format
-or a verification rule, update the matching document in the same PR.
+Normative specifications live in [`docs/`](docs): `MANIFEST.md`,
+`POLICY.md`, `ACTION_BOUNDARY.md` (contracts, approvals, operations, the
+decision ledger) and `ANCHORING.md`; the certification-era formats are in
+[`docs/legacy/`](docs/legacy). If you change a format or a verification
+rule, update the matching document in the same PR. Every command a document
+shows must exist: `python3 tools/check_docs.py --bin target/debug` checks
+them (and runs the marked walkthroughs) after `cargo build -p cloakpipe-cli
+-p cloakpipe-verify`.
 
 ## What to Contribute
 

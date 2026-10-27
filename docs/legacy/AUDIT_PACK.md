@@ -1,12 +1,17 @@
 # Release audit packs
 
+> **Legacy.** This is the *release* audit pack of the certification
+> pipeline (`release audit-pack`, needs `--features certification`). The
+> gate's audit pack is `cloakpipe ledger export` + `cloakpipe verify`; see
+> [ACTION_BOUNDARY.md](../ACTION_BOUNDARY.md#anchoring-and-the-audit-pack).
+
 A **release audit pack** is the one artefact a client's security reviewer
 gets for an Agent Release: one signed JSON file with the manifest, the
 evaluation evidence, the certifications, the governance history and the
 runtime evidence ledger for that exact release. It verifies offline, with
 no network access and no CloakPipe account.
 
-- Rust: [`crates/cloakpipe-verify/src/pack`](../crates/cloakpipe-verify/src/pack)
+- Rust: [`crates/cloakpipe-verify/src/pack`](../../crates/cloakpipe-verify/src/pack)
   (`PackBuilder` to produce, `verify_pack_bytes` to check)
 - Producer CLI: `cloakpipe release audit-pack` (build with `--features certification`)
 - Verifier CLI: `cloakpipe-verify release-pack` (needs the `release-pack`
