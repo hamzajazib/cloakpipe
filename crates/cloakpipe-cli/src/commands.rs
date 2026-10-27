@@ -475,7 +475,14 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
             bail!("CLOAKPIPE_RELEASE names a different release than --manifest ({})", gate.release());
         }
         release = Some(manifest);
-        tracing::info!(release = gate.release(), mode = ?gate.mode, "MCP release gate enabled");
+        tracing::info!(
+            release = gate.release_name(),
+            version = gate.version(),
+            manifest_digest = gate.manifest_digest(),
+            policy_digest = gate.policy_digest().as_deref().unwrap_or("none"),
+            mode = ?gate.mode,
+            "MCP release gate enabled"
+        );
     }
 
     tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");

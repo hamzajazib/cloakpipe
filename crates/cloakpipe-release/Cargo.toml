@@ -25,3 +25,4 @@ regex = { workspace = true }
 [dev-dependencies]
 proptest = "1"
 jsonschema = { version = "0.58", default-features = false }
+tempfile = "3"

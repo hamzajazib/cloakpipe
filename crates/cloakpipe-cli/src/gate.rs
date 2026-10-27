@@ -1,9 +1,14 @@
 //! The MCP tool gate's command line (`cloakpipe mcp-proxy --manifest …`).
 //!
-//! The gate runs on the Agent Release manifest and the tool contracts it
-//! binds: the release is loaded and checked for what the gate reads
-//! ([`cloakpipe_release::AgentRelease::gate_issues`]), not for certifiability,
-//! so it needs no code, prompt, model or runtime pins.
+//! The gate runs on a single-file v1 manifest (`cloakpipe.manifest.yaml`,
+//! detected by its top-level `release` key), whose tool contracts are
+//! inline, so `--tool-contract` is refused with it.
+//!
+//! Deprecated: a legacy Agent Release (top-level `apiVersion`) and the tool
+//! contracts it binds (`--tool-contract`). The release is loaded and checked
+//! for what the gate reads ([`cloakpipe_release::AgentRelease::gate_issues`]),
+//! not for certifiability, so it needs no code, prompt, model or runtime
+//! pins; a deprecation warning goes to stderr.
 //!
 //! Legacy, `certification` cargo feature only (off by default): the
 //! `--certification`, `--trust`, `--trust-key`, `--revoked-statement`,
@@ -11,9 +16,11 @@
 //! call unless the release holds a certification that verifies now.
 
 use crate::keys::{invalid, read, trusted_key, usage, Res};
+use crate::manifest::{kind, load_v1, warn_legacy};
 use crate::release::load;
 use clap::Args;
 use cloakpipe_receipt::dsse::TrustedKey;
+use cloakpipe_release::v1::ManifestKind;
 use cloakpipe_release::AgentRelease;
 use std::path::{Path, PathBuf};
 
@@ -28,8 +35,9 @@ pub struct McpProxyArgs {
     /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
     #[arg(long, required = true)]
     pub upstream: String,
-    /// Agent Release manifest the agent runs as. Enables the tool gate:
-    /// tools/call must name a tool the manifest declares.
+    /// Manifest the agent runs under (cloakpipe.manifest.yaml; a legacy
+    /// Agent Release is deprecated). Enables the tool gate: tools/call must
+    /// name a tool the manifest declares, with arguments it allows.
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// DSSE certification envelope of the release. Without one, every
@@ -62,19 +70,22 @@ pub struct McpProxyArgs {
     /// report.
     #[arg(long, value_parser = ["enforce", "warn"])]
     pub gate: Option<String>,
-    /// Tool contract (repeatable): argument-level rules for the tools it
-    /// covers. Each must be bound by the release (`spec.policies` entry
+    /// Legacy Agent Release only (deprecated; a v1 manifest declares its
+    /// contracts inline). Tool contract (repeatable): argument-level rules
+    /// for the tools it covers. Each must be bound by the release (`spec.policies` entry
     /// `policy:tool-contract/<name>@sha256:<digest>`), and every contract the
     /// release binds must be supplied, or the proxy refuses to start.
     #[arg(long = "tool-contract")]
     pub tool_contracts: Vec<PathBuf>,
     /// Trusted task context: a JSON object written by the orchestrator, e.g.
-    /// {"taskId":"t-981","tenant":"demo-co"}. `bindTo: task.<key>` arguments
-    /// must equal its values. Default: $CLOAKPIPE_TASK_CONTEXT.
+    /// {"taskId":"t-981","ticket":{"id":"T-1042"}}. `one_of_context` (legacy:
+    /// `bindTo: task.<key>`) arguments must equal its values. Default:
+    /// $CLOAKPIPE_TASK_CONTEXT.
     #[arg(long = "task-context")]
     pub task_context: Option<PathBuf>,
     /// Directory of approval receipts (`<fingerprint hex>.approval.json`, from
-    /// `cloakpipe approve`) for tools whose contract has requiresApproval.
+    /// `cloakpipe approve`) for calls that need approval (`approval:` in the
+    /// manifest; legacy: requiresApproval).
     /// Needs --approver-key.
     #[arg(long)]
     pub approvals: Option<PathBuf>,
@@ -82,8 +93,8 @@ pub struct McpProxyArgs {
     /// only): receipts must be signed by one of these keys.
     #[arg(long = "approver-key")]
     pub approver_keys: Vec<PathBuf>,
-    /// Operations database (SQLite) tracking side-effecting calls (contract
-    /// tools with sideEffect: true): required when the contracts have any.
+    /// Operations database (SQLite) tracking side-effecting calls (tools with
+    /// side_effect: true; legacy: sideEffect): required when there are any.
     /// Default: $CLOAKPIPE_OPERATIONS_DB. One proxy per database.
     #[arg(long = "operations-db")]
     pub operations_db: Option<PathBuf>,
@@ -147,28 +158,45 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
         }
         return Ok(None);
     };
-    let manifest = load_release(manifest_path)?;
-    #[cfg(feature = "certification")]
-    let certification = legacy::certification(a)?;
     let mode = match a.gate.as_deref() {
         Some("warn") => cloakpipe_mcp::GateMode::Warn,
         _ => cloakpipe_mcp::GateMode::Enforce,
     };
-    let mut contracts = Vec::new();
-    for p in &a.tool_contracts {
-        let contract = cloakpipe_release::contract::ToolContract::parse_path(p).map_err(|e| match e {
-            cloakpipe_release::contract::ContractError::Io(..) => usage(format_args!("--tool-contract: {e}")),
-            _ => invalid(format_args!("--tool-contract {}: {e}", p.display())),
-        })?;
-        contracts.push(contract);
-    }
-    let task = task_context(a)?;
-    let approvals = approvals(a)?;
-    let gate = cloakpipe_mcp::ToolGate::new(mode, &manifest);
+    let gate = match kind(manifest_path)? {
+        ManifestKind::V1 => {
+            if !a.tool_contracts.is_empty() {
+                return Err(usage(format_args!(
+                    "--tool-contract is for the legacy AgentRelease format: {} is a v1 manifest, whose tool contracts are inline",
+                    manifest_path.display()
+                )));
+            }
+            let manifest = load_v1(manifest_path)?;
+            let task = task_context(a)?;
+            cloakpipe_mcp::ToolGate::from_manifest(mode, &manifest).with_task_context(task).map_err(usage)?
+        }
+        ManifestKind::Legacy => {
+            warn_legacy(manifest_path);
+            let manifest = load_release(manifest_path)?;
+            let mut contracts = Vec::new();
+            for p in &a.tool_contracts {
+                let contract = cloakpipe_release::contract::ToolContract::parse_path(p).map_err(|e| match e {
+                    cloakpipe_release::contract::ContractError::Io(..) => usage(format_args!("--tool-contract: {e}")),
+                    _ => invalid(format_args!("--tool-contract {}: {e}", p.display())),
+                })?;
+                contracts.push(contract);
+            }
+            let task = task_context(a)?;
+            // Refuse to start unless the contracts are exactly the ones the release binds.
+            cloakpipe_mcp::ToolGate::new(mode, &manifest).with_contracts(contracts, task).map_err(usage)?
+        }
+    };
     #[cfg(feature = "certification")]
-    let gate = gate.with_certification(&certification.environment, certification.envelope, certification.verify);
-    // Refuse to start unless the contracts are exactly the ones the release binds.
-    let mut gate = gate.with_contracts(contracts, task).map_err(usage)?;
+    let gate = {
+        let certification = legacy::certification(a)?;
+        gate.with_certification(&certification.environment, certification.envelope, certification.verify)
+    };
+    let approvals = approvals(a)?;
+    let mut gate = gate;
     if let Some((dir, approvers)) = approvals {
         gate = gate.with_approvals(dir, approvers);
     }

@@ -116,3 +116,22 @@ fn the_same_call_in_another_task_is_another_operation() {
     // The fingerprint is fixed-length hex, so the input splits one way only.
     assert_ne!(d("t-9\n", &fp), d("t-9", &fp));
 }
+
+#[test]
+fn an_idempotency_key_names_its_operation_per_release_tool_and_key() {
+    use cloakpipe_release::action::derive_idempotent_operation_id;
+    let key = [9u8; 32];
+    let id = derive_idempotent_operation_id(&key, "support-agent", "send_email", "T-1042:abc");
+    assert!(id.starts_with("op-") && id.len() == 35, "{id}");
+    assert_eq!(id, derive_idempotent_operation_id(&key, "support-agent", "send_email", "T-1042:abc"), "deterministic");
+    for other in [
+        derive_idempotent_operation_id(&[8u8; 32], "support-agent", "send_email", "T-1042:abc"),
+        derive_idempotent_operation_id(&key, "billing-agent", "send_email", "T-1042:abc"),
+        derive_idempotent_operation_id(&key, "support-agent", "send_sms", "T-1042:abc"),
+        derive_idempotent_operation_id(&key, "support-agent", "send_email", "T-1042:abd"),
+        // Field boundaries are unambiguous.
+        derive_idempotent_operation_id(&key, "support-agentsend_email", "", "T-1042:abc"),
+    ] {
+        assert_ne!(id, other);
+    }
+}

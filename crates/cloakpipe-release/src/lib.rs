@@ -5,6 +5,9 @@
 //! MCP servers, retrieval, policies, runtime and dependencies. This crate
 //! parses and validates manifests, computes their canonical hash, and diffs two
 //! releases to decide which assurance suites a change requires.
+//!
+//! [`v1`] is the single-file `cloakpipe.manifest.yaml` format the tool gate
+//! runs on; it compiles to the same tool rules as a legacy [`contract`].
 
 pub mod action;
 mod canonical;
@@ -13,7 +16,9 @@ mod diff;
 mod manifest;
 pub mod namespace;
 mod reference;
+mod rules;
 mod statement;
+pub mod v1;
 mod validate;
 
 pub use canonical::{ReleaseHash, ReleaseHashParseError, HASH_DOMAIN};

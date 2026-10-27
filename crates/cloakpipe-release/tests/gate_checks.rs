@@ -40,8 +40,12 @@ fn a_release_without_runtime_pins_passes_gate_checks_but_is_not_certifiable() {
 }
 
 #[test]
-fn the_support_agent_example_is_a_valid_gate_input() {
-    let m = parse_path(&root().join("examples/support-agent/release.yaml")).unwrap();
+fn the_examples_are_valid_gate_inputs() {
+    // The support agent runs on a single-file v1 manifest...
+    let v1 = cloakpipe_release::v1::Manifest::parse_path(&root().join("examples/support-agent/cloakpipe.manifest.yaml")).unwrap();
+    assert_eq!(v1.release, "support-agent");
+    // ...the action-boundary example on the legacy AgentRelease format.
+    let m = parse_path(&root().join("examples/action-boundary/release.yaml")).unwrap();
     assert_eq!(m.gate_issues(), vec![]);
 }
 

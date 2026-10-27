@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakpipe.co/schemas/cloakpipe.manifest/v1.json",
+  "title": "CloakPipe manifest (cloakpipe.manifest.yaml)",
+  "description": "The single-file manifest the CloakPipe tool gate runs on: which tools an agent release may call, what each call may carry, which calls have side effects, and which need a signed approval. Closed by default: a tool that is not declared is refused (undeclared_tool), and so is an argument not declared under its tool (undeclared_argument). The manifest digest is sha256 over the RFC 8785 (JCS) encoding of the parsed document; a referenced policy file is digested separately over its bytes. Semantic checks the schema cannot express (patterns compile, keywords match the constraint's type, a constraint restricts something, idempotency_key templates and approval.when conditions parse and use declared arguments, side_effect and effect agree, idempotency_key only on side-effecting tools, duplicate keys) are enforced by the CloakPipe loader.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["release", "version"],
+  "properties": {
+    "release": {
+      "description": "The release name: the agent this manifest is for.",
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "description": "The release version. Quote it in YAML when it could read as a number (\"1.10\").",
+      "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "number" }]
+    },
+    "policy": {
+      "description": "Optional path to a Cedar policy file, relative to the manifest's directory.",
+      "type": "string",
+      "minLength": 1
+    },
+    "tools": {
+      "description": "The tools the release may call, by name as in tools/call.",
+      "type": ["object", "null"],
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/tool" }
+    }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "description": "The arguments a call may carry. Absent: the tool takes no arguments.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/arg" }
+        },
+        "side_effect": {
+          "description": "The call changes state outside the agent: it is an operation, tracked in the operations store so it is never silently re-executed. true is effect: write.",
+          "type": "boolean"
+        },
+        "effect": {
+          "description": "What the call does to the world. write and irreversible are side effects.",
+          "enum": ["read", "write", "irreversible"]
+        },
+        "idempotency_key": {
+          "description": "Side-effecting tools only. A template naming the operation: literal text with {path}, {task.path} and {sha256(path)} placeholders over the call's arguments and the trusted task context, e.g. \"{ticket_id}:{sha256(body)}\".",
+          "type": "string",
+          "pattern": "\\{[^{}]+\\}"
+        },
+        "approval": { "$ref": "#/$defs/approval" }
+      }
+    },
+    "approval": {
+      "description": "The call needs a signed approval receipt for its exact arguments.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "description": "Approval is needed only when this holds: comparisons `path OP literal` (OP one of > >= < <= == !=; literal a number, a quoted string, true or false) joined by && and || with parentheses. A comparison that meets a missing value or another type holds. Absent: always.",
+          "type": "string",
+          "minLength": 1
+        },
+        "approvers": {
+          "description": "Free-form routes for an approval broker (e.g. slack:#support-leads), reported in the approval_required refusal with the call fingerprint.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "ttl": {
+          "description": "The longest validity window (notAfter - approvedAt) a receipt may carry, e.g. 15m, 1h30m, 1d.",
+          "type": "string",
+          "pattern": "^(?:[0-9]+d)?(?:[0-9]+h)?(?:[0-9]+m)?(?:[0-9]+s)?$",
+          "minLength": 2
+        }
+      }
+    },
+    "arg": {
+      "description": "One argument's constraint. Optional unless required: true.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["string", "number", "integer", "boolean", "object", "array"] },
+        "pattern": { "description": "A regex the whole string must match (anchored).", "type": "string" },
+        "enum": { "type": "array", "minItems": 1 },
+        "const": {},
+        "min_len": { "description": "Minimum length (Unicode scalars; items for an array).", "type": "integer", "minimum": 0 },
+        "max_len": { "description": "Maximum length (Unicode scalars; items for an array).", "type": "integer", "minimum": 0 },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "items": { "$ref": "#/$defs/arg" },
+        "properties": {
+          "description": "An object's members (closed: no others).",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/arg" }
+        },
+        "required": { "type": "boolean" },
+        "one_of_context": {
+          "description": "Dotted paths into the trusted task context (a task. prefix is accepted). The value must equal one of their values, each a string or an array of strings.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "or_pattern": {
+          "description": "With one_of_context: a regex (unanchored search) that also lets a string through.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

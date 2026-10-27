@@ -45,6 +45,10 @@ pub const TOOL_CALL_FINGERPRINT_DOMAIN: &str = "cloakpipe.co/tool-call/v1";
 /// approval receipt). New in `cloakpipe.co`.
 pub const OPERATION_ID_DOMAIN: &str = "cloakpipe.co/operation/v1";
 
+/// Domain separator of an operation id named by a v1 manifest's
+/// `idempotency_key` template.
+pub const IDEMPOTENCY_KEY_OPERATION_ID_DOMAIN: &str = "cloakpipe.co/operation/idempotency-key/v1";
+
 /// Domain separator of a release audit pack's signing input.
 pub const RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.co/release-audit-pack/v1alpha1";
 pub const LEGACY_RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.dev/release-audit-pack/v1alpha1";
@@ -64,6 +68,9 @@ pub const APPROVAL_PREDICATE_TYPE: &str = "https://cloakpipe.co/attestations/app
 /// `$id` of `schemas/agent-release.schema.json`.
 pub const AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/agent-release/v1alpha1.json";
 pub const LEGACY_AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.dev/schemas/agent-release/v1alpha1.json";
+
+/// `$id` of `schemas/cloakpipe.manifest.schema.json` (the single-file v1 manifest).
+pub const MANIFEST_V1_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/cloakpipe.manifest/v1.json";
 
 /// `$id` of `schemas/tool-contract.schema.json`.
 pub const TOOL_CONTRACT_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/tool-contract/v1alpha1.json";

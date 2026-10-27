@@ -226,7 +226,7 @@ fn an_unknown_argument_is_refused_without_naming_it() {
     let mut a = args();
     a["owner_override"] = json!("mallory");
     let r = run(gate(contract(&[]), Some(task())), &[call(3, "crm.patch", a)]);
-    refused(&r, 3, "argument_not_allowed", None);
+    refused(&r, 3, "undeclared_argument", None);
     let refusal = r.messages.iter().find(|m| m["id"] == 3).unwrap().to_string();
     assert!(!refusal.contains("owner_override") && !refusal.contains("mallory"), "{refusal}");
     no_values_in_ledger(&r, &["owner_override", "mallory"]);

@@ -73,12 +73,13 @@ mod manifest_only {
         root(&format!("../../examples/support-agent/{name}"))
     }
 
-    /// The gate flags for the support-agent example.
-    fn example_gate() -> Vec<String> {
+    /// The gate flags for the support-agent example, with its operations
+    /// store in `dir` (send_email and issue_refund are side-effecting).
+    fn example_gate(dir: &std::path::Path) -> Vec<String> {
         [
-            "--manifest", &example("release.yaml"),
-            "--tool-contract", &example("support-tools.contract.yaml"),
+            "--manifest", &example("cloakpipe.manifest.yaml"),
             "--task-context", &example("task-context.json"),
+            "--operations-db", &dir.join("ops.db").to_string_lossy(),
         ]
         .map(String::from)
         .to_vec()
@@ -113,7 +114,20 @@ mod manifest_only {
     }
 
     fn email(to: &str) -> Value {
-        json!({"to": to, "subject": "Your refund", "body": "Hi Dana, your refund for T-1042 is on its way."})
+        json!({"ticket_id": "T-1042", "to": to, "subject": "Your refund", "body": "Hi Dana, your refund for T-1042 is on its way."})
+    }
+
+    fn refund(amount: u64) -> Value {
+        json!({"ticket_id": "T-1042", "amount": amount})
+    }
+
+    fn names(seen: &[Value]) -> Vec<&str> {
+        seen.iter().map(|c| c["name"].as_str().unwrap()).collect()
+    }
+
+    fn cli(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+        let out = bin().current_dir(dir).args(args).output().unwrap();
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     }
 
     #[test]
@@ -123,17 +137,17 @@ mod manifest_only {
         let dir = tempfile::tempdir().unwrap();
         let (code, msgs, seen, err) = example_proxy(
             dir.path(),
-            &example_gate(),
+            &example_gate(dir.path()),
             &[
-                tool_call(1, "lookup_ticket", json!({"ticket_id": "T-1042"})),
+                tool_call(1, "read_ticket", json!({"ticket_id": "T-1042"})),
                 tool_call(2, "send_email", email("dana@customer.example")),
                 tool_call(3, "send_email", email("attacker@evil.example")),
                 tool_call(4, "export_customers", json!({})),
+                tool_call(5, "read_ticket", json!({"ticket_id": "T-1042", "include": "all"})),
             ],
         );
         assert_eq!(code, 0, "{err}");
-        let names: Vec<&str> = seen.iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["lookup_ticket", "send_email"], "only the conforming calls reach the upstream: {seen:?}");
+        assert_eq!(names(&seen), ["read_ticket", "send_email"], "only the conforming calls reach the upstream: {seen:?}");
         assert!(!format!("{seen:?}").contains("evil.example"), "{seen:?}");
         // The allowed email reaches the tool exactly as the agent sent it:
         // the gate never rewrites an allowed call (no --transform pii).
@@ -148,44 +162,175 @@ mod manifest_only {
         assert_eq!(denied["error"]["data"]["tool"], "send_email", "{denied}");
         assert!(!denied.to_string().contains("evil.example"), "a refusal never echoes the value: {denied}");
         assert_eq!(refusal(&msgs, 4).as_deref(), Some("undeclared_tool"), "{msgs:?}");
+        let extra = msgs.iter().find(|m| m["id"] == 5).unwrap();
+        assert_eq!(extra["error"]["data"]["reason"], "undeclared_argument", "{extra}");
+        assert!(!extra.to_string().contains("include"), "the undeclared argument is not named: {extra}");
         assert!(!err.contains("certification"), "no certification warning in the default build: {err}");
+        assert!(!err.contains("deprecated"), "a v1 manifest is not deprecated: {err}");
     }
 
     #[test]
-    fn mcp_proxy_accepts_release_without_runtime_pins() {
+    fn an_internal_recipient_matches_the_or_pattern() {
         let dir = tempfile::tempdir().unwrap();
-        // The example release pins no code, prompts, model or runtime image:
-        // not certifiable...
-        let out = bin().args(["release", "validate", &example("release.yaml")]).output().unwrap();
-        assert!(!out.status.success(), "the example release is not certifiable: {}", String::from_utf8_lossy(&out.stdout));
-        // ...but the gate needs only its tools and tool contracts.
         let (code, msgs, seen, err) =
-            example_proxy(dir.path(), &example_gate(), &[tool_call(1, "lookup_ticket", json!({"ticket_id": "T-1042"}))]);
+            example_proxy(dir.path(), &example_gate(dir.path()), &[tool_call(1, "send_email", email("billing@ourcompany.com"))]);
         assert_eq!(code, 0, "{err}");
-        assert_eq!(refusal(&msgs, 1), None, "{msgs:?} {err}");
-        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(refusal(&msgs, 1), None, "{msgs:?}");
+        assert_eq!(names(&seen), ["send_email"]);
     }
 
     #[test]
-    fn mcp_proxy_refuses_a_release_it_cannot_read() {
+    fn a_retried_email_is_the_same_operation_and_never_sent_twice() {
         let dir = tempfile::tempdir().unwrap();
-        let release = std::fs::read_to_string(example("release.yaml")).unwrap();
+        let (_, msgs, seen, err) =
+            example_proxy(dir.path(), &example_gate(dir.path()), &[tool_call(1, "send_email", email("dana@customer.example"))]);
+        assert_eq!(refusal(&msgs, 1), None, "{msgs:?} {err}");
+        assert_eq!(names(&seen), ["send_email"]);
+        // The agent retries after a restart: the stored result is replayed.
+        let (_, msgs, seen, err) =
+            example_proxy(dir.path(), &example_gate(dir.path()), &[tool_call(7, "send_email", email("dana@customer.example"))]);
+        assert!(seen.is_empty(), "the email is not sent again: {seen:?} {err}");
+        let answer = msgs.iter().find(|m| m["id"] == 7).expect("an answer");
+        assert_eq!(answer["result"]["content"][0]["text"], "send_email: done", "the stored result is replayed: {answer}");
+        // Same ticket and body (the idempotency key) to another allowed
+        // recipient: the same operation with other arguments is a conflict,
+        // never a second send.
+        let mut changed = email("dana@customer.example");
+        changed["to"] = json!("support@ourcompany.com");
+        let (_, msgs, seen, _) = example_proxy(dir.path(), &example_gate(dir.path()), &[tool_call(8, "send_email", changed)]);
+        assert!(seen.is_empty(), "{seen:?}");
+        assert_eq!(refusal(&msgs, 8).as_deref(), Some("operation_conflict"), "{msgs:?}");
+        // Another body is another operation: it is sent.
+        let mut second = email("dana@customer.example");
+        second["body"] = json!("A second, different email.");
+        let (_, msgs, seen, _) = example_proxy(dir.path(), &example_gate(dir.path()), &[tool_call(9, "send_email", second)]);
+        assert_eq!(refusal(&msgs, 9), None, "{msgs:?}");
+        assert_eq!(names(&seen), ["send_email"]);
+    }
+
+    #[test]
+    fn a_large_refund_needs_an_approval_routed_to_the_manifest_approvers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, msgs, seen, err) = example_proxy(
+            dir.path(),
+            &example_gate(dir.path()),
+            &[tool_call(1, "issue_refund", refund(50)), tool_call(2, "issue_refund", refund(350))],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(refusal(&msgs, 1), None, "50 is under the approval threshold: {msgs:?}");
+        assert_eq!(names(&seen), ["issue_refund"]);
+        let denied = msgs.iter().find(|m| m["id"] == 2).unwrap();
+        assert_eq!(denied["error"]["data"]["reason"], "approval_required", "{denied}");
+        assert_eq!(denied["error"]["data"]["approvers"], json!(["slack:#support-leads"]), "{denied}");
+        // The fingerprint is the one `cloakpipe action fingerprint` prints.
+        let args = dir.path().join("refund.json");
+        std::fs::write(&args, refund(350).to_string()).unwrap();
+        let (code, out, err) = cli(
+            dir.path(),
+            &["action", "fingerprint", "--manifest", &example("cloakpipe.manifest.yaml"), "--tool", "issue_refund", "--args", &args.to_string_lossy()],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(denied["error"]["data"]["fingerprint"], out.trim(), "{denied}");
+    }
+
+    #[test]
+    fn an_approved_refund_runs_and_a_reused_receipt_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        let (code, _, err) = cli(dir.path(), &["release", "keygen", "--out", &d("approver.json")]);
+        assert_eq!(code, 0, "{err}");
+        std::fs::write(d("refund.json"), refund(350).to_string()).unwrap();
+        let (code, _, err) = cli(
+            dir.path(),
+            &[
+                "approve", "--manifest", &example("cloakpipe.manifest.yaml"), "--tool", "issue_refund",
+                "--args", &d("refund.json"), "--task-context", &example("task-context.json"),
+                "--key", &d("approver.json"), "--expires", "15m", "--out", &d("approvals"),
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let mut gate = example_gate(dir.path());
+        gate.extend(["--approvals", &d("approvals"), "--approver-key", &d("approver.json")].map(String::from));
+        let (code, msgs, seen, err) = example_proxy(
+            dir.path(),
+            &gate,
+            &[tool_call(1, "issue_refund", refund(350)), tool_call(2, "issue_refund", refund(500))],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(refusal(&msgs, 1), None, "the approved call runs: {msgs:?}");
+        assert_eq!(refusal(&msgs, 2).as_deref(), Some("approval_required"), "the receipt covers 350 only: {msgs:?}");
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0]["arguments"], refund(350));
+    }
+
+    #[test]
+    fn a_receipt_valid_longer_than_the_ttl_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        cli(dir.path(), &["release", "keygen", "--out", &d("approver.json")]);
+        std::fs::write(d("refund.json"), refund(350).to_string()).unwrap();
+        let (code, _, err) = cli(
+            dir.path(),
+            &[
+                "approve", "--manifest", &example("cloakpipe.manifest.yaml"), "--tool", "issue_refund",
+                "--args", &d("refund.json"), "--task-context", &example("task-context.json"),
+                "--key", &d("approver.json"), "--expires", "1h", "--out", &d("approvals"),
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let mut gate = example_gate(dir.path());
+        gate.extend(["--approvals", &d("approvals"), "--approver-key", &d("approver.json")].map(String::from));
+        let (_, msgs, seen, _) = example_proxy(dir.path(), &gate, &[tool_call(1, "issue_refund", refund(350))]);
+        assert_eq!(refusal(&msgs, 1).as_deref(), Some("approval_invalid"), "1h receipt vs a 15m ttl: {msgs:?}");
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn the_example_manifest_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, out, err) = cli(dir.path(), &["manifest", "validate", &example("cloakpipe.manifest.yaml")]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("support-agent@2026.10.3"), "{out}");
+    }
+
+    #[test]
+    fn mcp_proxy_refuses_a_manifest_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = std::fs::read_to_string(example("cloakpipe.manifest.yaml")).unwrap();
         let cases = [
-            // A tool reference the gate cannot name would silently drop the tool.
-            ("tool:send_email@1", "tool:send_email"),
-            ("tool:send_email@1", "prompt:send_email@1"),
-            // Not an Agent Release.
-            ("kind: AgentRelease", "kind: ToolContract"),
+            // An unknown key would silently drop a rule.
+            ("side_effect: true", "sideEffect: true"),
+            ("max_len: 200", "maxLength: 200"),
+            // A condition that cannot be parsed.
+            ("when: \"amount > 100\"", "when: \"amount >\""),
+            // A condition on an argument the tool does not declare.
+            ("when: \"amount > 100\"", "when: \"total > 100\""),
+            // A template over an undeclared argument.
+            ("{sha256(body)}", "{sha256(message)}"),
+            // Neither format.
+            ("release: support-agent", "name: support-agent"),
         ];
         for (from, to) in cases {
-            let path = dir.path().join("release.yaml");
-            std::fs::write(&path, release.replace(from, to)).unwrap();
-            let mut gate = example_gate();
+            let path = dir.path().join("cloakpipe.manifest.yaml");
+            assert!(manifest.contains(from), "{from}");
+            std::fs::write(&path, manifest.replace(from, to)).unwrap();
+            let mut gate = example_gate(dir.path());
             gate[1] = path.to_string_lossy().into_owned();
-            let (code, _, seen, err) = example_proxy(dir.path(), &gate, &[tool_call(1, "lookup_ticket", json!({"ticket_id": "T-1042"}))]);
+            let (code, _, seen, err) = example_proxy(dir.path(), &gate, &[tool_call(1, "read_ticket", json!({"ticket_id": "T-1042"}))]);
             assert_eq!(code, 1, "{to}: {err}");
             assert!(seen.is_empty(), "{to}: the upstream must not start");
         }
+    }
+
+    #[test]
+    fn a_v1_manifest_takes_no_tool_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gate = example_gate(dir.path());
+        gate.extend(["--tool-contract", &root("../../examples/action-boundary/crm-tools.contract.yaml")].map(String::from));
+        let (code, _, seen, err) = example_proxy(dir.path(), &gate, &[tool_call(1, "read_ticket", json!({"ticket_id": "T-1042"}))]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("--tool-contract"), "{err}");
+        assert!(seen.is_empty());
     }
 
     #[test]
@@ -200,8 +345,8 @@ mod manifest_only {
             ["--revoked-key", "k1"],
             ["--environment", "staging"],
         ] {
-            let extra = [example_gate(), flags.map(String::from).to_vec()].concat();
-            let (code, _, seen, err) = example_proxy(dir.path(), &extra, &[tool_call(1, "lookup_ticket", json!({"ticket_id": "T-1042"}))]);
+            let extra = [example_gate(dir.path()), flags.map(String::from).to_vec()].concat();
+            let (code, _, seen, err) = example_proxy(dir.path(), &extra, &[tool_call(1, "read_ticket", json!({"ticket_id": "T-1042"}))]);
             assert_eq!(code, 2, "{flags:?}: {err}");
             assert!(err.contains("unexpected argument"), "{flags:?}: {err}");
             assert!(seen.is_empty(), "{flags:?}: the upstream must not start");
@@ -211,11 +356,24 @@ mod manifest_only {
     #[test]
     fn warn_mode_forwards_and_reports() {
         let dir = tempfile::tempdir().unwrap();
-        let extra = [example_gate(), vec!["--gate".into(), "warn".into()]].concat();
+        let extra = [example_gate(dir.path()), vec!["--gate".into(), "warn".into()]].concat();
         let (_, msgs, seen, err) = example_proxy(dir.path(), &extra, &[tool_call(1, "export_customers", json!({}))]);
         assert_eq!(seen.len(), 1, "warn mode forwards: {seen:?}");
         assert_eq!(refusal(&msgs, 1), None);
         assert!(err.contains("warn mode: forwarded") && err.contains("undeclared_tool"), "the call's violation is reported: {err}");
+    }
+
+    #[test]
+    fn a_legacy_manifest_still_runs_with_a_deprecation_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, _, seen, err) = example_proxy(
+            dir.path(),
+            &["--manifest".into(), manifest()],
+            &[tool_call(1, "refund", json!({}))],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(err.contains("deprecated") && err.contains("cloakpipe.manifest.yaml"), "{err}");
     }
 }
 

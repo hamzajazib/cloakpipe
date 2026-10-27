@@ -31,6 +31,7 @@ use crate::canonical::ReleaseHash;
 use crate::manifest::Format;
 use crate::namespace::{self, Namespace};
 use crate::reference::{is_valid_name, RefKind, Reference};
+use crate::rules::{ApprovalRule, Effect, IdempotencyKey};
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
@@ -93,6 +94,17 @@ pub struct ToolRule {
     pub arguments: BTreeMap<String, Constraint>,
     #[serde(default)]
     pub required: Vec<String>,
+    /// v1 manifest only: the declared `effect` (`side_effect: true` is
+    /// `write`); `side_effect` above is derived from it.
+    #[serde(skip)]
+    pub effect: Option<Effect>,
+    /// v1 manifest only: the operation's idempotency key template.
+    #[serde(skip)]
+    pub idempotency_key: Option<IdempotencyKey>,
+    /// v1 manifest only: when approval is needed, who routes it, and the
+    /// longest receipt validity accepted. `requires_approval` is set with it.
+    #[serde(skip)]
+    pub approval: Option<ApprovalRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -151,11 +163,22 @@ pub struct Constraint {
     pub max_items: Option<u64>,
     /// `task.<key>[.<key>...]`.
     pub bind_to: Option<String>,
+    /// v1 manifest only (`one_of_context`): dotted task context paths
+    /// (`task.` prefix stripped); the value must equal one of their values
+    /// (a string, or any element of an array).
     #[serde(skip)]
-    regex: Option<regex::Regex>,
+    pub one_of_context: Option<Vec<String>>,
+    /// v1 manifest only (`or_pattern`): an unanchored regex that also lets a
+    /// string value through when no context value matches.
+    #[serde(skip)]
+    pub or_pattern: Option<String>,
+    #[serde(skip)]
+    pub(crate) regex: Option<regex::Regex>,
+    #[serde(skip)]
+    pub(crate) or_regex: Option<regex::Regex>,
 }
 
-fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+pub(crate) fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
     Value::deserialize(d).map(Some)
 }
 
@@ -164,13 +187,13 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
 pub enum ViolationCode {
     /// A required argument is absent.
     ArgumentMissing,
-    /// An argument the contract does not list (its name is not reported).
-    ArgumentNotAllowed,
+    /// An argument the contract does not declare (its name is not reported).
+    UndeclaredArgument,
     /// A value breaks its constraint.
     ArgumentInvalid,
-    /// A `bindTo` value differs from the task context.
+    /// A `bindTo` / `one_of_context` value differs from the task context.
     ScopeMismatch,
-    /// A `bindTo` needs a task context key that is not there.
+    /// A `bindTo` / `one_of_context` needs a task context key that is not there.
     TaskContextMissing,
 }
 
@@ -178,7 +201,7 @@ impl ViolationCode {
     pub fn code(self) -> &'static str {
         match self {
             ViolationCode::ArgumentMissing => "argument_missing",
-            ViolationCode::ArgumentNotAllowed => "argument_not_allowed",
+            ViolationCode::UndeclaredArgument => "undeclared_argument",
             ViolationCode::ArgumentInvalid => "argument_invalid",
             ViolationCode::ScopeMismatch => "scope_mismatch",
             ViolationCode::TaskContextMissing => "task_context_missing",
@@ -299,6 +322,18 @@ impl ToolContract {
 }
 
 impl ToolRule {
+    /// Whether this call needs an approval receipt: the tool requires
+    /// approval and its `when` condition (if any) holds for the arguments.
+    pub fn needs_approval(&self, arguments: Option<&Value>) -> bool {
+        if !self.requires_approval {
+            return false;
+        }
+        match self.approval.as_ref().and_then(|a| a.when.as_ref()) {
+            Some(when) => when.matches(arguments.unwrap_or(&Value::Null)),
+            None => true,
+        }
+    }
+
     /// Check a call's raw arguments (absent arguments are an empty object).
     pub fn check(&self, arguments: Option<&Value>, task: Option<&Value>) -> Result<(), Violation> {
         let empty = Map::new();
@@ -332,7 +367,7 @@ impl Constraint {
         self.items.is_some() || self.min_items.is_some() || self.max_items.is_some()
     }
 
-    fn validate(&mut self, path: &str) -> Result<(), String> {
+    pub(crate) fn validate(&mut self, path: &str) -> Result<(), String> {
         let families = [
             (self.has_string_keywords(), &[JsonType::String][..]),
             (self.has_number_keywords(), &[JsonType::Number, JsonType::Integer][..]),
@@ -352,6 +387,7 @@ impl Constraint {
             || self.one_of.is_some()
             || self.constant.is_some()
             || self.bind_to.is_some()
+            || self.one_of_context.is_some()
             || !used.is_empty();
         if !restricts {
             return Err(format!("{path}: the constraint does not restrict the value"));
@@ -364,6 +400,24 @@ impl Constraint {
             if !ok {
                 return Err(format!("{path}: bindTo must be task.<key>, got {key:?}"));
             }
+        }
+        if let Some(keys) = &mut self.one_of_context {
+            if keys.is_empty() {
+                return Err(format!("{path}: one_of_context is empty"));
+            }
+            for k in keys.iter_mut() {
+                let key = k.strip_prefix("task.").unwrap_or(k);
+                if key.is_empty() || !key.split('.').all(|s| !s.is_empty()) {
+                    return Err(format!("{path}: one_of_context entries are dotted task context paths, got {k:?}"));
+                }
+                *k = key.to_string();
+            }
+        }
+        if let Some(p) = &self.or_pattern {
+            if self.one_of_context.is_none() {
+                return Err(format!("{path}: or_pattern is an alternative to one_of_context, which is missing"));
+            }
+            self.or_regex = Some(regex::Regex::new(p).map_err(|e| format!("{path}: bad or_pattern: {e}"))?);
         }
         if let Some(p) = &self.pattern {
             let re = regex::Regex::new(&format!("^(?:{p})$")).map_err(|e| format!("{path}: bad pattern: {e}"))?;
@@ -394,6 +448,22 @@ impl Constraint {
                 task_value(task, key).ok_or_else(|| Violation::at(ViolationCode::TaskContextMissing, path))?;
             if v != expected {
                 return Err(Violation::at(ViolationCode::ScopeMismatch, path));
+            }
+        }
+        if let Some(keys) = &self.one_of_context {
+            let mut missing = false;
+            let mut matched = false;
+            for k in keys {
+                match context_value(task, k) {
+                    None => missing = true,
+                    Some(Value::Array(a)) => matched |= a.contains(v),
+                    Some(x) => matched |= x == v,
+                }
+            }
+            let pattern = || self.or_regex.as_ref().zip(v.as_str()).is_some_and(|(re, s)| re.is_match(s));
+            if !matched && !pattern() {
+                let code = if missing { ViolationCode::TaskContextMissing } else { ViolationCode::ScopeMismatch };
+                return Err(Violation::at(code, path));
             }
         }
         if self.ty.is_some_and(|ty| !ty.matches(v)) {
@@ -475,7 +545,7 @@ fn check_object(
     task: Option<&Value>,
 ) -> Result<(), Violation> {
     if !additional && o.keys().any(|k| !properties.is_some_and(|p| p.contains_key(k))) {
-        return Err(Violation::at(ViolationCode::ArgumentNotAllowed, path));
+        return Err(Violation::at(ViolationCode::UndeclaredArgument, path));
     }
     let mut missing: Vec<&String> = required.iter().filter(|r| !o.contains_key(r.as_str())).collect();
     missing.sort();
@@ -495,7 +565,7 @@ fn check_object(
 }
 
 /// `path` + `/name`, escaped as a JSON pointer (RFC 6901).
-fn child(path: &str, name: &str) -> String {
+pub(crate) fn child(path: &str, name: &str) -> String {
     format!("{path}/{}", name.replace('~', "~0").replace('/', "~1"))
 }
 
@@ -508,8 +578,17 @@ fn task_value<'a>(task: Option<&'a Value>, key: &str) -> Option<&'a Value> {
     Some(v)
 }
 
+/// The task context value at a dotted path (no `task.` prefix).
+fn context_value<'a>(task: Option<&'a Value>, key: &str) -> Option<&'a Value> {
+    let mut v = task?;
+    for part in key.split('.') {
+        v = v.as_object()?.get(part)?;
+    }
+    Some(v)
+}
+
 /// Exact for integers (any mix of signed and unsigned); IEEE otherwise.
-fn cmp_number(a: &Number, b: &Number) -> Option<Ordering> {
+pub(crate) fn cmp_number(a: &Number, b: &Number) -> Option<Ordering> {
     let int = |n: &Number| n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from));
     match (int(a), int(b)) {
         (Some(x), Some(y)) => Some(x.cmp(&y)),
@@ -520,7 +599,7 @@ fn cmp_number(a: &Number, b: &Number) -> Option<Ordering> {
 /// A JSON value read without serde_json's last-wins duplicate keys: a
 /// contract with a duplicate key could mean different things to different
 /// readers, so it is refused.
-struct Strict(Value);
+pub(crate) struct Strict(pub(crate) Value);
 
 impl<'de> Deserialize<'de> for Strict {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
