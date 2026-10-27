@@ -15,6 +15,7 @@ mod cert;
 mod commands;
 mod gate;
 mod keys;
+mod manifest;
 mod operations;
 mod release;
 
@@ -73,6 +74,11 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         action: SessionCommands,
+    },
+    /// The tool gate's manifest (cloakpipe.manifest.yaml): validate, hash
+    Manifest {
+        #[command(subcommand)]
+        action: manifest::ManifestCommands,
     },
     /// Agent Release manifests: validate, hash, diff, inspect, keygen
     Release {
@@ -209,6 +215,7 @@ fn main() -> anyhow::Result<()> {
     // prints machine-readable output and uses distinct exit codes, so it runs
     // before logging setup and outside the async runtime.
     let command = match cli.command {
+        Commands::Manifest { action } => std::process::exit(manifest::run(action)),
         Commands::Release { action } => std::process::exit(release::run(action)),
         #[cfg(feature = "certification")]
         Commands::Eval { action } => std::process::exit(cert::eval(action)),
@@ -248,7 +255,8 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Sessions { action } => commands::sessions(&config, action).await,
         #[cfg(feature = "certification")]
         Commands::Eval { .. } => unreachable!("handled above"),
-        Commands::Release { .. }
+        Commands::Manifest { .. }
+        | Commands::Release { .. }
         | Commands::Anchor(_)
         | Commands::Action { .. }
         | Commands::Approve(_)

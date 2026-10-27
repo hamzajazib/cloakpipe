@@ -1,5 +1,7 @@
 {
   "taskId": "t-1042",
-  "ticket_id": "T-1042",
-  "customer_email": "dana@customer.example"
+  "ticket": {
+    "id": "T-1042",
+    "customer_email": "dana@customer.example"
+  }
 }

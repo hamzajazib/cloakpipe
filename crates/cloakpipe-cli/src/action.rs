@@ -5,11 +5,12 @@
 //! task context, undeclared tool), 2 usage or I/O error.
 
 use crate::keys::{invalid, now_arg, read, rfc3339, signing_key, usage, Res};
+use crate::manifest::{kind, load_v1, Loaded};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
 use cloakpipe_receipt::approval::{is_valid_operation_id, OPERATION_ID_FORBIDDEN, parse_json_strict, sign_approval, Approval};
 use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
-use cloakpipe_release::{AgentRelease, Reference};
+use cloakpipe_release::v1::ManifestKind;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,8 @@ pub enum ActionCommands {
 
 #[derive(Args)]
 pub struct FingerprintArgs {
-    /// Agent Release manifest the call runs under
+    /// Manifest the call runs under (cloakpipe.manifest.yaml, or a legacy
+    /// certifiable Agent Release)
     #[arg(long)]
     pub manifest: PathBuf,
     /// Tool name, as in tools/call
@@ -35,7 +37,8 @@ pub struct FingerprintArgs {
 
 #[derive(Args)]
 pub struct ApproveArgs {
-    /// Agent Release manifest the call runs under
+    /// Manifest the call runs under (cloakpipe.manifest.yaml, or a legacy
+    /// certifiable Agent Release)
     #[arg(long)]
     pub manifest: PathBuf,
     /// Tool name, as in tools/call (must be declared by the manifest)
@@ -74,13 +77,17 @@ pub fn approve(a: ApproveArgs) -> i32 {
     crate::keys::finish(approve_inner(&a))
 }
 
-/// The manifest and the fingerprint of the call `tool(arguments file)`.
-fn call(manifest: &Path, tool: &str, arguments: &Path) -> Res<(AgentRelease, ToolCallFingerprint)> {
-    let m = load_valid(manifest)?;
+/// The manifest and the fingerprint of the call `tool(arguments file)`. A
+/// legacy Agent Release must be certifiable, as before.
+fn call(manifest: &Path, tool: &str, arguments: &Path) -> Res<(Loaded, ToolCallFingerprint)> {
+    let m = match kind(manifest)? {
+        ManifestKind::V1 => Loaded::V1(load_v1(manifest)?),
+        ManifestKind::Legacy => Loaded::Legacy(Box::new(load_valid(manifest)?)),
+    };
     let src = read(arguments)?;
     let arguments: Value =
         parse_json_strict(&src).map_err(|e| invalid(format_args!("--args {}: not JSON: {e}", arguments.display())))?;
-    let fp = fingerprint(&m.manifest_hash(), tool, &arguments);
+    let fp = fingerprint(&m.digest(), tool, &arguments);
     Ok((m, fp))
 }
 
@@ -121,9 +128,8 @@ fn approve_inner(a: &ApproveArgs) -> Res<i32> {
     let not_after = now.checked_add_signed(expires).ok_or_else(|| usage("--expires: out of range"))?;
     let (key, keyid) = signing_key(&a.key)?;
     let (m, fp) = call(&a.manifest, &a.tool, &a.arguments)?;
-    let declared = m.spec.tools.iter().filter_map(|t| Reference::parse(&t.reference).ok()).any(|r| r.name == a.tool);
-    if !declared {
-        return Err(invalid(format_args!("tool {:?} is not declared by the release (spec.tools)", a.tool)));
+    if !m.declares(&a.tool) {
+        return Err(invalid(format_args!("tool {:?} is not declared by the manifest", a.tool)));
     }
     let task_src = read(&a.task_context)?;
     let task = parse_json_strict(&task_src)
@@ -133,7 +139,7 @@ fn approve_inner(a: &ApproveArgs) -> Res<i32> {
     };
 
     let approval = Approval {
-        release: m.manifest_hash().to_string(),
+        release: m.digest().to_string(),
         tool: a.tool.clone(),
         task_id: task_id.to_string(),
         operation_id,

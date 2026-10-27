@@ -12,9 +12,12 @@ import os
 import sys
 
 TOOLS = [
-    {"name": "lookup_ticket", "inputSchema": {"type": "object", "properties": {"ticket_id": {"type": "string"}}}},
+    {"name": "read_ticket", "inputSchema": {"type": "object", "properties": {"ticket_id": {"type": "string"}}}},
     {"name": "send_email", "inputSchema": {"type": "object", "properties": {
-        "to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}}},
+        "ticket_id": {"type": "string"}, "to": {"type": "string"}, "subject": {"type": "string"},
+        "body": {"type": "string"}}}},
+    {"name": "issue_refund", "inputSchema": {"type": "object", "properties": {
+        "ticket_id": {"type": "string"}, "amount": {"type": "number"}}}},
     {"name": "export_customers", "inputSchema": {"type": "object"}},
 ]
 
