@@ -5,8 +5,12 @@
 #
 # Values under one_of_context come from the trusted task context the
 # orchestrator writes (task-context.json), never from the model.
+#
+# A call that passes the contract below is then checked against the Cedar
+# policy (rate limits, refund tiers); see policies/support.cedar.
 release: support-agent
 version: 2026.10.3
+policy: ./policies/support.cedar
 tools:
   read_ticket:
     args:
@@ -25,9 +29,12 @@ tools:
   issue_refund:
     args:
       ticket_id: { type: string, one_of_context: ["ticket.id"], required: true }
-      amount: { type: number, min: 0, max: 500, required: true }
+      # Whole currency units: Cedar compares integers (Long).
+      amount: { type: integer, min: 0, max: 500, required: true }
     side_effect: true
-    # Refunds over 100 need a signed approval receipt for that exact call.
+    # Refunds over 100 need a signed approval receipt for that exact call,
+    # valid for at most 15 minutes. (The policy's @approval says the same;
+    # either one is enough to require it.)
     approval:
       when: "amount > 100"
       approvers: ["slack:#support-leads"]

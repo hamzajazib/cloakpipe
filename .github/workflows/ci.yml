@@ -232,9 +232,16 @@ jobs:
             ./target/debug/cloakpipe manifest validate "$m"
           done
           # A broken rule must fail validation, not load as something else.
-          sed 's/amount > 100/amount >/' examples/support-agent/cloakpipe.manifest.yaml > /tmp/bad.manifest.yaml
-          if ./target/debug/cloakpipe manifest validate /tmp/bad.manifest.yaml; then
+          # (A copy of the example, so its policy path resolves.)
+          work=$(mktemp -d); cp -R examples/support-agent/. "$work/"
+          sed 's/amount > 100/amount >/' examples/support-agent/cloakpipe.manifest.yaml > "$work/bad.manifest.yaml"
+          if ./target/debug/cloakpipe manifest validate "$work/bad.manifest.yaml"; then
             echo "an unparseable approval condition must not validate"; exit 1
+          fi
+          # So must a Cedar policy that does not parse.
+          sed 's/amount <= 100 };/amount <= };/' examples/support-agent/policies/support.cedar > "$work/policies/support.cedar"
+          if ./target/debug/cloakpipe manifest validate "$work/cloakpipe.manifest.yaml"; then
+            echo "an invalid Cedar policy must not validate"; exit 1
           fi
       - name: Golden hash is unchanged
         # A changed golden hash invalidates every release hash already issued.

