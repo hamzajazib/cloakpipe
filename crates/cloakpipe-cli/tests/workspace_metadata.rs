@@ -157,3 +157,15 @@ fn every_path_dependency_has_the_workspace_version() {
         }
     }
 }
+
+/// A release is documented: CHANGELOG.md has a dated section for the
+/// workspace version, and `cloakpipe --version` reports it.
+#[test]
+fn the_changelog_documents_the_workspace_version() {
+    let ws = workspace();
+    let version = ws["workspace"]["package"]["version"].as_str().unwrap();
+    let changelog = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
+    let heading = format!("## [{version}] - ");
+    assert!(changelog.lines().any(|l| l.starts_with(&heading)), "CHANGELOG.md needs a `{heading}YYYY-MM-DD` section");
+    assert_eq!(env!("CARGO_PKG_VERSION"), version);
+}

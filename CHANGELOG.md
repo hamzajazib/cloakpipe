@@ -9,7 +9,14 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
-- `mcp-proxy` in a `certification` (or `full`) build no longer refuses every call as `uncertified` when no certification flag is given: the legacy certification gate applies only with `--certification`, `--trust`, `--trust-key`, `--revoked-*` or `--environment`.
+## [0.12.0] - 2026-10-27
+
+CloakPipe is now a self-hosted policy-enforcement gate for AI agent tool
+calls: declare a single-file manifest (and optional Cedar policy), enforce it
+in `cloakpipe mcp-proxy`, and prove every decision with a signed, hash-chained
+ledger you can export and verify offline. Eval certification, RAG tooling and
+the ONNX NER detectors are now opt-in cargo features; the default binary is
+the lean gate. Licence: MIT only.
 
 ### Added
 
@@ -254,6 +261,14 @@ may contain breaking changes; these are marked **Breaking**.
   `release-pack` with a usage error (exit 2) naming the feature. The
   `cloakpipe` CLI enables it for `release audit-pack`. CI checks the
   dependency boundary with `tools/check_dep_boundary.sh`.
+
+### Fixed
+
+- `mcp-proxy` in a `certification` (or `full`) build no longer refuses every
+  call as `uncertified` when no certification flag is given: the legacy
+  certification gate applies only with `--certification`, `--trust`,
+  `--trust-key`, `--revoked-*` or `--environment`.
+
 
 ## [0.11.0] - 2026-10-12
 
@@ -551,7 +566,8 @@ may contain breaking changes; these are marked **Breaking**.
 
 - First release: privacy middleware for LLM and RAG pipelines.
 
-[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/rohansx/cloakpipe/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rohansx/cloakpipe/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rohansx/cloakpipe/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rohansx/cloakpipe/compare/v0.8.0...v0.9.0
