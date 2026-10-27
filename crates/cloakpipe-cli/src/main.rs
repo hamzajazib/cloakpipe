@@ -19,6 +19,7 @@ mod keys;
 mod manifest;
 mod operations;
 mod release;
+mod verify;
 
 use clap::{Parser, Subcommand};
 
@@ -58,7 +59,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server: gate tool calls with
     /// --manifest; mask PII in arguments only with --transform pii.
-    McpProxy(gate::McpProxyArgs),
+    McpProxy(Box<gate::McpProxyArgs>),
     /// CloakTree: vectorless document retrieval
     #[cfg(feature = "rag")]
     Tree {
@@ -101,11 +102,15 @@ enum Commands {
         #[command(subcommand)]
         action: operations::OperationsCommands,
     },
-    /// The gate's signed decision ledger: print its entries or the gate public key
+    /// The gate's signed decision ledger: print its entries or the gate public
+    /// key, or export a signed audit pack
     Ledger {
         #[command(subcommand)]
         action: evidence::LedgerCommands,
     },
+    /// Verify a gate audit pack (`ledger export`) offline: entries, chain,
+    /// signatures, anchored epochs (RFC 3161, Rekor) and gaps
+    Verify(verify::VerifyArgs),
     /// Evaluation runs: import external results as certification evidence
     #[cfg(feature = "certification")]
     Eval {
@@ -230,6 +235,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Approve(args) => std::process::exit(action::approve(args)),
         Commands::Operations { action } => std::process::exit(operations::run(action)),
         Commands::Ledger { action } => std::process::exit(evidence::run(action)),
+        Commands::Verify(args) => std::process::exit(verify::run(args)),
         other => other,
     };
 
@@ -254,7 +260,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&config).await,
-        Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
+        Commands::McpProxy(args) => commands::mcp_proxy(&config, *args).await,
         #[cfg(feature = "rag")]
         Commands::Tree { action } => commands::tree(&config, action).await,
         #[cfg(feature = "rag")]
@@ -268,7 +274,8 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         | Commands::Action { .. }
         | Commands::Approve(_)
         | Commands::Operations { .. }
-        | Commands::Ledger { .. } => unreachable!("handled above"),
+        | Commands::Ledger { .. }
+        | Commands::Verify(_) => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }

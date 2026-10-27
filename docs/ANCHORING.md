@@ -22,6 +22,54 @@ and log whose public keys travel in the bundle) still verify as before. They
 prove nothing about time to an outside party and should be treated as test
 fixtures.
 
+## Scheduled anchoring of the decision ledger
+
+`cloakpipe mcp-proxy` anchors its own decision ledger
+([ACTION_BOUNDARY.md](ACTION_BOUNDARY.md#the-decision-ledger)) on a
+schedule, off the request path:
+
+```bash
+cloakpipe mcp-proxy --manifest release.yaml --upstream "…" \
+  --anchor-every 500 --anchor-interval 10m \
+  [--tsa URL] [--tsa-root PEM] [--no-tsa] [--rekor URL] [--rekor-key PEM] [--no-rekor]
+```
+
+- A background thread, with its own connection to the ledger database,
+  seals the entries no epoch covers yet into the next **epoch** once N are
+  waiting (`--anchor-every`) or the interval has passed with anything new
+  (`--anchor-interval`: `30s`, `10m`, `1h`, `1d`). Either or both.
+- Epoch `n` (`cloakpipe.epoch/v1`) covers seq `first_seq..last_seq`.
+  Epoch 0 starts at seq 0 and each epoch starts right after the previous
+  one. Its head records `entries_head` (the `entry_hash` of `last_seq`,
+  which commits to every earlier entry through the chain), `prev_epoch`
+  (the previous head's `epoch_hash`, 64 zeros for epoch 0), `sealed_at` and
+  `signer`. `epoch_hash` is SHA-256 of `cloakpipe.epoch.v1`, a newline and
+  the head without `epoch_hash`/`sig` as sorted-key JSON; `sig` is Ed25519
+  over it by the gate signing key.
+- The anchored artifact is the canonical JSON of the whole signed head. The
+  TSA stamps its SHA-256; Rekor logs it as a `hashedrekord` signed
+  (Ed25519ph) by the gate key. Each answer is verified offline, as above,
+  before it is kept. Receipts are stored with the epoch in the ledger
+  database.
+- A failure prints `cloakpipe: anchor.failed epoch=<n> seq=<a>..<b>
+  anchor=rfc3161|rekor error=…`. What did succeed is kept, and the missing
+  anchor is retried after 30 seconds, and by the next run if the gate
+  stops first. On exit the gate seals the tail and tries once more.
+  Success prints `anchor.ok`.
+- By default the gate uses freetsa.org and rekor.sigstore.dev with their
+  roots and key built into `cloakpipe-verify` (`trust/`). `--tsa-root` /
+  `--rekor-key` replace them, as for a private TSA or log. Anchoring flags
+  need `--manifest` and the ledger (not `--no-ledger`), and are checked
+  before the gate starts.
+
+`cloakpipe ledger export --out audit-pack.tar` packs the entries with every
+epoch and its receipts. `cloakpipe verify audit-pack.tar` and
+`cloakpipe-verify pack audit-pack.tar` check them offline. On top of the
+anchor checks above, they require that no entry and no `sealed_at` in an
+epoch is later than that epoch's anchor time (plus `--clock-skew-secs`,
+default 60), and they report missing epochs, uncovered seq ranges and
+unanchored epochs as gaps.
+
 ## Producing an anchored bundle
 
 ```bash
@@ -179,6 +227,16 @@ README for SHA-256 fingerprints):
   `c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d`.
 
 ## Tests
+
+Epoch anchoring is tested end to end without the network against local
+stand-ins (`cloakpipe-anchor`'s `testkit` feature, tests only): `MockTsa`,
+a CMS-signed RFC 3161 TSA under a pinned self-signed timeStamping
+certificate, and `MockRekor`, an RFC 6962 log with signed entry timestamps
+and checkpoints. Their answers pass the same verifier checks as the
+recorded real ones (`cloakpipe-verify/tests/testkit_anchors.rs`), and they
+can fail or skew their clock on demand (`cloakpipe-ledger/tests/epochs.rs`,
+`cloakpipe-verify/tests/gate_pack.rs`,
+`cloakpipe-cli/tests/ledger_export_cli.rs`).
 
 - Offline (every CI run): recorded real responses from freetsa.org, DigiCert
   and rekor.sigstore.dev, captured with `tools/capture_anchor_fixtures.sh`

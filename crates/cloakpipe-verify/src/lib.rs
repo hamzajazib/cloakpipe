@@ -12,9 +12,12 @@
 pub mod anchor;
 pub mod bundle;
 pub mod decisions;
+pub mod gate_pack;
 pub mod rekor;
 pub mod rfc3161;
 mod time;
+pub mod trust;
 #[cfg(feature = "release-pack")]
 pub mod pack;
+pub mod ustar;
 pub mod verify;

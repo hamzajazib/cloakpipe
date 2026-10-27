@@ -12,6 +12,10 @@
 //! cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE [--key ...]
 //!                                          # gate decision entries: chain, entry
 //!                                          # hashes, per-entry Ed25519 signatures
+//! cloakpipe-verify pack <audit-pack.tar> [--key HEX|KEYFILE]... [--tsa-root PEM] [--rekor-key PEM]
+//!                                          # a gate audit pack (cloakpipe ledger export):
+//!                                          # entries, epochs, RFC 3161 + Rekor anchors, gaps
+//! cloakpipe-verify <audit-pack.tar> ...    # the same
 //! cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
 //!                                [--cert-trust KEYFILE] [--now RFC3339] [--json]
 //!                                          # each trust flag takes one file; repeat it
@@ -58,6 +62,13 @@ fn run(args: &[String]) -> Result<ExitCode> {
     }
     if cmd == "decisions" {
         return decisions(&args[2..]);
+    }
+    if cmd == "pack" {
+        return gate_pack(&args[2..]);
+    }
+    // `cloakpipe-verify audit-pack.tar`: a gate audit pack.
+    if cmd.ends_with(".tar") {
+        return gate_pack(&args[1..]);
     }
     let path = args.get(2).cloned().unwrap_or_default();
     if path.is_empty() && cmd != "help" && cmd != "--help" && cmd != "-h" {
@@ -312,6 +323,41 @@ fn decisions(args: &[String]) -> Result<ExitCode> {
     }
 }
 
+/// `pack AUDIT-PACK.tar [--key HEX|KEYFILE]... [--tsa-root PEM]
+/// [--rekor-key PEM] [--clock-skew-secs N] [--require-anchors]`.
+fn gate_pack(args: &[String]) -> Result<ExitCode> {
+    use cloakpipe_verify::gate_pack::{verify_pack, PackTrust};
+    let (mut file, mut keys, mut tsa_root, mut rekor_key, mut skew, mut require) = (None, Vec::new(), None, None, None, false);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => keys.push(gate_key(it.next().context("--key needs a public key (64 hex chars) or a key file")?)?),
+            "--tsa-root" => tsa_root = Some(it.next().context("--tsa-root needs a PEM file")?.clone()),
+            "--rekor-key" => rekor_key = Some(it.next().context("--rekor-key needs a PEM file")?.clone()),
+            "--clock-skew-secs" => {
+                skew = Some(it.next().and_then(|v| v.parse::<i64>().ok()).context("--clock-skew-secs needs a number")?)
+            }
+            "--require-anchors" => require = true,
+            flag if flag.starts_with("--") => anyhow::bail!("unexpected argument `{flag}`"),
+            path if file.is_none() => file = Some(path.to_string()),
+            extra => anyhow::bail!("unexpected argument `{extra}` (one pack at a time)"),
+        }
+    }
+    let file = file.context("missing pack path; usage: cloakpipe-verify pack AUDIT-PACK.tar [--key HEX|KEYFILE]")?;
+    let read = |p: &str| std::fs::read(p).with_context(|| format!("reading {p}"));
+    let tsa_pem = tsa_root.as_deref().map(read).transpose()?;
+    let rekor_pem = rekor_key.as_deref().map(read).transpose()?;
+    let mut trust = PackTrust::from_pem(tsa_pem.as_deref(), rekor_pem.as_deref()).map_err(anyhow::Error::msg)?;
+    trust.gate_keys = keys;
+    trust.require_anchors = require;
+    if let Some(s) = skew {
+        trust.clock_skew_secs = s;
+    }
+    let report = verify_pack(&read(&file)?, &trust);
+    print!("{}", report.render());
+    Ok(ExitCode::from(if report.ok() { 0 } else { 1 }))
+}
+
 /// A gate public key: 64 hex chars, or a key file (`release keygen` format;
 /// `publicKey` is read, `privateKey` never is).
 fn gate_key(arg: &str) -> Result<[u8; 32]> {
@@ -444,6 +490,17 @@ USAGE:
       seq continuity, hash chain, entry hashes and each entry's Ed25519
       signature by a pinned gate public key (64 hex chars, or a key file's
       publicKey). Repeat --key for rotated keys. Offline.
+  cloakpipe-verify pack <audit-pack.tar> [--key HEX|KEYFILE]... [--tsa-root PEM] [--rekor-key PEM]
+                        [--clock-skew-secs N] [--require-anchors]
+  cloakpipe-verify <audit-pack.tar> ...
+      Verify a gate audit pack (cloakpipe ledger export): the signed pack
+      manifest, every decision entry (chain, per-entry signatures), the
+      epochs and their RFC 3161 / Rekor anchors, and gaps; prints the
+      denials, approvals and side effects it records. --key pins the gate
+      key (otherwise the pack's own key is used, and the report says so).
+      Without --tsa-root / --rekor-key the public freetsa.org + DigiCert
+      roots and the rekor.sigstore.dev key are used. Offline; exits 1 on
+      any failure or gap.
   cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
                                 [--cert-trust KEYFILE] [--now RFC3339] [--json]
       Verify a release audit pack (docs/AUDIT_PACK.md). Each role has its

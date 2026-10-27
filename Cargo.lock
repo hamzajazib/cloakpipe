@@ -597,16 +597,21 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "cloakpipe-verify",
+ "cms",
+ "der 0.7.10",
  "ed25519-dalek",
  "hex",
+ "p256",
  "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "spki",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+ "x509-cert",
 ]
 
 [[package]]

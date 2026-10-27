@@ -55,9 +55,10 @@ tempfile = "3"
 # Test-only: the gate tests (M3, M4) construct anchored bundles from
 # scratch using the producer crates, then run the *standalone*
 # verifier against them. The verifier's lib does NOT depend on these.
-cloakpipe-anchor = { path = "../cloakpipe-anchor" }
+cloakpipe-anchor = { path = "../cloakpipe-anchor", features = ["testkit"] }
 cloakpipe-ledger = { path = "../cloakpipe-ledger" }
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [[test]]
 name = "release_pack"

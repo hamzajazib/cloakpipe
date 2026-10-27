@@ -82,6 +82,9 @@ pub struct McpProxyArgs {
     /// The decision ledger every gate decision is appended to, signed.
     #[command(flatten)]
     pub ledger: crate::evidence::LedgerArgs,
+    /// Scheduled anchoring of the decision ledger (epochs, RFC 3161, Rekor).
+    #[command(flatten)]
+    pub anchoring: crate::evidence::AnchoringArgs,
     /// Legacy Agent Release only (deprecated; a v1 manifest declares its
     /// contracts inline). Tool contract (repeatable): argument-level rules
     /// for the tools it covers. Each must be bound by the release (`spec.policies` entry
@@ -148,6 +151,7 @@ impl McpProxyArgs {
             || self.gate.is_some()
             || self.mode.is_some()
             || self.ledger.signing_key.is_some()
+            || self.anchoring.any()
             || !self.tool_contracts.is_empty()
             || self.task_context.is_some()
             || self.approvals.is_some()

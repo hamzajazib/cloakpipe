@@ -450,12 +450,24 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     let pii = args.pii();
     // The decision ledger and its key, before anything runs: a gate that
     // cannot record does not start.
+    // Anchoring flags are checked (and their trust inputs read) before
+    // anything starts.
+    let anchoring = match args.anchoring.configure(&args.ledger) {
+        Ok(a) => a,
+        Err(code) => std::process::exit(code),
+    };
     let decisions = match &gate {
         Some(_) => match args.ledger.decision_log("gate decisions") {
             Ok(log) => log,
             Err(code) => std::process::exit(code),
         },
         None => None,
+    };
+    // Epochs are sealed and anchored on their own thread, off the request
+    // path; on exit the tail is sealed and anchored once more.
+    let anchor_loop = match crate::evidence::start_anchoring(&args.ledger, anchoring) {
+        Ok(l) => l,
+        Err(code) => std::process::exit(code),
     };
     // The PII transform's hop records share the ledger database.
     let ledger_db = if gate.is_some() {
@@ -509,7 +521,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
 
     tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
     tokio::task::spawn_blocking(move || {
-        cloakpipe_mcp::run_proxy(
+        let result = cloakpipe_mcp::run_proxy(
             parts,
             cloakpipe_mcp::ProxyContext {
                 pii,
@@ -518,7 +530,11 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
                 gate,
                 decisions,
             },
-        )
+        );
+        if let Some(l) = anchor_loop {
+            l.finish();
+        }
+        result
     })
     .await
     .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?

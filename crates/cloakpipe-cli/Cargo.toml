@@ -67,6 +67,8 @@ certification = ["dep:cloakpipe-cert", "cloakpipe-mcp/certification", "cloakpipe
 
 [dev-dependencies]
 rusqlite = { workspace = true }
+# Local TSA and Rekor stand-ins for the anchoring tests.
+cloakpipe-anchor = { path = "../cloakpipe-anchor", features = ["testkit"] }
 tempfile = "3"
 uuid.workspace = true
 serde_json.workspace = true

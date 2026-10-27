@@ -66,12 +66,18 @@ impl RekorClient {
     /// entry that already exists (HTTP 409) is fetched instead.
     pub fn anchor_head(&self, head: &SignedBatchHead, signer: &SigningKey) -> Result<ExternalReceipt, AnchorError> {
         let artifact = serde_json::to_vec(head).map_err(|e| AnchorError::Submit(e.to_string()))?;
+        self.anchor_artifact(&head.batch_id, &artifact, signer)
+    }
+
+    /// Submit `artifact` (any anchored bytes, such as a ledger epoch head),
+    /// signed by `signer`; `id` names it in the receipt.
+    pub fn anchor_artifact(&self, id: &str, artifact: &[u8], signer: &SigningKey) -> Result<ExternalReceipt, AnchorError> {
         let url = format!("{}{ENTRIES_PATH}", self.url);
         let client = http(self.timeout)?;
         let resp = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(hashedrekord_request(&artifact, signer))
+            .body(hashedrekord_request(artifact, signer))
             .send()
             .map_err(|e| AnchorError::Unavailable(format!("{url}: {e}")))?;
         let body = if resp.status() == reqwest::StatusCode::CONFLICT {
@@ -94,11 +100,11 @@ impl RekorClient {
             [(u, e)] => ((*u).clone(), (*e).clone()),
             _ => return Err(AnchorError::Rejected(format!("{url}: expected exactly one entry"))),
         };
-        verify_rekor_entry(&uuid, &entry, &self.key, &artifact, &signer.verifying_key().to_bytes())
+        verify_rekor_entry(&uuid, &entry, &self.key, artifact, &signer.verifying_key().to_bytes())
             .map_err(|e| AnchorError::Rejected(format!("{url}: {e}")))?;
         Ok(ExternalReceipt::Rekor {
-            batch_id: head.batch_id.clone(),
-            subject_hash: hex::encode(Sha256::digest(&artifact)),
+            batch_id: id.to_string(),
+            subject_hash: hex::encode(Sha256::digest(artifact)),
             rekor_url: self.url.clone(),
             entry_uuid: uuid,
             entry,

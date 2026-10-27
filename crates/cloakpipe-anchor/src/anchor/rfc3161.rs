@@ -96,13 +96,24 @@ impl TsaClient {
     /// recorded replies). Never reuse a nonce against a live TSA.
     pub fn anchor_head_with_nonce(&self, head: &SignedBatchHead, nonce: &[u8]) -> Result<ExternalReceipt, AnchorError> {
         let head_bytes = serde_json::to_vec(head).map_err(|e| AnchorError::Submit(e.to_string()))?;
-        let subject: [u8; 32] = Sha256::digest(&head_bytes).into();
+        self.anchor_artifact_with_nonce(&head.batch_id, &head_bytes, nonce)
+    }
+
+    /// Timestamp SHA-256 of `artifact` (any anchored bytes, such as a
+    /// ledger epoch head) with a fresh nonce; `id` names it in the receipt.
+    pub fn anchor_artifact(&self, id: &str, artifact: &[u8]) -> Result<ExternalReceipt, AnchorError> {
+        self.anchor_artifact_with_nonce(id, artifact, &fresh_nonce())
+    }
+
+    /// As [`Self::anchor_artifact`] with a caller-chosen nonce.
+    pub fn anchor_artifact_with_nonce(&self, id: &str, artifact: &[u8], nonce: &[u8]) -> Result<ExternalReceipt, AnchorError> {
+        let subject: [u8; 32] = Sha256::digest(artifact).into();
         let req = timestamp_request(&subject, nonce);
         let tsr = post(&self.url, self.timeout, "application/timestamp-query", req, "application/timestamp-reply")?;
         verify_timestamp_response(&tsr, &subject, nonce, &self.roots)
             .map_err(|e| AnchorError::Rejected(format!("{}: {e}", self.url)))?;
         Ok(ExternalReceipt::Rfc3161 {
-            batch_id: head.batch_id.clone(),
+            batch_id: id.to_string(),
             subject_hash: hex::encode(subject),
             tsa_url: self.url.clone(),
             nonce: hex::encode(nonce),

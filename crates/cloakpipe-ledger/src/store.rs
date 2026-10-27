@@ -13,6 +13,8 @@ use thiserror::Error;
 
 use crate::chain::{compute_hash, GENESIS_HASH};
 use crate::decision::{DecisionDraft, DecisionEntry, GENESIS};
+use crate::epoch::{receipt_kind, EpochHead, StoredEpoch, EPOCH_GENESIS, EPOCH_KIND};
+use cloakpipe_anchor::receipt::ExternalReceipt;
 use crate::gate_key::GateKey;
 use crate::record::LedgerRecord;
 
@@ -30,6 +32,10 @@ pub enum StoreError {
     RecordHashMismatch,
     #[error("decision entry {0} is corrupt: {1}")]
     CorruptDecision(u64, String),
+    #[error("epoch {0} is corrupt: {1}")]
+    CorruptEpoch(u64, String),
+    #[error("no epoch {0}")]
+    NoEpoch(u64),
 }
 
 /// A record that has been durably stored, paired with its DB row id.
@@ -75,11 +81,13 @@ impl LedgerStore {
 
     fn open_once(path: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        // The gate, its anchoring thread and `cloakpipe operations
+        // reconcile` may open and write at once: wait for locks, including
+        // the one switching a new file to WAL.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // The gate and `cloakpipe operations reconcile` may write at once.
-        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -104,6 +112,14 @@ impl LedgerStore {
                 entry_hash  TEXT NOT NULL,
                 prev_hash   TEXT NOT NULL,
                 entry_json  TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS epochs (
+                epoch         INTEGER PRIMARY KEY,
+                first_seq     INTEGER NOT NULL,
+                last_seq      INTEGER NOT NULL,
+                epoch_json    TEXT NOT NULL,
+                anchors_json  TEXT NOT NULL DEFAULT '[]',
+                last_error    TEXT
             );
             "#,
         )?;
@@ -230,6 +246,120 @@ impl LedgerStore {
             out.push(entry);
         }
         Ok(out)
+    }
+}
+
+impl LedgerStore {
+    /// The seq of the newest decision entry, `None` when there is none.
+    pub fn decision_head_seq(&self) -> Result<Option<u64>, StoreError> {
+        let seq: Option<i64> = self.conn.query_row("SELECT MAX(seq) FROM decisions", [], |r| r.get(0))?;
+        Ok(seq.map(|s| s as u64))
+    }
+
+    /// The decision entries `first..=last`, in seq order.
+    pub fn decisions_between(&self, first: u64, last: u64) -> Result<Vec<DecisionEntry>, StoreError> {
+        Ok(self.decisions_from(first)?.into_iter().take_while(|e| e.seq <= last).collect())
+    }
+
+    /// The first seq no epoch covers yet (0 before the first epoch).
+    pub fn next_unsealed_seq(&self) -> Result<u64, StoreError> {
+        let last: Option<i64> = self.conn.query_row("SELECT MAX(last_seq) FROM epochs", [], |r| r.get(0))?;
+        Ok(last.map(|l| l as u64 + 1).unwrap_or(0))
+    }
+
+    /// Seal every decision entry no epoch covers yet into the next epoch,
+    /// signed with `key`, in one write transaction. `None` when there is
+    /// nothing new.
+    pub fn seal_epoch(&mut self, key: &GateKey, now: chrono::DateTime<chrono::Utc>) -> Result<Option<EpochHead>, StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prev: Option<(i64, i64, String)> = tx
+            .query_row("SELECT epoch, last_seq, epoch_json FROM epochs ORDER BY epoch DESC LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?;
+        let (epoch, first_seq, prev_epoch) = match prev {
+            None => (0u64, 0u64, EPOCH_GENESIS.to_string()),
+            Some((n, last, json)) => {
+                let head: EpochHead =
+                    serde_json::from_str(&json).map_err(|e| StoreError::CorruptEpoch(n as u64, e.to_string()))?;
+                (n as u64 + 1, last as u64 + 1, head.epoch_hash)
+            }
+        };
+        let tail: Option<(i64, String)> = tx
+            .query_row("SELECT seq, entry_hash FROM decisions ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((last_seq, entries_head)) = tail.filter(|(seq, _)| *seq as u64 >= first_seq) else {
+            return Ok(None);
+        };
+        let mut head = EpochHead {
+            kind: EPOCH_KIND.to_string(),
+            epoch,
+            first_seq,
+            last_seq: last_seq as u64,
+            entries_head,
+            prev_epoch,
+            sealed_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            signer: key.keyid(),
+            epoch_hash: String::new(),
+            sig: String::new(),
+        };
+        head.epoch_hash = head.compute_hash();
+        let digest = decode_hex_32(&head.epoch_hash).expect("epoch_hash is 64 hex chars");
+        head.sig = hex_lower(&key.sign(&digest));
+        tx.execute(
+            "INSERT INTO epochs (epoch, first_seq, last_seq, epoch_json) VALUES (?1, ?2, ?3, ?4)",
+            params![epoch as i64, first_seq as i64, last_seq, serde_json::to_string(&head)?],
+        )?;
+        tx.commit()?;
+        Ok(Some(head))
+    }
+
+    /// Every epoch, in order, with its anchors.
+    pub fn epochs(&self) -> Result<Vec<StoredEpoch>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT epoch, epoch_json, anchors_json, last_error FROM epochs ORDER BY epoch ASC")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (n, head, anchors, last_error) = row?;
+            let corrupt = |e: serde_json::Error| StoreError::CorruptEpoch(n as u64, e.to_string());
+            out.push(StoredEpoch {
+                head: serde_json::from_str(&head).map_err(corrupt)?,
+                anchors: serde_json::from_str(&anchors).map_err(corrupt)?,
+                last_error,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Add `receipts` to epoch `epoch` (a receipt of a kind it already
+    /// holds replaces nothing: the first one is kept) and record `error`,
+    /// the outcome of this attempt (`None`: it succeeded in full).
+    pub fn add_epoch_anchors(
+        &mut self,
+        epoch: u64,
+        receipts: Vec<ExternalReceipt>,
+        error: Option<String>,
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json: Option<String> = tx
+            .query_row("SELECT anchors_json FROM epochs WHERE epoch = ?1", [epoch as i64], |r| r.get(0))
+            .optional()?;
+        let json = json.ok_or(StoreError::NoEpoch(epoch))?;
+        let mut anchors: Vec<ExternalReceipt> =
+            serde_json::from_str(&json).map_err(|e| StoreError::CorruptEpoch(epoch, e.to_string()))?;
+        for r in receipts {
+            if !anchors.iter().any(|a| receipt_kind(a) == receipt_kind(&r)) {
+                anchors.push(r);
+            }
+        }
+        tx.execute(
+            "UPDATE epochs SET anchors_json = ?1, last_error = ?2 WHERE epoch = ?3",
+            params![serde_json::to_string(&anchors)?, error, epoch as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 }
 

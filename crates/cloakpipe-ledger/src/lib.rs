@@ -23,7 +23,10 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod anchoring;
+pub mod audit_pack;
 pub mod decision;
+pub mod epoch;
 pub mod export;
 pub mod gate_key;
 pub mod record;
