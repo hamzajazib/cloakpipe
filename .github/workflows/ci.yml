@@ -226,6 +226,16 @@ jobs:
           for m in "$TESTDATA"/*.yaml "$TESTDATA"/*.json; do
             ./target/debug/cloakpipe release validate "$m"
           done
+      - name: Validate v1 manifests (cloakpipe.manifest.yaml)
+        run: |
+          for m in examples/support-agent/cloakpipe.manifest.yaml "$TESTDATA"/v1/*.manifest.yaml; do
+            ./target/debug/cloakpipe manifest validate "$m"
+          done
+          # A broken rule must fail validation, not load as something else.
+          sed 's/amount > 100/amount >/' examples/support-agent/cloakpipe.manifest.yaml > /tmp/bad.manifest.yaml
+          if ./target/debug/cloakpipe manifest validate /tmp/bad.manifest.yaml; then
+            echo "an unparseable approval condition must not validate"; exit 1
+          fi
       - name: Golden hash is unchanged
         # A changed golden hash invalidates every release hash already issued.
         run: |
