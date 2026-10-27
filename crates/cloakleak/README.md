@@ -1,7 +1,7 @@
 # CloakLeak — Public PII-Leak Benchmark
 
 **Status:** v0 (Phase 1 of v2 pivot).
-**License:** Apache-2.0 (harness) / CC-BY-4.0 (sample corpus).
+**License:** MIT (harness and sample corpus), like the rest of the repository ([`LICENSE`](../../LICENSE)).
 **Companion doc:** [`docs/v2/09-CLOAKLEAK.md`](../../docs/v2/09-CLOAKLEAK.md).
 
 ---

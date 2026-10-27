@@ -2,8 +2,12 @@
 name = "cloakpipe-verify"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
+license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["verifier", "audit", "rfc3161", "rekor", "ed25519"]
+categories = ["cryptography", "command-line-utilities"]
 description = "Standalone verifier for CloakPipe evidence bundles and release audit packs — no dependency on evidence producers"
 
 [[bin]]

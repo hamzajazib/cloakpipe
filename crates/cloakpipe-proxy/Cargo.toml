@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "OpenAI-compatible HTTP proxy with privacy middleware"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["llm", "proxy", "openai", "anthropic", "pii"]
+categories = ["web-programming::http-server"]
+description = "OpenAI- and Anthropic-compatible LLM egress proxy for CloakPipe: PII pseudonymization in requests, rehydration in responses"
 
 [dependencies]
 cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0", features = ["gliner-pii", "ner"] }
@@ -26,3 +30,4 @@ tracing.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 http-body-util.workspace = true
+

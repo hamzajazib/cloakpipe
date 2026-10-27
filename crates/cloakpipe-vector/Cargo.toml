@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Vector encryption (ADCPE) for CloakPipe — future scope"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["embeddings", "encryption", "rag", "vector"]
+categories = ["cryptography"]
+description = "Distance-preserving embedding-vector encryption (ADCPE) for CloakPipe's optional RAG tooling"
 
 [dependencies]
 anyhow.workspace = true

@@ -2,15 +2,20 @@
 name = "cloakleak-cli"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
+license.workspace = true
 repository.workspace = true
-description = "CloakLeak CLI — run a SUT against the public corpus and emit a scoreboard"
+homepage.workspace = true
+readme = "../cloakleak/README.md"
+keywords = ["pii", "benchmark", "llm", "cli"]
+categories = ["development-tools::testing"]
+publish = false
+description = "CloakLeak CLI: run a system under test against the public corpus and emit a scoreboard"
 
 [[bin]]
 name = "cloakleak"
 path = "src/main.rs"
 
 [dependencies]
-cloakleak = { path = "../cloakleak" }
+cloakleak = { path = "../cloakleak", version = "0.11.0" }
 anyhow = { workspace = true }
 serde_json = { workspace = true }

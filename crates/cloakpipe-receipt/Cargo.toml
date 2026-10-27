@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["dsse", "ed25519", "approval", "ai-agents"]
+categories = ["cryptography"]
 description = "DSSE envelopes and signed approval receipts for one exact AI-agent tool call"
 
 [dependencies]

@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MCP server for CloakPipe — expose privacy tools to AI agents"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["mcp", "ai-agents", "policy", "gate", "llm"]
+categories = ["development-tools"]
+description = "MCP tool-call gate for CloakPipe: contract checks, approvals, side-effect tracking and evidence on every tools/call"
 
 [dependencies]
 cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }

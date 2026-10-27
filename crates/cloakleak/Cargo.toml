@@ -2,9 +2,14 @@
 name = "cloakleak"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
+license.workspace = true
 repository.workspace = true
-description = "CloakLeak — public PII-leak benchmark for LLM privacy middleware (CloakPipe authority play)"
+homepage.workspace = true
+readme = "README.md"
+keywords = ["pii", "benchmark", "llm"]
+categories = ["development-tools::testing"]
+publish = false
+description = "CloakLeak: PII-leak benchmark harness for LLM privacy middleware"
 
 [dependencies]
 serde = { workspace = true }

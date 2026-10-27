@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Agent Release manifests: schema, validation, canonical hashing, and material-change diff"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["ai-agents", "manifest", "mcp", "policy"]
+categories = ["development-tools"]
+description = "Agent release manifests for CloakPipe: schema, validation, canonical hashing, tool contracts and call fingerprints"
 
 [dependencies]
 serde = { workspace = true }
