@@ -55,6 +55,27 @@ may contain breaking changes; these are marked **Breaking**.
   `cloakpipe-verify decisions <entries.jsonl> --key …` verify them offline.
 - `mcp-proxy --mode enforce|shadow`: shadow forwards every call the gate can
   read and records what enforce mode would have decided (`mode: shadow`).
+- Scheduled anchoring: `mcp-proxy --anchor-every N` / `--anchor-interval
+  DURATION` seals the decision ledger into numbered, signed epochs
+  (`cloakpipe.epoch/v1`, each linked to the previous one) and anchors each
+  with an RFC 3161 TSA and Sigstore Rekor on a background thread, off the
+  request path (`--tsa`, `--tsa-root`, `--rekor`, `--rekor-key`, `--no-tsa`,
+  `--no-rekor`; freetsa.org and rekor.sigstore.dev with built-in trust by
+  default). Receipts are kept in the ledger database; a failure prints
+  `anchor.failed` and is retried, by later runs too.
+- `cloakpipe ledger export --out audit-pack.tar [--since/--until]`: a plain
+  tar with entries.jsonl, the gate public key, every epoch with its RFC 3161
+  token and Rekor entry, the manifest digests and a pack manifest signed by
+  the gate key.
+- `cloakpipe verify audit-pack.tar [--key …]`: offline verification of the
+  pack with the `cloakpipe-verify` library (also `cloakpipe-verify pack
+  audit-pack.tar`). It reports entries, chain and signatures, anchored
+  epochs (RFC 3161 and Rekor inclusion proofs), gaps (missing epochs,
+  uncovered seq ranges, unanchored epochs), denials, approvals and unknown
+  side effects reconciled, and exits non-zero on any failure or gap.
+- `cloakpipe-anchor`: `TsaClient::anchor_artifact` and
+  `RekorClient::anchor_artifact` anchor any bytes; the `testkit` feature
+  (tests only) adds local `MockTsa` and `MockRekor` authorities.
 
 - `examples/support-agent/`: a support agent whose prompt-injected
   `send_email` to an attacker is refused (`scope_mismatch` on `/to`, bound to

@@ -500,3 +500,57 @@ cloakpipe-verify decisions entries.jsonl --key <public key hex or key file>
 #     allowed=… denied=… approvals_required=… shadow=… outcomes committed=… failed=… unknown=… reconciled=…
 ```
 
+
+### Anchoring and the audit pack
+
+The chain and signatures show the entries were not edited after they were
+signed. Anchoring shows *when* they existed, with evidence from someone
+other than the operator. With `--anchor-every N` and/or `--anchor-interval
+DURATION`, the gate seals new entries into numbered **epochs** on a
+background thread, never on the request path, and anchors each one with an
+RFC 3161 timestamp authority and Sigstore Rekor
+([ANCHORING.md](ANCHORING.md#scheduled-anchoring-of-the-decision-ledger)):
+
+```bash
+cloakpipe mcp-proxy --manifest release.yaml --upstream "…" \
+  --anchor-every 500 --anchor-interval 10m
+# defaults: --tsa https://freetsa.org/tsr, --rekor https://rekor.sigstore.dev,
+# with their public roots and key built in (--tsa-root / --rekor-key to
+# override, --no-tsa / --no-rekor to skip one)
+```
+
+An anchor that fails prints `cloakpipe: anchor.failed epoch=… seq=a..b
+anchor=rfc3161|rekor error=…` on stderr and is retried (by later runs too).
+On exit, the gate seals what is left and anchors it once more.
+
+An auditor gets one file and checks it offline:
+
+```bash
+cloakpipe ledger export --out audit-pack.tar        # [--since 30d] [--until 2026-10-31]
+cloakpipe verify audit-pack.tar --key <gate public key hex or key file>
+# pack: 7 files, signed by ed25519:… (pinned), OK
+# entries: 1204 (seq 0..1203), chain OK, signatures OK
+# anchors: 3 epochs (seq 0..1203), RFC3161 OK (3/3), Rekor OK (3/3 inclusion proofs)
+# gaps: none
+# denials: 41, approvals: 6 required, 5 granted, unknown side effects: 1, reconciled: 1
+# manifests: sha256:…
+# result: OK
+```
+
+The pack is a plain tar: `pack.json` (the pack manifest, listing every file
+with its SHA-256 and signed by the gate key), `entries.jsonl`,
+`gate.pub.json`, `manifests.json` (the manifest and policy digests the
+entries name) and `anchors/epoch-<n>.json` (each epoch head with its RFC
+3161 token and Rekor entry). A `--since` / `--until` range widens to whole
+epochs, so every epoch in the pack can be checked against its entries.
+
+`cloakpipe verify` (and the standalone `cloakpipe-verify pack
+audit-pack.tar`, or just `cloakpipe-verify audit-pack.tar`, built from the
+`cloakpipe-verify` crate alone) trusts nothing in the pack. Without `--key`
+it checks against the pack's own key and says `not pinned`. TSA tokens must
+chain to `--tsa-root` (default: the freetsa.org and DigiCert roots built
+in), and Rekor entries must verify under `--rekor-key` (default: the
+rekor.sigstore.dev key). It reports as **gaps** a missing epoch number,
+entries no epoch covers before or between epochs, and an epoch with no
+anchor. Entries after the last epoch are listed as `unanchored` and fail
+only with `--require-anchors`. Any failure or gap exits 1.
