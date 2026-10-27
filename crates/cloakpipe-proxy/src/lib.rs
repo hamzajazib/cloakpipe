@@ -8,4 +8,6 @@ pub mod server;
 pub mod handlers;
 pub mod state;
 pub mod streaming;
+/// CloakTree endpoints (`rag` feature).
+#[cfg(feature = "rag")]
 pub mod tree_handlers;

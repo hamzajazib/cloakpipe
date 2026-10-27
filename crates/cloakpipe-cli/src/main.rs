@@ -1,11 +1,20 @@
-//! CloakPipe CLI — entrypoint for the privacy proxy.
+//! CloakPipe CLI: the self-hosted policy-enforcement gate for AI agent tool
+//! calls (`mcp-proxy`), its evidence tooling and the regex PII proxy.
+//!
+//! Optional cargo features, all off by default (`full` turns them all on):
+//! `ner` (neural NER detectors), `rag` (`tree`, `vector` and the proxy's RAG
+//! routes) and `certification` (legacy `eval`, `release certify`,
+//! `verify-cert` and `audit-pack`).
 
 mod action;
 mod anchor;
+#[cfg(feature = "certification")]
 mod audit_pack;
+#[cfg(feature = "certification")]
 mod cert;
 mod commands;
 mod gate;
+mod keys;
 mod operations;
 mod release;
 
@@ -13,7 +22,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "cloakpipe")]
-#[command(about = "Privacy middleware for LLM & RAG pipelines")]
+#[command(about = "Self-hosted policy-enforcement gate for AI agent tool calls")]
 #[command(version)]
 struct Cli {
     /// Path to configuration file
@@ -49,11 +58,13 @@ enum Commands {
     /// --manifest; mask PII in arguments only with --transform pii.
     McpProxy(gate::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
+    #[cfg(feature = "rag")]
     Tree {
         #[command(subcommand)]
         action: TreeCommands,
     },
     /// ADCPE: encrypt/decrypt embedding vectors
+    #[cfg(feature = "rag")]
     Vector {
         #[command(subcommand)]
         action: VectorCommands,
@@ -63,7 +74,7 @@ enum Commands {
         #[command(subcommand)]
         action: SessionCommands,
     },
-    /// Agent Release manifests: validate, hash, diff, inspect, certify, verify-cert
+    /// Agent Release manifests: validate, hash, diff, inspect, keygen
     Release {
         #[command(subcommand)]
         action: release::ReleaseCommands,
@@ -84,6 +95,7 @@ enum Commands {
         action: operations::OperationsCommands,
     },
     /// Evaluation runs: import external results as certification evidence
+    #[cfg(feature = "certification")]
     Eval {
         #[command(subcommand)]
         action: cert::EvalCommands,
@@ -107,6 +119,7 @@ enum Commands {
     },
 }
 
+#[cfg(feature = "rag")]
 #[derive(Subcommand)]
 pub enum TreeCommands {
     /// Build a tree index from a document
@@ -158,6 +171,7 @@ pub enum SessionCommands {
     FlushAll,
 }
 
+#[cfg(feature = "rag")]
 #[derive(Subcommand)]
 pub enum VectorCommands {
     /// Encrypt embedding vectors from a JSON file
@@ -196,6 +210,7 @@ fn main() -> anyhow::Result<()> {
     // before logging setup and outside the async runtime.
     let command = match cli.command {
         Commands::Release { action } => std::process::exit(release::run(action)),
+        #[cfg(feature = "certification")]
         Commands::Eval { action } => std::process::exit(cert::eval(action)),
         Commands::Anchor(args) => std::process::exit(anchor::run(args)),
         Commands::Action { action } => std::process::exit(action::run(action)),
@@ -226,11 +241,14 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&config).await,
         Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
+        #[cfg(feature = "rag")]
         Commands::Tree { action } => commands::tree(&config, action).await,
+        #[cfg(feature = "rag")]
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&config, action).await,
+        #[cfg(feature = "certification")]
+        Commands::Eval { .. } => unreachable!("handled above"),
         Commands::Release { .. }
-        | Commands::Eval { .. }
         | Commands::Anchor(_)
         | Commands::Action { .. }
         | Commands::Approve(_)

@@ -130,7 +130,7 @@ fn anchor(a: AnchorArgs, now: chrono::DateTime<chrono::Utc>, tsa_nonce: &[u8]) -
                 .map_err(|e| usage(format_args!("--rekor-key {}: {e}", p.display())))?,
         ),
     };
-    let (key, _) = crate::cert::signing_key(&a.key)?;
+    let (key, _) = crate::keys::signing_key(&a.key)?;
     let signer = Ed25519Signer::from_bytes(&key.to_bytes());
     let mut bundle: Bundle = serde_json::from_slice(&read(&a.bundle)?)
         .map_err(|e| usage(format_args!("{}: not a bundle: {e}", a.bundle.display())))?;

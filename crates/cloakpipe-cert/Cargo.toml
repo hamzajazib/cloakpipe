@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Agent Release certification: evaluation runs, deterministic certification decisions, signed attestations"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["certification", "attestation", "in-toto", "dsse"]
+categories = ["cryptography", "development-tools"]
+description = "Legacy agent-release certification for CloakPipe (`certification` feature): evaluation runs, certification decisions, signed attestations"
 
 [dependencies]
 cloakpipe-release = { path = "../cloakpipe-release", version = "0.11.0" }

@@ -8,11 +8,11 @@ no network access and no CloakPipe account.
 
 - Rust: [`crates/cloakpipe-verify/src/pack`](../crates/cloakpipe-verify/src/pack)
   (`PackBuilder` to produce, `verify_pack_bytes` to check)
-- Producer CLI: `cloakpipe release audit-pack`
+- Producer CLI: `cloakpipe release audit-pack` (build with `--features certification`)
 - Verifier CLI: `cloakpipe-verify release-pack` (needs the `release-pack`
   cargo feature of `cloakpipe-verify`, off by default:
   `cargo build -p cloakpipe-verify --features release-pack`; the `cloakpipe`
-  CLI turns it on for `release audit-pack`)
+  CLI's `certification` feature turns it on for `release audit-pack`)
 
 ## Why one JSON file
 

@@ -40,17 +40,20 @@ pub enum ReleaseCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Generate an Ed25519 signing key for certifications
+    /// Generate an Ed25519 signing key (approver, exporter or anchoring key)
     Keygen {
         /// Write the key pair here (mode 0600, never overwritten) and print only the public part
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
     /// Decide whether a release is certified under a policy; with --key, sign the decision
+    #[cfg(feature = "certification")]
     Certify(crate::cert::CertifyArgs),
     /// Verify a signed certification offline
+    #[cfg(feature = "certification")]
     VerifyCert(crate::cert::VerifyCertArgs),
     /// Assemble and sign a release audit pack (verify with `cloakpipe-verify release-pack`)
+    #[cfg(feature = "certification")]
     AuditPack(crate::audit_pack::AuditPackArgs),
 }
 
@@ -61,9 +64,12 @@ pub fn run(cmd: ReleaseCommands) -> i32 {
         ReleaseCommands::Diff { baseline, candidate, json } => diff_cmd(&baseline, &candidate, json),
         ReleaseCommands::Register { manifest, json } => register(&manifest, json),
         ReleaseCommands::Inspect { manifest, json } => inspect(&manifest, json),
-        ReleaseCommands::Keygen { out } => crate::cert::keygen(out.as_deref()),
+        ReleaseCommands::Keygen { out } => crate::keys::keygen(out.as_deref()),
+        #[cfg(feature = "certification")]
         ReleaseCommands::Certify(args) => crate::cert::certify(args),
+        #[cfg(feature = "certification")]
         ReleaseCommands::VerifyCert(args) => crate::cert::verify_cert(args),
+        #[cfg(feature = "certification")]
         ReleaseCommands::AuditPack(args) => crate::audit_pack::audit_pack(args),
     }
 }

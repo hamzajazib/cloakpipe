@@ -2,8 +2,12 @@
 name = "cloakpipe-anchor"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
+license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["rfc3161", "rekor", "transparency-log", "merkle", "timestamp"]
+categories = ["cryptography"]
 description = "External anchoring for CloakPipe evidence bundles — Merkle batching, RFC-3161 TSA, transparency-log submission"
 
 [dependencies]
@@ -21,7 +25,7 @@ base64 = "0.23"
 reqwest = { workspace = true, features = ["blocking"] }
 # The external anchors are verified before a receipt is returned, with the
 # same standalone code an auditor runs.
-cloakpipe-verify = { path = "../cloakpipe-verify" }
+cloakpipe-verify = { path = "../cloakpipe-verify", version = "0.11.0" }
 
 [dev-dependencies]
 tempfile = "3"

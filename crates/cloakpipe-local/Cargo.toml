@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["rag", "llm"]
+categories = ["development-tools"]
+publish = false
 description = "Local-only RAG mode for CloakPipe — future scope"
 
 [dependencies]

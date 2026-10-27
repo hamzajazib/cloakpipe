@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CloakTree: Vectorless, reasoning-based retrieval with privacy-first tree indexing"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["rag", "retrieval", "llm", "pdf"]
+categories = ["text-processing"]
+description = "CloakTree: vectorless, reasoning-based document retrieval for CloakPipe's optional RAG tooling"
 
 [dependencies]
 cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }

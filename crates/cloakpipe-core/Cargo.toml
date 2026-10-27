@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core detection, pseudonymization, and rehydration engine for CloakPipe"
+homepage.workspace = true
+readme.workspace = true
+keywords = ["pii", "pseudonymization", "redaction", "llm", "privacy"]
+categories = ["text-processing", "cryptography"]
+description = "Regex PII detection, pseudonymization and rehydration engine for CloakPipe (NER behind the `ner` feature)"
 
 [dependencies]
 regex.workspace = true

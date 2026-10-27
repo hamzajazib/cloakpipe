@@ -130,15 +130,35 @@ git clone https://github.com/rohansx/cloakpipe && cd cloakpipe
 cargo build --release -p cloakpipe-cli -p cloakpipe-verify   # binaries in target/release/
 ```
 
+The default `cloakpipe` binary is the lean gate: `mcp-proxy`, its evidence
+tooling, and regex PII detection for `start`, `scan`, `mcp` and
+`mcp-proxy --transform pii`. Everything else is a cargo feature, off by default:
+
+| Feature | Adds |
+|---|---|
+| `ner` | The ONNX Runtime and GLiNER-PII NER detectors (`[detection.ner]`) |
+| `rag` | `cloakpipe tree`, `cloakpipe vector`, and the proxy's `/v1/embeddings` and `/tree/*` routes |
+| `certification` | Legacy: `cloakpipe eval`, `release certify`, `release verify-cert`, `release audit-pack` |
+| `full` | All of the above |
+
+```bash
+cargo install --git https://github.com/rohansx/cloakpipe cloakpipe-cli --locked --features full
+```
+
 A container image of the **privacy proxy** is published to GHCR on every tag
-(currently `v0.11.0`; the image ships the full `cloakpipe` CLI, so the
-release, certification and gate commands are in it too):
+(currently `v0.11.0`). From the next release it ships the default (lean)
+`cloakpipe` binary; build your own with
+`docker build --build-arg CLOAKPIPE_FEATURES=full .` for NER, RAG and
+certification:
 
 ```bash
 docker run -p 8900:8900 -e OPENAI_API_KEY=sk-... ghcr.io/rohansx/cloakpipe:latest
 ```
 
 ### Certify a release in five commands
+
+Certification is legacy and needs a build with `--features certification`
+(or `full`).
 
 This walks the whole Evaluate → Certify → Prove path offline. Create three small files:
 
@@ -396,8 +416,10 @@ and a Python client live in [`integrations/`](integrations).
 
 Optional NER backends (`[detection.ner] backend`): `distilbert_pii` (63 MB ONNX,
 CPU), `bert`, `gliner`, `nemotron_pii` (ONNX, CPU), and `gliner_pii` via a Python
-sidecar ([`tools/gliner-pii-server.py`](tools/gliner-pii-server.py)). NER is off
-by default; the default build runs regex and heuristics with no model download.
+sidecar ([`tools/gliner-pii-server.py`](tools/gliner-pii-server.py)). NER needs a
+build with `--features ner` and is off in the config by default; the default
+build runs regex and heuristics with no model download, and warns if the
+config asks for NER.
 
 #### Policies and profiles
 
@@ -414,8 +436,8 @@ are not certifications.
 | `cloakpipe scan <dir>` | Mask `.txt`/`.md`/`.json`/`.csv` files before RAG indexing (`--detect-only` to report) |
 | `cloakpipe mcp` | Run as an MCP server with six tools: `pseudonymize`, `rehydrate`, `detect`, `vault_stats`, `configure`, `session_context` |
 | `cloakpipe sessions` | Inspect and flush context-aware pseudonymization sessions |
-| `cloakpipe tree` | CloakTree: index a document and query it without embeddings |
-| `cloakpipe vector` | ADCPE embedding encryption (experimental) |
+| `cloakpipe tree` | CloakTree: index a document and query it without embeddings (`rag` feature) |
+| `cloakpipe vector` | ADCPE embedding encryption, experimental (`rag` feature) |
 | `cloakpipe stats` | Vault statistics |
 
 #### Docker Compose

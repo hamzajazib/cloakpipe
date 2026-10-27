@@ -1,7 +1,7 @@
 //! Public sample corpus.
 //!
 //! Per the CloakLeak design (`docs/v2/09-CLOAKLEAK.md` §3):
-//! - Public repo carries the **harness + sample corpus** (Apache-2.0 / CC-BY-4.0).
+//! - Public repo carries the **harness + sample corpus** (MIT).
 //! - The **full validation set is held out** in a private repo; published
 //!   scores are produced against the held-out set, never the public one.
 //!

@@ -86,7 +86,7 @@ runs:
         else
           sel=(--branch "$REF")
         fi
-        cargo install --git "$REPO" "${sel[@]}" cloakpipe-cli --locked
+        cargo install --git "$REPO" "${sel[@]}" cloakpipe-cli --locked --features certification
 
     - name: Certify
       id: certify

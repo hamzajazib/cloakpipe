@@ -10,7 +10,7 @@
 //! `--revoked-key` and `--environment` flags, and a gate that refuses every
 //! call unless the release holds a certification that verifies now.
 
-use crate::cert::{invalid, read, trusted_key, usage, Res};
+use crate::keys::{invalid, read, trusted_key, usage, Res};
 use crate::release::load;
 use clap::Args;
 use cloakpipe_receipt::dsse::TrustedKey;
@@ -193,7 +193,7 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
 #[cfg(feature = "certification")]
 mod legacy {
     use super::McpProxyArgs;
-    use crate::cert::{inline_key, invalid, read, trusted_key, usage, Res};
+    use crate::keys::{inline_key, invalid, read, trusted_key, usage, Res};
     use cloakpipe_cert::statement::{Envelope, VerifyContext};
     use std::collections::BTreeSet;
 

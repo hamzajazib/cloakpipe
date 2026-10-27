@@ -360,7 +360,7 @@ cloakpipe release verify-cert release.cert.dsse.json --trust key.json --release 
 
 [`.github/actions/certify`](../.github/actions/certify) wraps `release certify`
 for workflows: it installs the CLI (`cargo install --git
-https://github.com/rohansx/cloakpipe … cloakpipe-cli --locked` at
+https://github.com/rohansx/cloakpipe … cloakpipe-cli --locked --features certification` at
 `cloakpipe-ref`), certifies, writes a job summary and sets the outputs
 `outcome`, `envelope` and `decision`. The `signing-key` input takes the
 contents of a `keygen` key file from a secret; it is written to a `0600`
