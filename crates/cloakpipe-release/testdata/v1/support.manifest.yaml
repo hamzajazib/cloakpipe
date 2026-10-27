@@ -1,0 +1,24 @@
+# The single-file v1 manifest from the format spec (docs/MANIFEST.md).
+release: support-agent
+version: 2026.10.3
+policy: ./policies/support.cedar
+tools:
+  read_ticket:
+    args:
+      ticket_id: { type: string, pattern: "^T-[0-9]{4,}$", required: true }
+  send_email:
+    args:
+      ticket_id: { type: string, pattern: "^T-[0-9]{4,}$", required: true }
+      to:   { type: string, one_of_context: ["ticket.customer_email"], or_pattern: "@ourcompany\\.com$", required: true }
+      body: { type: string, max_len: 4000 }
+    side_effect: true
+    idempotency_key: "{ticket_id}:{sha256(body)}"
+  issue_refund:
+    args:
+      ticket_id: { type: string, required: true }
+      amount: { type: number, min: 0, max: 500, required: true }
+    side_effect: true
+    approval:
+      when: "amount > 100"
+      approvers: ["slack:#support-leads"]
+      ttl: 15m
