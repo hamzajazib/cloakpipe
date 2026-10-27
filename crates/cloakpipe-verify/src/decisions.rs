@@ -105,7 +105,8 @@ pub fn entry_hash(entry: &Value) -> [u8; 32] {
     Sha256::digest(&bytes).into()
 }
 
-fn canonical(v: &Value, out: &mut Vec<u8>) {
+/// Sorted keys, no whitespace, serde_json's string escaping.
+pub(crate) fn canonical(v: &Value, out: &mut Vec<u8>) {
     match v {
         Value::Object(o) => {
             let sorted: BTreeMap<&String, &Value> = o.iter().collect();
