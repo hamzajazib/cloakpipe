@@ -15,6 +15,7 @@ members = [
     "crates/cloakpipe-release",
     "crates/cloakpipe-receipt",
     "crates/cloakpipe-cert",
+    "crates/cloakpipe-policy",
     "crates/cloakleak",
     "crates/cloakleak-cli",
 ]

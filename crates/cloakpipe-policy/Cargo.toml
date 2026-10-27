@@ -1,0 +1,17 @@
+[package]
+name = "cloakpipe-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cedar policy evaluation and persistent call counters for the CloakPipe tool gate"
+
+[dependencies]
+cedar-policy = { version = "4.14", default-features = false, features = ["decimal"] }
+rusqlite = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
