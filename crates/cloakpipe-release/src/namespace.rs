@@ -45,6 +45,10 @@ pub const TOOL_CALL_FINGERPRINT_DOMAIN: &str = "cloakpipe.co/tool-call/v1";
 /// approval receipt). New in `cloakpipe.co`.
 pub const OPERATION_ID_DOMAIN: &str = "cloakpipe.co/operation/v1";
 
+/// Domain separator of an operation id named by a v1 manifest's
+/// `idempotency_key` template.
+pub const IDEMPOTENCY_KEY_OPERATION_ID_DOMAIN: &str = "cloakpipe.co/operation/idempotency-key/v1";
+
 /// Domain separator of a release audit pack's signing input.
 pub const RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.co/release-audit-pack/v1alpha1";
 pub const LEGACY_RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.dev/release-audit-pack/v1alpha1";

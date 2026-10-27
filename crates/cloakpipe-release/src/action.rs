@@ -23,6 +23,9 @@ pub const TOOL_CALL_FINGERPRINT_DOMAIN: &str = namespace::TOOL_CALL_FINGERPRINT_
 /// Domain separator of a derived operation id.
 pub const OPERATION_ID_DOMAIN: &str = namespace::OPERATION_ID_DOMAIN;
 
+/// Domain separator of an operation id from an `idempotency_key` template.
+pub const IDEMPOTENCY_KEY_OPERATION_ID_DOMAIN: &str = namespace::IDEMPOTENCY_KEY_OPERATION_ID_DOMAIN;
+
 /// A tool-call fingerprint. Displays as `sha256:<hex>`; parses from that or
 /// from bare lowercase hex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,6 +84,21 @@ pub fn derive_operation_id(key: &[u8; 32], task_id: &str, fingerprint: &ToolCall
     mac.update(task_id.as_bytes());
     mac.update(b"\n");
     mac.update(fingerprint.hex().as_bytes());
+    let digest = hex::encode(mac.finalize().into_bytes());
+    format!("op-{}", &digest[..32])
+}
+
+/// The operation id of a side-effecting call whose v1 manifest tool has an
+/// `idempotency_key` template: `op-` + the first 32 hex digits of
+/// `HMAC-SHA256(key, jcs([domain, release, tool, rendered_key]))`, where
+/// `release` is the manifest's release name (so a retry after a redeploy is
+/// still the same operation) and `rendered_key` the template rendered over
+/// the call. The JCS array keeps the fields unambiguous whatever they hold.
+pub fn derive_idempotent_operation_id(key: &[u8; 32], release: &str, tool: &str, rendered_key: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes a key of any length");
+    let fields = json!([IDEMPOTENCY_KEY_OPERATION_ID_DOMAIN, release, tool, rendered_key]);
+    mac.update(&serde_json_canonicalizer::to_vec(&fields).expect("strings encode"));
     let digest = hex::encode(mac.finalize().into_bytes());
     format!("op-{}", &digest[..32])
 }

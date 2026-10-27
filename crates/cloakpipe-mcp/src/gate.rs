@@ -1,5 +1,16 @@
 //! Runtime tool gate (Phase C): may this Agent Release call this tool now?
 //!
+//! The gate runs on a single-file v1 manifest ([`ToolGate::from_manifest`],
+//! `cloakpipe.manifest.yaml`, see [`cloakpipe_release::v1`]) or, deprecated,
+//! on a legacy AgentRelease plus the ToolContracts it binds
+//! ([`ToolGate::new`] + [`ToolGate::with_contracts`]). Both compile to the
+//! same per-tool rules. With a v1 manifest every declared tool has rules
+//! (closed by default: a tool without `args` takes no arguments); a
+//! side-effecting tool's operation id comes from its `idempotency_key`
+//! template when it has one, and approval can be conditional (`when`), routed
+//! (`approvers`, reported in [`ToolGate::approval_request`]) and bounded
+//! (`ttl`: a receipt valid for longer than that is `approval_invalid`).
+//!
 //! The MCP interceptor asks [`ToolGate::check`] before forwarding each
 //! `tools/call`. A call is allowed only when the tool is declared in the
 //! release manifest (`spec.tools`, by name: `tool:refund@4` declares
@@ -44,8 +55,10 @@
 use cloakpipe_cert::statement::{verify, Status, VerifyContext};
 use cloakpipe_receipt::approval::{verify_approval, ApprovalCheck, ApprovalError};
 use cloakpipe_receipt::dsse::{Envelope, TrustedKey};
-use cloakpipe_release::action::{derive_operation_id, fingerprint, ToolCallFingerprint};
-use cloakpipe_release::contract::{self, ToolContract, ViolationCode};
+use cloakpipe_receipt::dsse::parse_rfc3339;
+use cloakpipe_release::action::{derive_idempotent_operation_id, derive_operation_id, fingerprint, ToolCallFingerprint};
+use cloakpipe_release::contract::{self, ToolContract, ToolRule, ViolationCode};
+use cloakpipe_release::v1::Manifest;
 use cloakpipe_release::{AgentRelease, Reference, ReleaseHash};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -81,7 +94,7 @@ pub enum Denial {
     WrongEnvironment(String),
     /// A required argument is absent (`path`: its contract path).
     ArgumentMissing { path: Option<String> },
-    /// An argument the contract does not list. Its name is never reported;
+    /// An argument the manifest does not declare. Its name is never reported;
     /// `path` is the object holding it (`None` at the top level).
     UndeclaredArgument { path: Option<String> },
     /// A value breaks its constraint (`path`: the contract path, never the value).
@@ -207,6 +220,16 @@ pub struct Authorization {
     pub operation: Option<OperationKey>,
 }
 
+/// What an external approval broker needs to route a request for a call
+/// the gate refused as `approval_required`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    /// The tool's `approval.approvers` routes (empty for a legacy contract).
+    pub approvers: Vec<String>,
+    /// The call's fingerprint (`sha256:<hex>`): what a receipt must cover.
+    pub fingerprint: String,
+}
+
 /// Where approval receipts come from and who may sign them.
 struct Approvals {
     dir: PathBuf,
@@ -263,7 +286,14 @@ struct CertificationRequirement {
 
 pub struct ToolGate {
     pub mode: GateMode,
+    /// The manifest digest (`sha256:<hex>`): the release identity.
     release: String,
+    /// The release name (`release:` / legacy `metadata.agent`).
+    release_name: String,
+    /// `version:` / legacy `metadata.version`.
+    version: String,
+    /// The v1 manifest's policy file digest, if it references one.
+    policy_digest: Option<String>,
     tools: BTreeSet<String>,
     /// `None`: the release manifest alone decides (the default).
     #[cfg(feature = "certification")]
@@ -272,8 +302,8 @@ pub struct ToolGate {
     contract_refs: BTreeSet<String>,
     /// Whether [`Self::with_contracts`] accepted the contracts the release binds.
     contracts_loaded: bool,
-    /// Tool name -> its contract.
-    contracts: BTreeMap<String, ToolContract>,
+    /// Tool name -> its rules (from the v1 manifest or a bound contract).
+    rules: BTreeMap<String, ToolRule>,
     /// The trusted task context (never from MCP messages).
     task: Option<Value>,
     /// Approval receipts; `None`: every approval-gated call is refused.
@@ -308,18 +338,55 @@ impl ToolGate {
         Self {
             mode,
             release: manifest.manifest_hash().to_string(),
+            release_name: manifest.metadata.agent.clone(),
+            version: manifest.metadata.version.clone(),
+            policy_digest: None,
             tools,
             #[cfg(feature = "certification")]
             certification: None,
             contracts_loaded: contract_refs.is_empty(),
             contract_refs,
-            contracts: BTreeMap::new(),
+            rules: BTreeMap::new(),
             task: None,
             approvals: None,
             operations: None,
             recovered: Vec::new(),
             operation_id_key: None,
         }
+    }
+
+    /// A gate for a single-file v1 manifest: it allows the tools the
+    /// manifest declares, with the rules it declares for them. Give it the
+    /// trusted task context with [`Self::with_task_context`].
+    pub fn from_manifest(mode: GateMode, manifest: &Manifest) -> Self {
+        Self {
+            mode,
+            release: manifest.digest().to_string(),
+            release_name: manifest.release.clone(),
+            version: manifest.version.clone(),
+            policy_digest: manifest.policy_digest().map(|d| d.to_string()),
+            tools: manifest.tools().keys().cloned().collect(),
+            #[cfg(feature = "certification")]
+            certification: None,
+            contract_refs: BTreeSet::new(),
+            contracts_loaded: true,
+            rules: manifest.tools().clone(),
+            task: None,
+            approvals: None,
+            operations: None,
+            recovered: Vec::new(),
+            operation_id_key: None,
+        }
+    }
+
+    /// Give the gate the trusted task context (never from MCP messages):
+    /// `one_of_context` values, `{task.*}` key placeholders and `taskId`.
+    pub fn with_task_context(mut self, task: Option<Value>) -> Result<Self, GateConfigError> {
+        if task.as_ref().is_some_and(|t| !t.is_object()) {
+            return Err(GateConfigError::TaskContextNotObject);
+        }
+        self.task = task;
+        Ok(self)
     }
 
     /// Legacy (`certification` feature): also refuse every call unless
@@ -348,8 +415,8 @@ impl ToolGate {
             if !self.contract_refs.contains(&policy_ref) {
                 return Err(GateConfigError::NotInRelease { policy_ref });
             }
-            for tool in c.spec.tools.keys() {
-                if by_tool.insert(tool.clone(), c.clone()).is_some() {
+            for (tool, rule) in &c.spec.tools {
+                if by_tool.insert(tool.clone(), rule.clone()).is_some() {
                     return Err(GateConfigError::AmbiguousTool { tool: tool.clone() });
                 }
             }
@@ -358,7 +425,7 @@ impl ToolGate {
         if let Some(missing) = self.contract_refs.difference(&supplied).next() {
             return Err(GateConfigError::NotSupplied { policy_ref: missing.clone() });
         }
-        self.contracts = by_tool;
+        self.rules = by_tool;
         self.task = task;
         self.contracts_loaded = true;
         Ok(self)
@@ -403,8 +470,7 @@ impl ToolGate {
     /// operations store.
     pub fn ready(&self) -> Result<(), GateConfigError> {
         if self.operations.is_none() {
-            let side_effect = self.contracts.iter().find(|(tool, c)| c.rule(tool).is_some_and(|r| r.side_effect));
-            if let Some((tool, _)) = side_effect {
+            if let Some((tool, _)) = self.rules.iter().find(|(_, r)| r.side_effect) {
                 return Err(GateConfigError::OperationsRequired { tool: tool.clone() });
             }
         }
@@ -414,6 +480,37 @@ impl ToolGate {
     /// The release's manifest hash (`sha256:<hex>`).
     pub fn release(&self) -> &str {
         &self.release
+    }
+
+    /// The manifest digest (`sha256:<hex>`); the same as [`Self::release`].
+    pub fn manifest_digest(&self) -> &str {
+        &self.release
+    }
+
+    /// The v1 manifest's policy file digest (`sha256:<hex>`), if any.
+    pub fn policy_digest(&self) -> Option<String> {
+        self.policy_digest.clone()
+    }
+
+    /// The release name.
+    pub fn release_name(&self) -> &str {
+        &self.release_name
+    }
+
+    /// The release version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// For a call that needs approval: the routes and the fingerprint an
+    /// approval broker needs. `None` when the call needs no approval (an
+    /// undeclared tool, no approval rule, or a `when` that does not hold).
+    pub fn approval_request(&self, tool: &str, arguments: Option<&Value>) -> Option<ApprovalRequest> {
+        let rule = self.rules.get(tool).filter(|r| self.tools.contains(tool) && r.needs_approval(arguments))?;
+        let release: ReleaseHash = self.release.parse().ok()?;
+        let fp = fingerprint(&release, tool, arguments.unwrap_or(&Value::Null));
+        let approvers = rule.approval.as_ref().map(|a| a.approvers.clone()).unwrap_or_default();
+        Some(ApprovalRequest { approvers, fingerprint: fp.to_string() })
     }
 
     /// The release's manifest hash as bytes, for ledger binding.
@@ -440,11 +537,13 @@ impl ToolGate {
         if !self.contracts_loaded {
             return Err(Denial::ContractMissing);
         }
-        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(Authorization::default()) };
+        let Some(rule) = self.rules.get(tool) else { return Ok(Authorization::default()) };
         rule.check(arguments, self.task.as_ref())?;
+        let needs_approval = rule.needs_approval(arguments);
+        let raw = arguments;
         let arguments = arguments.unwrap_or(&Value::Null);
-        let approval = if rule.requires_approval { Some(self.approve(tool, arguments, now)?) } else { None };
-        let operation = if rule.side_effect { Some(self.operation_key(tool, arguments, approval.as_ref())?) } else { None };
+        let approval = if needs_approval { Some(self.approve(rule, tool, arguments, now)?) } else { None };
+        let operation = if rule.side_effect { Some(self.operation_key(rule, tool, raw, approval.as_ref())?) } else { None };
         Ok(Authorization { approval, operation })
     }
 
@@ -485,23 +584,37 @@ impl ToolGate {
     /// receipt's `operationId` when a receipt for this call verifies, else the
     /// derived id.
     pub fn operation(&self, tool: &str, arguments: Option<&Value>, now: &str) -> Result<Option<OperationKey>, Denial> {
-        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(None) };
+        let Some(rule) = self.rules.get(tool) else { return Ok(None) };
         if !rule.side_effect {
             return Ok(None);
         }
+        let raw = arguments;
         let arguments = arguments.unwrap_or(&Value::Null);
-        let approval = if rule.requires_approval { self.approve(tool, arguments, now).ok() } else { None };
-        self.operation_key(tool, arguments, approval.as_ref()).map(Some)
+        let approval = if rule.needs_approval(raw) { self.approve(rule, tool, arguments, now).ok() } else { None };
+        self.operation_key(rule, tool, raw, approval.as_ref()).map(Some)
     }
 
     /// The operation of a side-effecting call: the receipt's `operationId`,
-    /// else derived from the task and the call.
-    fn operation_key(&self, tool: &str, arguments: &Value, approval: Option<&ApprovedCall>) -> Result<OperationKey, Denial> {
+    /// else from the tool's `idempotency_key` template, else derived from
+    /// the task and the call.
+    fn operation_key(
+        &self,
+        rule: &ToolRule,
+        tool: &str,
+        raw: Option<&Value>,
+        approval: Option<&ApprovedCall>,
+    ) -> Result<OperationKey, Denial> {
         if let Some(a) = approval {
             return Ok(OperationKey { operation_id: a.operation_id.clone(), fingerprint: a.fingerprint });
         }
         let release: ReleaseHash = self.release.parse().map_err(|_| Denial::OperationsUnavailable)?;
-        let fp = fingerprint(&release, tool, arguments);
+        let fp = fingerprint(&release, tool, raw.unwrap_or(&Value::Null));
+        if let Some(template) = &rule.idempotency_key {
+            let rendered = template.render(raw, self.task.as_ref())?;
+            let key = self.operation_id_key.as_ref().ok_or(Denial::OperationsUnavailable)?;
+            let operation_id = derive_idempotent_operation_id(key, &self.release_name, tool, &rendered);
+            return Ok(OperationKey { operation_id, fingerprint: fp });
+        }
         let task_id = self.task_id().ok_or(Denial::TaskContextMissing { path: None })?;
         // Without an operations store there is no key (and `ready` refuses).
         let key = self.operation_id_key.as_ref().ok_or(Denial::OperationsUnavailable)?;
@@ -513,8 +626,9 @@ impl ToolGate {
         self.task.as_ref().and_then(|t| t.get("taskId")).and_then(Value::as_str)
     }
 
-    /// Find and verify the approval receipt for this exact call.
-    fn approve(&self, tool: &str, arguments: &Value, now: &str) -> Result<ApprovedCall, Denial> {
+    /// Find and verify the approval receipt for this exact call, within the
+    /// tool's approval ttl.
+    fn approve(&self, rule: &ToolRule, tool: &str, arguments: &Value, now: &str) -> Result<ApprovedCall, Denial> {
         let Some(approvals) = &self.approvals else { return Err(Denial::ApprovalRequired) };
         let release: ReleaseHash = self.release.parse().map_err(|_| Denial::ApprovalInvalid)?;
         let fp = fingerprint(&release, tool, arguments);
@@ -541,6 +655,10 @@ impl ToolGate {
             now,
         };
         match verify_approval(&envelope, &check) {
+            Ok(a) if !within_ttl(rule, &a.approved_at, &a.not_after) => {
+                tracing::warn!("approval receipt rejected: its validity window exceeds the tool's approval ttl");
+                Err(Denial::ApprovalInvalid)
+            }
             Ok(a) => Ok(ApprovedCall {
                 receipt_digest: Sha256::digest(&bytes).into(),
                 operation_id: a.operation_id,
@@ -553,6 +671,16 @@ impl ToolGate {
                 Err(Denial::ApprovalInvalid)
             }
         }
+    }
+}
+
+/// Whether a receipt's validity window (`notAfter - approvedAt`) fits the
+/// tool's approval ttl (always, without one). Unparseable times do not fit.
+fn within_ttl(rule: &ToolRule, approved_at: &str, not_after: &str) -> bool {
+    let Some(ttl) = rule.approval.as_ref().and_then(|a| a.ttl_secs) else { return true };
+    match (parse_rfc3339(approved_at), parse_rfc3339(not_after)) {
+        (Some(from), Some(to)) => (to - from).num_seconds() <= i64::try_from(ttl).unwrap_or(i64::MAX),
+        _ => false,
     }
 }
 

@@ -292,6 +292,16 @@ where
                                             if let Some(op) = denial.operation_id() {
                                                 data["operationId"] = Value::String(op.to_string());
                                             }
+                                            // What an approval broker needs to route the
+                                            // request: the manifest's approver routes and
+                                            // the exact call a receipt must cover. Sent to
+                                            // the agent only, never to the ledger.
+                                            if denial == Denial::ApprovalRequired {
+                                                if let Some(req) = gate.approval_request(&tool, arguments) {
+                                                    data["approvers"] = serde_json::json!(req.approvers);
+                                                    data["fingerprint"] = Value::String(req.fingerprint);
+                                                }
+                                            }
                                             let rpc_code = match denial {
                                                 Denial::ReconcileBeforeRetry { .. } => RECONCILE_REQUIRED,
                                                 _ => TOOL_REFUSED,

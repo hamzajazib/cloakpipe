@@ -10,7 +10,7 @@
 pub mod gate;
 pub mod operations;
 pub mod proxy;
-pub use gate::{ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
+pub use gate::{ApprovalRequest, ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
 pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, PiiTransform, ProxyContext};
 
 use cloakpipe_core::{
