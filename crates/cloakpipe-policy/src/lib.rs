@@ -109,7 +109,7 @@ impl PolicyEngine {
     /// Parse Cedar source. Templates and repeated ids are refused.
     pub fn parse(src: &str) -> Result<Self, PolicyError> {
         let src = tool_as_action(src);
-        let parsed = PolicySet::from_str(&src).map_err(|e| PolicyError::Parse(render_parse_error(&e)))?;
+        let parsed = PolicySet::from_str(&src).map_err(|e| PolicyError::Parse(render_parse_error(&e, &src)))?;
         if parsed.templates().next().is_some() {
             return Err(PolicyError::Parse("policy templates (?principal / ?resource slots) are not supported".into()));
         }
@@ -302,13 +302,17 @@ fn tool_as_action(src: &str) -> String {
     out
 }
 
-/// Cedar's parse errors, with their source snippets.
-fn render_parse_error(e: &cedar_policy::ParseErrors) -> String {
-    let mut msg = e.to_string();
-    for (n, err) in e.iter().enumerate().skip(1) {
-        msg.push_str(&format!("; ({}) {err}", n + 1));
-    }
-    msg
+/// Cedar's parse errors, each with the line it is on.
+fn render_parse_error(e: &cedar_policy::ParseErrors, src: &str) -> String {
+    use miette::Diagnostic;
+    let line = |offset: usize| src.as_bytes()[..offset.min(src.len())].iter().filter(|b| **b == b'\n').count() + 1;
+    e.iter()
+        .map(|err| match err.labels().and_then(|mut l| l.next()) {
+            Some(label) => format!("line {}: {err}", line(label.offset())),
+            None => err.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]

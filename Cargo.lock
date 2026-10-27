@@ -770,6 +770,7 @@ version = "0.11.0"
 dependencies = [
  "cedar-policy",
  "chrono",
+ "miette",
  "rusqlite",
  "serde_json",
  "tempfile",

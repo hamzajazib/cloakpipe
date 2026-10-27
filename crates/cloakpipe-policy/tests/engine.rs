@@ -42,6 +42,9 @@ fn deny(ids: &[&str]) -> PolicyDecision {
 fn a_parse_error_is_refused() {
     assert!(matches!(PolicyEngine::parse("permit (principal, action, resource"), Err(PolicyError::Parse(_))));
     assert!(matches!(PolicyEngine::parse("this is not cedar;"), Err(PolicyError::Parse(_))));
+    // The message says where.
+    let err = PolicyEngine::parse("permit (principal, action, resource);\n\nforbid (principal, action, resource) when { ; };").unwrap_err();
+    assert!(err.to_string().contains("line 3"), "{err}");
 }
 
 #[test]

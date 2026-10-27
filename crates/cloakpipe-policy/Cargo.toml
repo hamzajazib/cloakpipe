@@ -8,6 +8,8 @@ description = "Cedar policy evaluation and persistent call counters for the Cloa
 
 [dependencies]
 cedar-policy = { version = "4.14", default-features = false, features = ["decimal"] }
+# Source locations of Cedar parse errors.
+miette = "7"
 rusqlite = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
