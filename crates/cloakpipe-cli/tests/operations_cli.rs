@@ -447,3 +447,51 @@ fn a_v011_operations_db_with_masked_results_needs_transform_pii() {
     assert_eq!(a["result"]["content"][0]["text"], "patched", "{a}");
     assert_eq!(effects(w.path()), 1, "no second effect");
 }
+
+/// `operations reconcile --manifest` takes a v1 manifest too, and binds the
+/// reconciliation to its digest. (The default build: the certification
+/// build cannot run the gate on a v1 manifest without a certification.)
+#[cfg(not(feature = "certification"))]
+#[test]
+fn reconcile_binds_a_v1_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let manifest = root("../../examples/support-agent/cloakpipe.manifest.yaml");
+    let task = root("../../examples/support-agent/task-context.json");
+    let (db, ledger) = (p(d, "ops.db"), p(d, "ledger.db"));
+    let email = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "send_email", "arguments": {
+        "ticket_id": "T-1042", "to": "dana@customer.example", "subject": "Your refund", "body": "On its way."}}});
+
+    // The email is sent, then the tool dies without answering: unknown.
+    let mut child = bin()
+        .current_dir(d)
+        .args(["mcp-proxy", "--upstream", &upstream(d, true), "--manifest", &manifest, "--task-context", &task])
+        .args(["--operations-db", &db, "--ledger-db", &ledger, "--state-db", &p(d, "state.db")])
+        .env("CLOAKPIPE_HOME", d.join("home"))
+        .env_remove("CLOAKPIPE_SIGNING_KEY")
+        .env_remove("CLOAKPIPE_TASK_CONTEXT")
+        .env_remove("CLOAKPIPE_OPERATIONS_DB")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(format!("{email}\n").as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let reply: Value = serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(reply["error"]["data"]["reason"], "operation_unknown", "{reply} {}", String::from_utf8_lossy(&out.stderr));
+    let op = reply["error"]["data"]["operationId"].as_str().unwrap().to_string();
+
+    let out = run_ok(d, &[
+        "operations", "reconcile", &op, "--outcome", "done", "--operations-db", &db, "--ledger-db", &ledger,
+        "--manifest", &manifest,
+    ]);
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["state"], "done", "{report}");
+
+    let digest = run_ok(d, &["manifest", "hash", &manifest]).trim().to_string();
+    let entries = LedgerStore::open(&ledger).unwrap().decisions().unwrap();
+    let reconciled: Vec<_> = entries.iter().filter(|e| e.event == Event::Reconcile).collect();
+    assert_eq!(reconciled.len(), 1, "{entries:?}");
+    assert_eq!(reconciled[0].release.as_deref(), Some(digest.as_str()), "bound to the v1 manifest");
+}

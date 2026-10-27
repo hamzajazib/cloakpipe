@@ -139,6 +139,10 @@ may contain breaking changes; these are marked **Breaking**.
 - `cloakpipe verify` / `cloakpipe-verify pack` with several `--key`s (a
   rotated gate key) named the first pinned key as the pack's signer; it now
   names the key that signed `pack.json`.
+- `cloakpipe operations reconcile --manifest` read only the legacy Agent
+  Release and failed on a v1 `cloakpipe.manifest.yaml` with "unknown field
+  `release`"; it now takes either format and binds the reconciliation entry
+  to the manifest digest.
 - **Breaking (build): the default `cloakpipe` binary is the lean gate**:
   `mcp-proxy` and its evidence tooling, plus regex PII detection for `start`,
   `scan`, `mcp` and `mcp-proxy --transform pii`. It no longer links ONNX
