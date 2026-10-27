@@ -11,6 +11,14 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- `cloakpipe-cli` cargo features `ner`, `rag` and `full` (= `ner`, `rag`,
+  `certification`). CI tests the default build and `--features full`, and
+  `tools/check_dep_boundary.sh` fails if the default `cloakpipe-cli` or
+  `cloakpipe-proxy` dependency tree contains `ort`, `tokenizers`, `ureq`,
+  `cloakpipe-cert`, `cloakpipe-tree` or `cloakpipe-vector`.
+- crates.io metadata on every crate (`homepage`, `readme`, `keywords`,
+  `categories`) and versions on all path dependencies; `cloakpipe-local`,
+  `cloakleak` and `cloakleak-cli` are `publish = false`.
 - `examples/support-agent/`: a support agent whose prompt-injected
   `send_email` to an attacker is refused (`scope_mismatch` on `/to`, bound to
   `task.customer_email`), with a stdlib-only mock MCP server and the exact
@@ -22,6 +30,22 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Changed
 
+- **Breaking (build): the default `cloakpipe` binary is the lean gate**:
+  `mcp-proxy` and its evidence tooling, plus regex PII detection for `start`,
+  `scan`, `mcp` and `mcp-proxy --transform pii`. It no longer links ONNX
+  Runtime, tokenizers, the RAG crates or `cloakpipe-cert`. Build with
+  `--features ner` for the NER detectors (a config with `[detection.ner]
+  enabled = true` now warns and runs on regex in a build without them),
+  `--features rag` for `tree`, `vector` and the proxy's `/v1/embeddings` and
+  `/tree/*` routes, `--features certification` for `eval`, `release certify`,
+  `release verify-cert` and `release audit-pack`, or `--features full` for all
+  of it. The Docker image takes `--build-arg CLOAKPIPE_FEATURES=...`.
+- **Licence: MIT only.** `cloakpipe-anchor`, `cloakpipe-verify`, `cloakleak`
+  and `cloakleak-cli` (and the CloakLeak sample corpus) move from Apache-2.0
+  and CC-BY-4.0 to MIT, under the one root `LICENSE`.
+- The workspace and crate descriptions describe the tool-call gate
+  ("Self-hosted policy-enforcement gate for AI agent tool calls") instead of
+  a privacy proxy.
 - **Breaking (`cloakpipe mcp-proxy`): PII masking is opt-in.** By default
   the proxy forwards tool-call arguments and results unchanged: the gate
   allows or refuses a call and never rewrites an allowed one, so a tool now
