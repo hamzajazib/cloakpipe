@@ -69,6 +69,9 @@ pub const APPROVAL_PREDICATE_TYPE: &str = "https://cloakpipe.co/attestations/app
 pub const AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/agent-release/v1alpha1.json";
 pub const LEGACY_AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.dev/schemas/agent-release/v1alpha1.json";
 
+/// `$id` of `schemas/cloakpipe.manifest.schema.json` (the single-file v1 manifest).
+pub const MANIFEST_V1_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/cloakpipe.manifest/v1.json";
+
 /// `$id` of `schemas/tool-contract.schema.json`.
 pub const TOOL_CONTRACT_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/tool-contract/v1alpha1.json";
 
