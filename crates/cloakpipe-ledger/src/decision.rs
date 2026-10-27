@@ -239,7 +239,7 @@ pub fn entry_hash_of(entry: &Value) -> [u8; 32] {
 }
 
 /// Sorted keys, no whitespace, serde_json's string escaping.
-fn canonical_json(v: &Value, out: &mut Vec<u8>) {
+pub(crate) fn canonical_json(v: &Value, out: &mut Vec<u8>) {
     match v {
         Value::Object(o) => {
             let mut keys: Vec<&String> = o.keys().collect();

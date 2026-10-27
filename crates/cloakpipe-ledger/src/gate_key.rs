@@ -37,6 +37,7 @@ struct KeyFile {
 }
 
 /// An Ed25519 gate signing key.
+#[derive(Clone)]
 pub struct GateKey {
     key: SigningKey,
 }
@@ -104,6 +105,12 @@ impl GateKey {
     /// `release keygen` names keys.
     pub fn keyid(&self) -> String {
         format!("ed25519:{}", &hex::encode(Sha256::digest(self.public_key()))[..16])
+    }
+
+    /// The key itself, for signers that need it whole (a Rekor
+    /// `hashedrekord` entry is signed Ed25519ph).
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.key
     }
 
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
