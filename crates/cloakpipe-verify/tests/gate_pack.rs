@@ -147,6 +147,27 @@ fn a_pinned_key_must_have_signed_everything() {
     assert!(!r.ok(), "{}", r.render());
 }
 
+#[test]
+fn a_rotated_gate_key_verifies_with_both_keys_pinned_and_names_the_pack_signer() {
+    // Entries signed by the old key, then by the new one; the pack is
+    // exported (and signed) with the new key.
+    let mut e = env();
+    e.append(call(Decision::Allow, "ok"));
+    let old = e.key.clone();
+    e.key = GateKey::from_seed([3; 32]);
+    e.append(call(Decision::Deny, "scope_mismatch"));
+    let pack = e.pack();
+    for keys in [vec![old.public_key(), e.key.public_key()], vec![e.key.public_key(), old.public_key()]] {
+        let r = verify_pack(&pack, &PackTrust { gate_keys: keys, ..e.trust() });
+        assert!(r.ok(), "{}", r.render());
+        let signed_by = format!("signed by {} (pinned)", e.key.keyid());
+        assert!(r.render().contains(&signed_by), "missing {signed_by:?} in\n{}", r.render());
+    }
+    // Only the new key pinned: the old entry is not trusted.
+    let r = verify_pack(&pack, &PackTrust { gate_keys: vec![e.key.public_key()], ..e.trust() });
+    assert!(!r.ok(), "{}", r.render());
+}
+
 fn files(tar: &[u8]) -> Vec<(String, Vec<u8>)> {
     ustar::read(tar).unwrap().into_iter().map(|f| (f.name, f.data)).collect()
 }
