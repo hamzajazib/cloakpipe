@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["ai-agents", "cedar", "mcp", "policy"]
+categories = ["development-tools"]
 description = "Cedar policy evaluation and persistent call counters for the CloakPipe tool gate"
 
 [dependencies]
