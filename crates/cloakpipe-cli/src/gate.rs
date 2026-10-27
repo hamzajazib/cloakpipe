@@ -10,6 +10,11 @@
 //! not for certifiability, so it needs no code, prompt, model or runtime
 //! pins; a deprecation warning goes to stderr.
 //!
+//! A v1 manifest's Cedar policy (`policy:`) is loaded at start-up (an
+//! invalid policy refuses to start) with its persistent call counters in
+//! `--state-db`, else `$CLOAKPIPE_STATE_DB`, else `$CLOAKPIPE_HOME/state.db`
+//! (`CLOAKPIPE_HOME` defaults to `~/.cloakpipe`).
+//!
 //! Legacy, `certification` cargo feature only (off by default): the
 //! `--certification`, `--trust`, `--trust-key`, `--revoked-statement`,
 //! `--revoked-key` and `--environment` flags, and a gate that refuses every
@@ -98,6 +103,13 @@ pub struct McpProxyArgs {
     /// Default: $CLOAKPIPE_OPERATIONS_DB. One proxy per database.
     #[arg(long = "operations-db")]
     pub operations_db: Option<PathBuf>,
+    /// State database (SQLite) for the Cedar policy's persistent call
+    /// counters (context.counters), used when the manifest has `policy:`.
+    /// Default: $CLOAKPIPE_STATE_DB, else $CLOAKPIPE_HOME/state.db
+    /// (CLOAKPIPE_HOME defaults to ~/.cloakpipe). The counters survive a
+    /// restart, so a rate limit cannot be reset by restarting the proxy.
+    #[arg(long = "state-db")]
+    pub state_db: Option<PathBuf>,
     /// Opt-in transform of allowed calls. `pii`: pseudonymize PII in
     /// tool-call arguments before the tool sees them and rehydrate tokens in
     /// results, through the vault (CLOAKPIPE_VAULT_KEY, vault.path in the
@@ -132,6 +144,7 @@ impl McpProxyArgs {
             || self.approvals.is_some()
             || !self.approver_keys.is_empty()
             || self.operations_db.is_some()
+            || self.state_db.is_some()
     }
 }
 
@@ -212,7 +225,19 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
             eprintln!("warning: operation {op} was left in flight by a previous run: its outcome is unknown until reconciled (cloakpipe operations reconcile)");
         }
     }
-    // A side-effect tool with no operations store must not run.
+    if gate.has_policy() {
+        let path = state_db(a)?;
+        let counters = cloakpipe_mcp::Counters::open(&path)
+            .map_err(|e| usage(format_args!("--state-db {}: {e}", path.display())))?;
+        gate = gate.with_policy(counters).map_err(invalid)?;
+        eprintln!(
+            "cloakpipe: Cedar policy {} loaded ({} policies); call counters in {}",
+            gate.policy_digest().unwrap_or_default(),
+            gate.policy_ids().len(),
+            path.display()
+        );
+    }
+    // A side-effect tool with no operations store, or a policy not loaded, must not run.
     gate.ready().map_err(usage)?;
     Ok(Some(gate))
 }
@@ -286,6 +311,36 @@ fn approvals(a: &McpProxyArgs) -> Res<Option<(PathBuf, Vec<TrustedKey>)>> {
             Ok(Some((dir.clone(), keys)))
         }
     }
+}
+
+/// Where the policy counters live: `--state-db`, `$CLOAKPIPE_STATE_DB`, or
+/// `$CLOAKPIPE_HOME/state.db` (the directory is created, owner-only).
+fn state_db(a: &McpProxyArgs) -> Res<PathBuf> {
+    if let Some(p) = a.state_db.clone().or_else(|| std::env::var_os("CLOAKPIPE_STATE_DB").filter(|v| !v.is_empty()).map(PathBuf::from)) {
+        return Ok(p);
+    }
+    let home = cloakpipe_home().ok_or_else(|| usage("cannot find a home directory for the state database: set --state-db or CLOAKPIPE_HOME"))?;
+    create_private_dir(&home).map_err(|e| usage(format_args!("--state-db: cannot create {}: {e}", home.display())))?;
+    Ok(home.join("state.db"))
+}
+
+/// `$CLOAKPIPE_HOME`, else `~/.cloakpipe`.
+pub(crate) fn cloakpipe_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("CLOAKPIPE_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(h));
+    }
+    std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| PathBuf::from(h).join(".cloakpipe"))
+}
+
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
 }
 
 /// The trusted task context: `--task-context`, else `$CLOAKPIPE_TASK_CONTEXT`.

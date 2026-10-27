@@ -106,7 +106,12 @@ fn validate(path: &Path) -> Res<i32> {
         Loaded::V1(m) => {
             println!("valid  {}  {}@{}  {} tools", m.digest(), m.release, m.version, m.tools().len());
             if let Some(p) = &m.policy {
-                println!("policy {}  {}", p.digest, p.declared);
+                let src = std::str::from_utf8(&p.source)
+                    .map_err(|_| invalid(format_args!("{}: policy {}: not UTF-8", path.display(), p.declared)))?;
+                let engine = cloakpipe_mcp::PolicyEngine::parse(src)
+                    .map_err(|e| invalid(format_args!("{}: policy {}: {e}", path.display(), p.declared)))?;
+                let n = engine.policy_ids().len();
+                println!("policy {}  {}  {n} Cedar {}", p.digest, p.declared, if n == 1 { "policy" } else { "policies" });
             }
         }
         Loaded::Legacy(r) => {
