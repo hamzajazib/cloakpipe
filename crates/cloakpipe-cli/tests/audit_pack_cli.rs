@@ -1,5 +1,5 @@
 //! `cloakpipe release audit-pack`: assemble a release audit pack from local
-//! files (docs/AUDIT_PACK.md) and check it with the standalone verifier.
+//! files (docs/legacy/AUDIT_PACK.md) and check it with the standalone verifier.
 //!
 //! Exit codes: 0 written, 1 invalid input (a run, certification, event or
 //! ledger export that could never verify), 2 usage or I/O error.

@@ -284,6 +284,11 @@ pub fn verify_pack(tar: &[u8], trust: &PackTrust) -> PackReport {
         }
     };
     r.pack_ok = check_manifest(&manifest, &by_name, &keys, &mut r.failures);
+    // With several keys pinned (a rotation), report the one that signed
+    // pack.json, not merely the first one given.
+    if let Some(signer) = manifest.get("signer").and_then(Value::as_str).filter(|s| keys.contains_key(*s)) {
+        r.gate_key = Some(signer.to_string());
+    }
 
     // Entries.
     let entries = match by_name.get("entries.jsonl").map(|d| std::str::from_utf8(d)) {

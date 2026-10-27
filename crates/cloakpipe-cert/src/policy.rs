@@ -1,6 +1,6 @@
 //! The certification decision.
 //!
-//! Contract (see docs/CERTIFICATION.md §Decision). `decide` is a pure,
+//! Contract (see docs/legacy/CERTIFICATION.md §Decision). `decide` is a pure,
 //! deterministic function: the same input always yields an identical
 //! `Decision` (including reason order), regardless of the order of runs or
 //! cases in the input. It never panics.

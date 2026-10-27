@@ -12,8 +12,10 @@
 //! I/O error.
 
 use crate::keys::{invalid, usage, Res};
+use crate::manifest::{kind, load_v1, warn_legacy};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
+use cloakpipe_release::v1::ManifestKind;
 use cloakpipe_mcp::operations::{OperationState, OperationStore, ReconcileError};
 use serde_json::json;
 use std::path::PathBuf;
@@ -49,8 +51,8 @@ pub struct ReconcileArgs {
     /// The decision ledger the reconciliation is recorded in, signed.
     #[command(flatten)]
     pub ledger: crate::evidence::LedgerArgs,
-    /// Agent Release manifest the operation ran under: binds the ledger
-    /// entry to its release
+    /// Manifest the operation ran under (cloakpipe.manifest.yaml; a legacy
+    /// Agent Release is deprecated): binds the ledger entry to its digest
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Reconcile an in_flight operation (one a running gate may still get the
@@ -100,7 +102,13 @@ fn reconcile(a: &ReconcileArgs) -> Res<i32> {
         _ => OperationState::NotApplied,
     };
     let release = match &a.manifest {
-        Some(m) => Some(load_valid(m)?.manifest_hash().to_string()),
+        Some(m) => Some(match kind(m)? {
+            ManifestKind::V1 => load_v1(m)?.digest().to_string(),
+            ManifestKind::Legacy => {
+                warn_legacy(m);
+                load_valid(m)?.manifest_hash().to_string()
+            }
+        }),
         None => None,
     };
     let mut store = open(&a.operations_db)?;

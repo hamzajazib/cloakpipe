@@ -15,6 +15,14 @@ A complete example, with a prompt-injected `send_email` refused, is in
 The files under [`examples/action-boundary/`](../examples/action-boundary)
 are loaded by the test suite, so they stay in step with the code.
 
+> **Format note.** The contract examples below use the legacy two-file
+> format (an AgentRelease plus a ToolContract with `bindTo`,
+> `requiresApproval` and `sideEffect`), which is still accepted for one
+> release. New manifests use the single file `cloakpipe.manifest.yaml`,
+> where the same rules are written inline (`one_of_context`, `approval`,
+> `side_effect`): see [MANIFEST.md](MANIFEST.md). Approval receipts,
+> operations and the decision ledger work the same way with either format.
+
 ## Tool contracts
 
 A tool contract lists, for each tool it covers, the arguments a call may carry

@@ -1,6 +1,6 @@
 //! Signed certification attestations and offline verification.
 //!
-//! Contract (see docs/CERTIFICATION.md §Attestation):
+//! Contract (see docs/legacy/CERTIFICATION.md §Attestation):
 //!
 //! **Statement** (`statement`): an in-toto v1 Statement
 //! ```json

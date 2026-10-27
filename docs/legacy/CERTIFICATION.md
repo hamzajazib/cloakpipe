@@ -1,5 +1,11 @@
 # Agent Release certification
 
+> **Legacy.** Evaluation import and release certification are no longer part
+> of CloakPipe's direction: the product is the self-hosted policy-enforcement
+> gate ([README](../../README.md)). The commands below still exist, but only in
+> a build with `--features certification` (or `full`), and are kept for
+> existing users. New work should start from [MANIFEST.md](../MANIFEST.md).
+
 Certification turns evaluation evidence about one exact Agent Release into a
 deterministic decision and a signed, scoped, expiring attestation that anyone
 can verify offline.
@@ -10,7 +16,7 @@ evaluation runs ──┼─> decide(policy) ─> Decision ─> sign ─> DSSE(i
 baseline runs  ───┘
 ```
 
-Crate: [`crates/cloakpipe-cert`](../crates/cloakpipe-cert). Each module's doc
+Crate: [`crates/cloakpipe-cert`](../../crates/cloakpipe-cert). Each module's doc
 comment is the normative contract:
 
 | Module | Contract |
@@ -358,7 +364,7 @@ cloakpipe release verify-cert release.cert.dsse.json --trust key.json --release 
 
 ## GitHub Action
 
-[`.github/actions/certify`](../.github/actions/certify) wraps `release certify`
+[`.github/actions/certify`](../../.github/actions/certify) wraps `release certify`
 for workflows: it installs the CLI (`cargo install --git
 https://github.com/rohansx/cloakpipe … cloakpipe-cli --locked --features certification` at
 `cloakpipe-ref`), certifies, writes a job summary and sets the outputs
@@ -381,7 +387,7 @@ temp file for the step and removed afterwards. The action uploads nothing.
     signing-key: ${{ secrets.CLOAKPIPE_CERT_KEY }}
 ```
 
-See the action's [README](../.github/actions/certify/README.md) for all
+See the action's [README](../../.github/actions/certify/README.md) for all
 inputs. The `certification-gate` CI job exercises the CLI and the action on
 the fixtures in `crates/cloakpipe-cli/tests/fixtures/certification/`.
 
@@ -393,7 +399,7 @@ the fixtures in `crates/cloakpipe-cli/tests/fixtures/certification/`.
 > alone and do not accept the `--certification`, `--trust`, `--trust-key`,
 > `--revoked-statement`, `--revoked-key` or `--environment` flags. Build with
 > `cargo build -p cloakpipe-cli --features certification` for the behaviour
-> below. See [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
+> below. See [ACTION_BOUNDARY.md](../ACTION_BOUNDARY.md).
 
 With the `certification` feature, `cloakpipe mcp-proxy` enforces
 certification where an agent acts: its tool calls. With `--manifest`, each
@@ -428,7 +434,7 @@ conflicting calls under one operation id are refused (`operation_conflict`),
 and a call whose outcome was lost is refused (`reconcile_before_retry`,
 JSON-RPC `-32002`) until `cloakpipe operations reconcile` settles it, which
 records an `operation_reconciled` hop. See
-[ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
+[ACTION_BOUNDARY.md](../ACTION_BOUNDARY.md).
 
 `--gate enforce` (default): a refused call never reaches the upstream tool.
 The agent receives JSON-RPC error `-32001` with

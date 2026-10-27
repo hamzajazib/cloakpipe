@@ -9,6 +9,8 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+- `mcp-proxy` in a `certification` (or `full`) build no longer refuses every call as `uncertified` when no certification flag is given: the legacy certification gate applies only with `--certification`, `--trust`, `--trust-key`, `--revoked-*` or `--environment`.
+
 ### Added
 
 - `cloakpipe-cli` cargo features `ner`, `rag` and `full` (= `ner`, `rag`,
@@ -108,8 +110,41 @@ may contain breaking changes; these are marked **Breaking**.
   and distinct `tool:` and `policy:` references), without the certification
   pins `validate()` requires.
 
+- Docs for the gate: `docs/MANIFEST.md` (format reference),
+  `docs/POLICY.md` (Cedar entities, context, counters, decisions),
+  `docs/THREAT_MODEL.md` and `docs/KEYS.md` (gate key, approver keys,
+  anchoring roots, rotation; KMS/HSM on the roadmap), and
+  `examples/filesystem`, a read-only manifest and Cedar policy for the
+  reference filesystem MCP server, used by the README's Claude Code, Cursor
+  and Codex snippets.
+- `tools/check_docs.py`, run in CI: every `cloakpipe` / `cloakpipe-verify`
+  command in the README, `docs/` and `examples/*/README.md` (code blocks,
+  inline code, MCP host configs) must exist in the default binary with the
+  flags shown, and walkthroughs marked `<!-- check-docs: run -->` (the
+  README quickstart, the support-agent example, the manifest, policy and key
+  docs) are executed and their output compared with the docs. The
+  filesystem walkthrough, which downloads the server with `npx`, runs in a
+  push-only `docs-network` job.
+
 ### Changed
 
+- README rewritten around the action boundary ("Model proposes. Code
+  disposes."): a 60-second quickstart with the support-agent example (v1
+  manifest + Cedar, the prompt-injected email refused, the ledger exported
+  and verified), Declare / Enforce / Prove, host snippets, what it is not
+  and an honest roadmap. The support-agent example README now runs as
+  written with `cloakpipe` on `PATH`, and ends with a pinned-key `verify`.
+- The certification-era docs moved to `docs/legacy/` and are marked legacy:
+  `CERTIFICATION.md`, the release `AUDIT_PACK.md`, `AGENT_RELEASE.md`, and
+  the 2025 proxy `ARCHITECTURE.md`, `TECH.md` and `PLAN.md` (which showed
+  commands that never existed).
+- `cloakpipe verify` / `cloakpipe-verify pack` with several `--key`s (a
+  rotated gate key) named the first pinned key as the pack's signer; it now
+  names the key that signed `pack.json`.
+- `cloakpipe operations reconcile --manifest` read only the legacy Agent
+  Release and failed on a v1 `cloakpipe.manifest.yaml` with "unknown field
+  `release`"; it now takes either format and binds the reconciliation entry
+  to the manifest digest.
 - **Breaking (build): the default `cloakpipe` binary is the lean gate**:
   `mcp-proxy` and its evidence tooling, plus regex PII detection for `start`,
   `scan`, `mcp` and `mcp-proxy --transform pii`. It no longer links ONNX

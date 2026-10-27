@@ -19,7 +19,7 @@
 //! cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
 //!                                [--cert-trust KEYFILE] [--now RFC3339] [--json]
 //!                                          # each trust flag takes one file; repeat it
-//!                                          # a release audit pack (docs/AUDIT_PACK.md);
+//!                                          # a release audit pack (docs/legacy/AUDIT_PACK.md);
 //!                                          # needs the `release-pack` cargo feature
 //! ```
 //!
@@ -503,10 +503,10 @@ USAGE:
       any failure or gap.
   cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
                                 [--cert-trust KEYFILE] [--now RFC3339] [--json]
-      Verify a release audit pack (docs/AUDIT_PACK.md). Each role has its
-      own keys (release keygen files; the public part is enough): --trust
-      the exporter that signed the pack, --ledger-trust the ledger signers,
-      --cert-trust the certification issuers. Each flag takes one KEYFILE;
+      Verify a release audit pack (docs/legacy/AUDIT_PACK.md). Each role
+      has its own keys (release keygen files; the public part is enough):
+      --trust the exporter that signed the pack, --ledger-trust the ledger
+      signers, --cert-trust the certification issuers. Each flag takes one KEYFILE;
       repeat the flag for more. One key may not hold two roles. Offline;
       --now defaults to the current time; packs over 256 MiB are refused.
       Only in builds with the `release-pack` cargo feature.

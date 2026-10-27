@@ -2,7 +2,7 @@ name: CloakPipe certify
 description: >-
   Certify an Agent Release against a CloakPipe certification policy using
   evaluation runs as evidence, and sign the decision as a DSSE in-toto
-  attestation. See docs/CERTIFICATION.md.
+  attestation. See docs/legacy/CERTIFICATION.md.
 
 inputs:
   manifest:

@@ -1,5 +1,5 @@
 //! `cloakpipe release audit-pack`: assemble and sign a release audit pack
-//! from local files (docs/AUDIT_PACK.md).
+//! from local files (docs/legacy/AUDIT_PACK.md).
 //!
 //! Exit codes follow `release`: 0 written, 1 an input that could never
 //! verify (wrong release, malformed run/envelope/event/ledger export,

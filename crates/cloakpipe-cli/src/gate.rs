@@ -18,7 +18,8 @@
 //! Legacy, `certification` cargo feature only (off by default): the
 //! `--certification`, `--trust`, `--trust-key`, `--revoked-statement`,
 //! `--revoked-key` and `--environment` flags, and a gate that refuses every
-//! call unless the release holds a certification that verifies now.
+//! call unless the release holds a certification that verifies now. Only
+//! when one of those flags is given: without them the manifest alone decides.
 
 use crate::keys::{invalid, read, trusted_key, usage, Res};
 use crate::manifest::{kind, load_v1, warn_legacy};
@@ -137,17 +138,22 @@ impl McpProxyArgs {
 
     /// Whether any gate flag is set: without `--manifest`, that would
     /// silently run ungated.
-    fn any_gate_flag(&self) -> bool {
+    /// Whether any legacy certification flag is set. The certification gate
+    /// is opt-in: without one, the manifest alone decides.
+    fn any_certification_flag(&self) -> bool {
         #[cfg(feature = "certification")]
-        let certification = self.certification.is_some()
+        return self.certification.is_some()
             || !self.trust.is_empty()
             || !self.trust_keys.is_empty()
             || !self.revoked_statements.is_empty()
             || !self.revoked_keys.is_empty()
             || self.environment.is_some();
         #[cfg(not(feature = "certification"))]
-        let certification = false;
-        certification
+        false
+    }
+
+    fn any_gate_flag(&self) -> bool {
+        self.any_certification_flag()
             || self.gate.is_some()
             || self.mode.is_some()
             || self.ledger.signing_key.is_some()
@@ -217,9 +223,11 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
         }
     };
     #[cfg(feature = "certification")]
-    let gate = {
+    let gate = if a.any_certification_flag() {
         let certification = legacy::certification(a)?;
         gate.with_certification(&certification.environment, certification.envelope, certification.verify)
+    } else {
+        gate
     };
     let approvals = approvals(a)?;
     let mut gate = gate;

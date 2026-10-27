@@ -35,6 +35,14 @@ jobs:
         run: cargo test --workspace
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Every cloakpipe command in README.md, docs/ and examples/*/README.md
+      # must exist in the default binary, and the walkthroughs marked
+      # <!-- check-docs: run --> (the README quickstart included) must run
+      # and print what the docs say they print.
+      - name: Docs (commands exist, walkthroughs run)
+        run: |
+          cargo build -p cloakpipe-cli -p cloakpipe-verify
+          python3 tools/check_docs.py --bin target/debug
       # cloakpipe-cli turns on cloakpipe-verify's `release-pack` only with
       # `certification`, so test the verifier on its own both ways: default
       # (no certification code) and with release packs.
@@ -209,6 +217,27 @@ jobs:
           name: anchored-bundles
           path: ${{ env.WORK }}/anchored*.json
 
+  docs-network:
+    # The doc walkthroughs that download something (the filesystem example
+    # runs the real @modelcontextprotocol/server-filesystem through npx).
+    # Push only, like live-anchor: it depends on the npm registry.
+    name: docs walkthroughs (network)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify
+      - name: Docs with network walkthroughs
+        run: python3 tools/check_docs.py --bin target/debug --network
+
   release-gate:
     name: agent release manifests
     runs-on: ubuntu-latest
@@ -228,7 +257,8 @@ jobs:
           done
       - name: Validate v1 manifests (cloakpipe.manifest.yaml)
         run: |
-          for m in examples/support-agent/cloakpipe.manifest.yaml "$TESTDATA"/v1/*.manifest.yaml; do
+          for m in examples/support-agent/cloakpipe.manifest.yaml examples/filesystem/cloakpipe.manifest.yaml \
+              "$TESTDATA"/v1/*.manifest.yaml; do
             ./target/debug/cloakpipe manifest validate "$m"
           done
           # A broken rule must fail validation, not load as something else.

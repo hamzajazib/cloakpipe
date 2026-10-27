@@ -1,13 +1,18 @@
 # Agent Release manifests
 
+> **Legacy.** The AgentRelease manifest (with a separate ToolContract) is
+> still accepted by `mcp-proxy --manifest` for one release, with a
+> deprecation warning. New manifests use the single-file
+> `cloakpipe.manifest.yaml` format: see [MANIFEST.md](../MANIFEST.md).
+
 An **Agent Release** is the complete, immutable set of behaviour-affecting
 components deployed as one unit. CloakPipe evaluates, certifies, enforces and
 records evidence against the release's **manifest hash**, so a passing test of
 one configuration can never certify a different one.
 
-- Schema: [`schemas/agent-release.schema.json`](../schemas/agent-release.schema.json)
-- Rust: [`crates/cloakpipe-release`](../crates/cloakpipe-release)
-- Reference hash implementation (Python, stdlib only): [`tools/release_hash_reference.py`](../tools/release_hash_reference.py)
+- Schema: [`schemas/agent-release.schema.json`](../../schemas/agent-release.schema.json)
+- Rust: [`crates/cloakpipe-release`](../../crates/cloakpipe-release)
+- Reference hash implementation (Python, stdlib only): [`tools/release_hash_reference.py`](../../tools/release_hash_reference.py)
 
 ## Manifest
 

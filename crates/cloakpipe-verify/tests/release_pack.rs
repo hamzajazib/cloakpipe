@@ -1,4 +1,4 @@
-//! Release audit packs (docs/AUDIT_PACK.md): build with the real producers,
+//! Release audit packs (docs/legacy/AUDIT_PACK.md): build with the real producers,
 //! verify offline, and reject tampering of every section.
 
 mod common;

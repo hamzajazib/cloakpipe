@@ -1,4 +1,4 @@
-//! Verifier side: every check of docs/AUDIT_PACK.md §Verification.
+//! Verifier side: every check of docs/legacy/AUDIT_PACK.md §Verification.
 //!
 //! Checks never stop at the first problem: the report lists every failure,
 //! so a reviewer sees the whole picture. The pack passes iff there are none.
