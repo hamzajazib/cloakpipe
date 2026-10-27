@@ -203,7 +203,12 @@ refused as `approval_invalid`, because the manifest's `ttl` is 15 minutes.
 - Add a policy, say `@id("no-weekend-refunds") forbid (principal, action ==
   Action::"issue_refund", resource) when { context.time.weekday >= 6 };`,
   and re-run on a Saturday.
-- Add `--gate warn`: every call is forwarded and violations are only logged.
+- Add `--mode shadow`: every call is forwarded, and the ledger records what
+  enforce mode would have decided (`mode: shadow`).
+- Look at the evidence: every decision above was appended, signed, to the
+  decision ledger (`$CLOAKPIPE_HOME/ledger.db`, by default
+  `~/.cloakpipe/ledger.db`). `cloakpipe ledger entries > entries.jsonl`, then
+  `cloakpipe-verify decisions entries.jsonl --key <publicKey from cloakpipe ledger public-key>`.
 - Set `CLOAKPIPE_LEDGER_DB=ledger.db` to also record every call and refusal
   in the hash-chained evidence ledger.
 

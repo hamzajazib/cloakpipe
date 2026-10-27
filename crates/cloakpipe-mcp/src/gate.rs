@@ -15,7 +15,7 @@
 //! `tools/call`. A call is allowed only when the tool is declared in the
 //! release manifest (`spec.tools`, by name: `tool:refund@4` declares
 //! `refund`) and passes the tool contract that covers it, if any (below).
-//! `warn` mode reports the same verdicts but lets calls through.
+//! `shadow` mode reaches the same verdicts but lets calls through.
 //!
 //! Legacy, `certification` cargo feature only (off by default):
 //! [`ToolGate::with_certification`] also requires the release to hold a
@@ -87,8 +87,9 @@ use crate::operations::OperationStore;
 pub enum GateMode {
     /// Refuse calls that fail the gate.
     Enforce,
-    /// Forward them, but report the violation.
-    Warn,
+    /// Forward them, recording what enforce mode would have decided
+    /// (`--mode shadow`; `--gate warn` is the old name).
+    Shadow,
 }
 
 /// Why a call fails the gate. `code()` is stable and safe to record.
@@ -648,6 +649,11 @@ impl ToolGate {
         Ok(())
     }
 
+    /// Whether the release declares `tool`.
+    pub fn declares(&self, tool: &str) -> bool {
+        self.tools.contains(tool)
+    }
+
     /// The release's manifest hash (`sha256:<hex>`).
     pub fn release(&self) -> &str {
         &self.release
@@ -756,7 +762,7 @@ impl ToolGate {
     }
 
     /// The operation a call to `tool` is, whether or not it passes the gate:
-    /// `--gate warn` forwards a call that fails it, and tracking a
+    /// shadow mode forwards a call that fails it, and tracking a
     /// side-effecting call is not a release rule. `None` when the contract
     /// does not mark the tool `sideEffect: true`. The id is the approval
     /// receipt's `operationId` when a receipt for this call verifies, else the
@@ -803,7 +809,7 @@ impl ToolGate {
     }
 
     /// The trusted task context's `taskId`.
-    fn task_id(&self) -> Option<&str> {
+    pub fn task_id(&self) -> Option<&str> {
         self.task.as_ref().and_then(|t| t.get("taskId")).and_then(Value::as_str)
     }
 

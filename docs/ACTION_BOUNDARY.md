@@ -147,12 +147,11 @@ covers behave as before. Refusals use the usual JSON-RPC error `-32001`:
 Checks run in a fixed order whatever the order of the arguments: unknown
 arguments, then missing ones, then each declared argument by name.
 
-The ledger stays PII-free: the refusal hop carries `gate_denial=<reason>` and,
-where one applies, `gate_path=<contract path>`. Paths are built from the
-contract, never from the call, and never include a value. If the ledger's
-opaque-id check rejects a path (a property named `phone`, say), the hop is
-still recorded with `gate_denial` alone. `--gate warn` forwards the call and
-records `gate_violation` and `gate_path`.
+The ledger stays PII-free: the refusal's [decision entry](#the-decision-ledger)
+carries `reason` and, where one applies, `path` (the contract path). Paths
+are built from the contract, never from the call, and never include a
+value. `--mode shadow` forwards the call and records the same `decision`,
+`reason` and `path` with `mode: shadow` and `forwarded: true`.
 
 ## Approval receipts
 
@@ -200,8 +199,8 @@ bytes), the operation id, the approver and `notAfter`. `--expires` takes
 `<n>s`, `<n>m`, `<n>h` or `<n>d` (default `15m`). `--operation-id` defaults
 to a fresh UUID v4; an explicit one is 1 to 128 ASCII letters, digits, `-`,
 `_`, `.` or `:`, and must not contain (in any case) `aadhaar`, `pan`,
-`ifsc`, `gstin`, `ssn`, `phone` or `email`: the evidence ledger refuses
-those in an opaque id, so the operation's hops could not be recorded. The tool must be declared by the release, the arguments must
+`ifsc`, `gstin`, `ssn`, `phone` or `email`: the operation id is recorded in
+the ledger, so it must not read as personal data. The tool must be declared by the release, the arguments must
 be JSON without duplicate keys, and the task context must carry a string
 `taskId`.
 
@@ -256,11 +255,13 @@ receipt: `task_context_missing`.
 
 ### What the ledger records
 
-On an approved call, the `mcp_tool_call` hop carries
-`approval=<sha256 of the receipt file bytes>` (a hash value) and
-`operation_id=<the receipt's operationId>`. The receipt itself stays with the
-operator: an auditor holding it hashes the file and finds the hop. The ledger
-never holds the arguments or their fingerprint.
+On an approved call, the decision entry carries
+`approval: "sha256:<hex of the receipt file bytes>"` and
+`operation_id: <the receipt's operationId>`. The receipt itself stays with the
+operator: an auditor holding it hashes the file and finds the entry. The
+ledger never holds the arguments or their raw fingerprint (only the keyed
+`args_fingerprint`, see [below](#the-decision-ledger)). A call refused for
+want of a receipt is recorded with `decision: require_approval`.
 
 A receipt is not single-use: the same approved call can run again until
 `notAfter`. Replays of one operation are handled by operation tracking
@@ -377,15 +378,15 @@ The JSON-RPC request id maps the reply to its operation: a `result` without
 `isError: true` settles it `done` (the result is stored); `isError: true` or a
 JSON-RPC `error` settles it `failed`. A reply to an operation that is no
 longer `in_flight` (an operator reconciled it meanwhile) changes nothing and
-records no `operation_state`. When the upstream exits or its pipe
+records no outcome. When the upstream exits or its pipe
 breaks with operations still `in_flight`, they become `unknown` and each
 waiting request gets a `-32002` error with reason `operation_unknown` and its
 `operationId`. An operation an operator already reconciled is left as it is
-(no `unknown` hop), and its waiting request still gets a `-32002` error,
+(no `unknown` outcome entry), and its waiting request still gets a `-32002` error,
 with reason `operation_reconciled`, its `operationId` and the reconciled
 `state` (`done` or `not_applied`): a request is never left unanswered. When a proxy starts, any row a previous process left
 `in_flight` (it crashed) becomes `unknown`. Operation tracking also applies
-with `--gate warn`, including to a call that fails the gate and is forwarded
+in shadow mode, including to a call that fails the gate and is forwarded
 anyway (its id is a verifying receipt's `operationId`, else the derived id):
 it is not a release rule.
 
@@ -420,23 +421,82 @@ an `in_flight` one (exit 1, with a warning) unless `--force` is given: a
 running proxy may still receive that call's reply, and a verdict given now
 can contradict what the tool actually did. Use `--force` only once no proxy
 can still answer the call (it has stopped, or the system of record is
-final). An `unknown` operation needs no flag. With `--ledger-db`
-(or `CLOAKPIPE_LEDGER_DB`) it records an `operation_reconciled` hop in the
-same transaction, bound to the release given by `--manifest`; if the hop
-cannot be written, nothing changes (exit 2). Neither command creates a
-missing database (exit 2).
+final). An `unknown` operation needs no flag. It records a `reconcile`
+decision entry in the same transaction (in the default ledger, or
+`--ledger-db` / `CLOAKPIPE_LEDGER_DB`, signed with the gate signing key),
+bound to the release given by `--manifest`; if the entry cannot be written,
+nothing changes (exit 2). `--no-ledger` skips the record, with a warning.
+Neither command creates a missing operations database (exit 2).
 
 ### What the ledger records
 
-| Hop | Metadata |
-| --- | --- |
-| `mcp_tool_call` (forwarded) | `operation_id` (and `approval` for an approved call) |
-| `mcp_tool_call` (refused) | `gate_denial` (`operation_conflict`, `reconcile_before_retry`, …) and `operation_id` |
-| `mcp_tool_result` (reply) | `operation_id`, `operation_state=done` or `failed` |
-| `mcp_tool_result` (replay) | `operation_id`, `operation_state=done`, `operation_replayed=true` |
-| `mcp_tool_result` (exit or start-up sweep) | `operation_id`, `operation_state=unknown` |
-| `operation_reconciled` | `operation_id`, `operation_state=done` or `not_applied` |
+Each is a [decision entry](#the-decision-ledger) naming the `operation_id`:
 
-`operation_reconciled` is its own hop category: the verifier and the auditor
-pack count it like any other (`releaseHopsByType`). The ledger never holds
-arguments, results or fingerprints.
+| `event` | Fields |
+| --- | --- |
+| `call` (forwarded) | `decision: allow`, `forwarded: true` (and `approval` for an approved call) |
+| `call` (refused) | `decision: deny`, `reason` (`operation_conflict`, `reconcile_before_retry`, …) |
+| `outcome` (reply) | `outcome: committed` (`done`) or `failed` |
+| `replay` | `outcome: committed`, `forwarded: false`: answered from the store |
+| `outcome` (exit or start-up sweep) | `outcome: unknown` |
+| `reconcile` | `reason: reconciled`, `outcome: committed` (`done`) or `failed` (`not_applied`) |
+
+The ledger never holds arguments, results or raw fingerprints.
+
+## The decision ledger
+
+Every decision the gate makes is one entry in the decision ledger, a record
+kind of its own (`cloakpipe.decision/v1`) in the ledger database. The legacy
+PII hop records of `--transform pii` sit in another table of the same file
+and are still read. An entry is one flat JSON object:
+
+```json
+{"kind":"cloakpipe.decision/v1","seq":4,"ts":"2026-10-27T09:14:03Z","event":"call",
+ "release":"sha256:…","tool":"send_email","args_fingerprint":"hmac-sha256:…",
+ "decision":"deny","reason":"scope_mismatch","path":"/to",
+ "policy_version":"sha256:…","policy_digest":null,"mode":"enforce","task_id":"t-981",
+ "operation_id":null,"approval":null,"outcome":null,"forwarded":false,
+ "signer":"ed25519:…","prev_hash":"…","entry_hash":"…","sig":"…"}
+```
+
+- `event`: `call` (a `tools/call`, or a message refused unread, with
+  `tool: null`), `replay`, `outcome` or `reconcile`.
+- `decision`: `allow`, `deny` or `require_approval`; `reason` is the denial
+  code, or `ok`.
+- `policy_version` is the manifest digest; `policy_digest` is the sha256 of
+  the manifest's Cedar policy file (`policy:`), or null when it has none.
+- `args_fingerprint` is the call fingerprint keyed with HMAC-SHA256 under a
+  key derived from the gate signing key. The raw fingerprint is a plain hash
+  of the arguments, so a low-entropy value could be guessed from it; keyed,
+  only the key holder can link an entry to a call.
+- `mode`: `enforce`, or `shadow`, where the decision is what enforce mode
+  would have done; `forwarded` says whether the call reached the tool.
+- `entry_hash` is SHA-256 of `cloakpipe.decision.v1`, a newline, and the
+  entry without `entry_hash` and `sig` as JSON with sorted keys and no
+  whitespace. `prev_hash` chains it to the previous entry (64 zeros for
+  `seq` 0). `sig` is Ed25519 over the 32 bytes of `entry_hash` by the gate
+  signing key `signer` names.
+
+An entry is written **before** its call is forwarded or answered. If it
+cannot be written, the call is refused with reason `fail_closed` and never
+reaches the tool, in shadow mode too. A gate that cannot record the
+start-up sweep does not start.
+
+`mcp-proxy` writes the ledger by default to `$CLOAKPIPE_HOME/ledger.db`
+(`CLOAKPIPE_HOME` defaults to `~/.cloakpipe`); `--ledger-db` or
+`CLOAKPIPE_LEDGER_DB` chooses another file, and `--no-ledger` opts out with
+a warning. The signing key is `--signing-key <file>` or
+`CLOAKPIPE_SIGNING_KEY` (a `cloakpipe release keygen` file); without one
+the gate uses `$CLOAKPIPE_HOME/gate.key`, creating it (owner-only) on first
+use and printing its public key once on stderr.
+
+Auditors verify the entries offline with the public key alone:
+
+```bash
+cloakpipe ledger entries > entries.jsonl            # or --ledger-db ledger.db
+cloakpipe ledger public-key                         # the gate key's keyid and public key
+cloakpipe-verify decisions entries.jsonl --key <public key hex or key file>
+# OK  entries=… seq=0..… chain OK, signatures OK, head=…
+#     allowed=… denied=… approvals_required=… shadow=… outcomes committed=… failed=… unknown=… reconciled=…
+```
+

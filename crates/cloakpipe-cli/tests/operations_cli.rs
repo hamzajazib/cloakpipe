@@ -2,7 +2,8 @@
 //! list|reconcile`: a side-effecting tool call whose outcome is lost is never
 //! silently re-executed (docs/ACTION_BOUNDARY.md).
 
-use cloakpipe_ledger::{record::LedgerRecord, Hop, LedgerStore, MetadataValue};
+use cloakpipe_ledger::decision::{DecisionEntry, Event, Outcome};
+use cloakpipe_ledger::LedgerStore;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,8 @@ fn cli(dir: &Path, args: &[&str]) -> (i32, String, String) {
         .args(args)
         .env_remove("CLOAKPIPE_OPERATIONS_DB")
         .env_remove("CLOAKPIPE_LEDGER_DB")
+        .env_remove("CLOAKPIPE_SIGNING_KEY")
+        .env("CLOAKPIPE_HOME", dir.join("home"))
         .output()
         .unwrap();
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
@@ -175,6 +178,8 @@ impl World {
             .args(&a)
             .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
             .env("CLOAKPIPE_LEDGER_DB", self.ledger_db())
+            .env("CLOAKPIPE_HOME", self.path().join("home"))
+            .env_remove("CLOAKPIPE_SIGNING_KEY")
             .env_remove("CLOAKPIPE_RELEASE")
             .env_remove("CLOAKPIPE_TASK_CONTEXT")
             .env_remove("CLOAKPIPE_OPERATIONS_DB");
@@ -203,9 +208,14 @@ impl World {
         serde_json::from_str(&run_ok(self.path(), &a)).unwrap()
     }
 
-    fn ledger(&self) -> Vec<LedgerRecord> {
-        let store = LedgerStore::open(&self.ledger_db()).unwrap();
-        store.records_for_tenant(&cloakpipe_mcp::stable_ids().0).unwrap().into_iter().map(|r| r.record).collect()
+    /// The decision entries, after checking they verify with the gate key.
+    fn ledger(&self) -> Vec<DecisionEntry> {
+        let entries = LedgerStore::open(&self.ledger_db()).unwrap().decisions().unwrap();
+        let key: Value = serde_json::from_slice(&std::fs::read(self.path().join("home/gate.key")).unwrap()).unwrap();
+        let public: [u8; 32] = hex::decode(key["publicKey"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let values: Vec<Value> = entries.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
+        cloakpipe_verify::decisions::verify_decisions(&values, &[public]).expect("the entries verify");
+        entries
     }
 }
 
@@ -213,12 +223,7 @@ fn answer(msgs: &[Value], id: u64) -> &Value {
     msgs.iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("no answer for {id}: {msgs:?}"))
 }
 
-fn meta<'a>(r: &'a LedgerRecord, key: &str) -> Option<&'a str> {
-    match r.metadata.get(key) {
-        Some(MetadataValue::OpaqueId(s)) => Some(s),
-        _ => None,
-    }
-}
+
 
 #[test]
 fn a_lost_acknowledgment_is_reconciled_by_the_operator_and_never_re_executed() {
@@ -275,13 +280,15 @@ fn a_lost_acknowledgment_is_reconciled_by_the_operator_and_never_re_executed() {
     assert!(err.contains("done"), "{err}");
 
     let records = w.ledger();
-    let reconciled: Vec<_> = records.iter().filter(|r| r.hop == Hop::OperationReconciled).collect();
+    let reconciled: Vec<_> = records.iter().filter(|r| r.event == Event::Reconcile).collect();
     assert_eq!(reconciled.len(), 1, "{records:?}");
-    assert_eq!(meta(reconciled[0], "operation_id"), Some(op.as_str()));
-    assert_eq!(meta(reconciled[0], "operation_state"), Some("done"));
-    let release = cloakpipe_release::parse_path(Path::new(&w.release)).unwrap().manifest_hash().0;
-    assert_eq!(reconciled[0].release_hash(), Some(release), "bound to the release");
-    let dump = format!("{records:?}");
+    assert_eq!(reconciled[0].operation_id.as_deref(), Some(op.as_str()));
+    assert_eq!(reconciled[0].outcome, Some(Outcome::Committed));
+    assert_eq!(reconciled[0].tool.as_deref(), Some("crm.patch"));
+    let release = cloakpipe_release::parse_path(Path::new(&w.release)).unwrap().manifest_hash().to_string();
+    assert_eq!(reconciled[0].release.as_deref(), Some(release.as_str()), "bound to the release");
+    assert!(records.iter().any(|r| r.event == Event::Outcome && r.outcome == Some(Outcome::Unknown)), "{records:?}");
+    let dump = serde_json::to_string(&records).unwrap();
     for raw in ["demo-co", "lead-42", "asked for a demo"] {
         assert!(!dump.contains(raw), "{raw} leaked");
     }

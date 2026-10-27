@@ -304,10 +304,15 @@ runtime pins (certification at the gate is now a legacy, source-only cargo
 feature; see [CHANGELOG.md](CHANGELOG.md)).
 
 ```bash
-CLOAKPIPE_LEDGER_DB=./ledger.db \
 cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
-  --manifest release.yaml     # --gate warn to report instead of refuse
+  --manifest release.yaml     # --mode shadow to forward and record instead of refuse
 ```
+
+Every decision is appended, signed with the gate key, to the decision ledger
+(`~/.cloakpipe/ledger.db` by default; `--ledger-db`, `--signing-key`,
+`--no-ledger`). `cloakpipe ledger entries` and `cloakpipe ledger public-key`
+give an auditor what `cloakpipe-verify decisions` checks offline
+([docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#the-decision-ledger)).
 
 A refused call never reaches the tool. The agent receives a JSON-RPC error:
 

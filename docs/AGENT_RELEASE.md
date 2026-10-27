@@ -90,9 +90,12 @@ MCP servers or policies as requiring approval.
 
 ## Evidence binding
 
-Set `CLOAKPIPE_RELEASE=sha256:…` when running `cloakpipe mcp-proxy`; every
-ledger hop then carries `release_hash` inside its signed, hash-chained bytes.
-A malformed value stops the interceptor from starting.
+With `--manifest`, every decision entry `cloakpipe mcp-proxy` records
+carries the release's manifest hash (`release`) inside its signed,
+hash-chained bytes (docs/ACTION_BOUNDARY.md, "The decision ledger"). Without
+a gate, set `CLOAKPIPE_RELEASE=sha256:…` to bind the PII transform's ledger
+hops (`release_hash`). A malformed value stops the interceptor from
+starting.
 
 ## Audit pack
 

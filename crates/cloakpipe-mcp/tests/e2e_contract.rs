@@ -1,12 +1,13 @@
 //! The interceptor enforces tool contracts on the raw arguments (before the
 //! opt-in PII transform): a call that breaks its contract never reaches the tool, the
 //! agent gets a JSON-RPC error naming the reason and contract path, and the
-//! refusal is no-PII evidence (`gate_denial`, `gate_path`).
+//! refusal is a no-PII decision entry (`reason`, `path`).
 
 use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
-use cloakpipe_ledger::{record::LedgerRecord, ActionKind, LedgerStore, MetadataValue};
-use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, PiiTransform, ProxyContext, ToolGate};
+use cloakpipe_ledger::decision::{Decision, DecisionEntry, Mode};
+use cloakpipe_ledger::{GateKey, LedgerStore};
+use cloakpipe_mcp::{run_proxy_io, DecisionLog, GateMode, PiiTransform, ProxyContext, ToolGate};
 use cloakpipe_release::contract::ToolContract;
 use cloakpipe_release::{parse_path, AgentRelease, ArtifactRef, Format};
 use ed25519_dalek::SigningKey;
@@ -103,7 +104,7 @@ fn args() -> Value {
 struct Run {
     messages: Vec<Value>,
     seen: String,
-    records: Vec<LedgerRecord>,
+    records: Vec<DecisionEntry>,
 }
 
 fn run(gate: ToolGate, lines: &[String]) -> Run {
@@ -128,6 +129,7 @@ fn run_with(gate: ToolGate, lines: &[String], pii: Option<PiiTransform>) -> Run 
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(gate.release_bytes()),
         gate: Some(gate),
+        decisions: Some(DecisionLog::open(ledger_db.to_str().unwrap(), GateKey::from_seed([1; 32])).unwrap()),
     };
     let out = Capture::default();
     let input = Cursor::new(lines.iter().map(|l| format!("{l}\n")).collect::<String>().into_bytes());
@@ -136,16 +138,17 @@ fn run_with(gate: ToolGate, lines: &[String], pii: Option<PiiTransform>) -> Run 
     Run {
         messages: out.messages(),
         seen: std::fs::read_to_string(&received).unwrap_or_default(),
-        records: store.records_for_tenant(&stable_ids().0).unwrap().into_iter().map(|r| r.record).collect(),
+        records: store.decisions().unwrap(),
     }
 }
 
-fn blocks(r: &Run) -> Vec<&LedgerRecord> {
-    r.records.iter().filter(|r| r.actions.iter().any(|a| a.kind == ActionKind::Block)).collect()
+/// Refused calls' entries.
+fn blocks(r: &Run) -> Vec<&DecisionEntry> {
+    r.records.iter().filter(|r| r.decision != Decision::Allow && !r.forwarded).collect()
 }
 
 /// The refusal for request `id`, asserting the call never reached the tool
-/// and the refusal was recorded as `(gate_denial, gate_path)`.
+/// and the refusal was recorded as `(reason, path)`.
 fn refused(r: &Run, id: u64, code: &str, path: Option<&str>) {
     assert!(!r.seen.contains("crm.patch"), "{code}: the refused call reached the tool: {}", r.seen);
     let refusal = r.messages.iter().find(|m| m["id"] == id).expect("the agent gets an answer");
@@ -154,13 +157,14 @@ fn refused(r: &Run, id: u64, code: &str, path: Option<&str>) {
     assert_eq!(refusal["error"]["data"].get("path").and_then(Value::as_str), path, "{refusal}");
     let b = blocks(r);
     assert_eq!(b.len(), 1, "{:?}", r.records);
-    assert_eq!(b[0].metadata.get("gate_denial"), Some(&MetadataValue::OpaqueId(code.into())));
-    assert_eq!(b[0].metadata.get("gate_path"), path.map(|p| MetadataValue::OpaqueId(p.into())).as_ref());
+    assert_eq!(b[0].reason, code);
+    assert_eq!(b[0].path.as_deref(), path);
+    assert_eq!(b[0].tool.as_deref(), Some("crm.patch"));
 }
 
 /// No raw argument value appears in the ledger.
 fn no_values_in_ledger(r: &Run, values: &[&str]) {
-    let dump = format!("{:?}", r.records);
+    let dump = serde_json::to_string(&r.records).unwrap();
     for v in values {
         assert!(!dump.contains(v), "{v} leaked into the ledger: {dump}");
     }
@@ -248,9 +252,10 @@ fn a_missing_task_context_is_refused() {
 }
 
 #[test]
-fn a_contract_path_the_ledger_would_reject_still_records_the_denial() {
-    // `/company` contains `pan`, a PII marker for the ledger's opaque-id
-    // check; the hop is still recorded, without the path.
+fn a_contract_path_with_a_pii_marker_is_recorded() {
+    // `/company` contains `pan`, a PII marker for the legacy hop records'
+    // opaque-id check. A contract path comes from the contract, not the
+    // call, and decision entries record it as is.
     let c = contract(&[("note:  { type: string, maxLength: 280 }", "company: { type: string, maxLength: 3 }")]);
     let mut a = args();
     a["patch"] = json!({"company": "acme"});
@@ -258,24 +263,25 @@ fn a_contract_path_the_ledger_would_reject_still_records_the_denial() {
     assert!(!r.seen.contains("crm.patch"));
     let b = blocks(&r);
     assert_eq!(b.len(), 1, "the denial is evidence: {:?}", r.records);
-    assert_eq!(b[0].metadata.get("gate_denial"), Some(&MetadataValue::OpaqueId("argument_invalid".into())));
-    assert!(!b[0].metadata.contains_key("gate_path"));
+    assert_eq!(b[0].reason, "argument_invalid");
+    assert_eq!(b[0].path.as_deref(), Some("/patch/company"));
+    no_values_in_ledger(&r, &["acme"]);
 }
 
 #[test]
-fn warn_mode_forwards_and_records_the_contract_violation() {
+fn shadow_mode_forwards_and_records_the_contract_violation() {
     let c = contract(&[]);
     let m = release_binding(&c);
     let mut g = manifest_gate(&m).with_contracts(vec![c], Some(task())).unwrap();
-    g.mode = GateMode::Warn;
+    g.mode = GateMode::Shadow;
     let mut a = args();
     a["patch"]["stage"] = json!("closed-won");
     let r = run(g, &[call(7, "crm.patch", a)]);
-    assert!(r.seen.contains("crm.patch"), "warn mode forwards: {}", r.seen);
-    let flagged: Vec<_> = r.records.iter().filter(|x| x.metadata.contains_key("gate_violation")).collect();
-    assert_eq!(flagged.len(), 1, "{:?}", r.records);
-    assert_eq!(flagged[0].metadata.get("gate_violation"), Some(&MetadataValue::OpaqueId("argument_invalid".into())));
-    assert_eq!(flagged[0].metadata.get("gate_path"), Some(&MetadataValue::OpaqueId("/patch/stage".into())));
+    assert!(r.seen.contains("crm.patch"), "shadow mode forwards: {}", r.seen);
+    assert_eq!(r.records.len(), 1, "{:?}", r.records);
+    let e = &r.records[0];
+    assert_eq!((e.decision, e.reason.as_str(), e.path.as_deref()), (Decision::Deny, "argument_invalid", Some("/patch/stage")));
+    assert_eq!((e.mode, e.forwarded), (Some(Mode::Shadow), true));
 }
 
 #[test]
@@ -346,20 +352,21 @@ mod approvals {
         assert!(r.messages.iter().any(|m| m["id"] == 1 && m.get("result").is_some()), "{:?}", r.messages);
         assert!(blocks(&r).is_empty(), "{:?}", r.records);
 
-        let calls: Vec<_> = r.records.iter().filter(|x| x.metadata.contains_key("approval")).collect();
+        let calls: Vec<_> = r.records.iter().filter(|x| x.approval.is_some()).collect();
         assert_eq!(calls.len(), 1, "{:?}", r.records);
-        assert_eq!(calls[0].hop, cloakpipe_ledger::Hop::McpToolCall);
+        assert_eq!((calls[0].decision, calls[0].forwarded), (Decision::Allow, true));
         let digest: [u8; 32] = Sha256::digest(&receipt).into();
-        assert_eq!(calls[0].metadata.get("approval"), Some(&MetadataValue::Hash(digest)));
-        assert_eq!(calls[0].metadata.get("operation_id"), Some(&MetadataValue::OpaqueId("op-2b0f8f9e".into())));
+        assert_eq!(calls[0].approval, Some(format!("sha256:{}", hex::encode(digest))));
+        assert_eq!(calls[0].operation_id.as_deref(), Some("op-2b0f8f9e"));
 
-        // No raw argument value, and not the call fingerprint (a plain hash
-        // of the arguments) either.
+        // No raw argument value, and not the raw call fingerprint (a plain
+        // hash of the arguments) either: only its keyed form.
         let release = release_binding(&approval_contract()).manifest_hash();
         let fp = fingerprint(&release, "crm.patch", &args());
         no_values_in_ledger(&r, &["demo-co", "lead-42", "qualified", "called back"]);
-        let dump = format!("{:?}", r.records);
-        assert!(!dump.contains(&format!("{:?}", fp.0)) && !dump.contains(&fp.hex()), "fingerprint leaked: {dump}");
+        let dump = serde_json::to_string(&r.records).unwrap();
+        assert!(!dump.contains(&fp.hex()), "fingerprint leaked: {dump}");
+        assert_eq!(calls[0].args_fingerprint, Some(GateKey::from_seed([1; 32]).args_fingerprint(&fp.0)));
     }
 
     #[test]
@@ -387,6 +394,6 @@ mod approvals {
         approve(dir.path(), &SigningKey::from_bytes(&[99u8; 32]), &args(), -1, 15);
         let r = run(approval_gate(dir.path()), &[call(4, "crm.patch", args())]);
         refused(&r, 4, "approval_invalid", None);
-        assert!(!r.records.iter().any(|x| x.metadata.contains_key("approval")), "no approval recorded for a refused call");
+        assert!(!r.records.iter().any(|x| x.approval.is_some()), "no approval recorded for a refused call");
     }
 }

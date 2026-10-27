@@ -9,6 +9,9 @@
 //!                                          # anchor receipts valid offline
 //! cloakpipe-verify all     <bundle.json> [--trust-key KEYID=HEX]...
 //!                                          # everything; exit 0 / nonzero for CI
+//! cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE [--key ...]
+//!                                          # gate decision entries: chain, entry
+//!                                          # hashes, per-entry Ed25519 signatures
 //! cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
 //!                                [--cert-trust KEYFILE] [--now RFC3339] [--json]
 //!                                          # each trust flag takes one file; repeat it
@@ -52,6 +55,9 @@ fn run(args: &[String]) -> Result<ExitCode> {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
     if cmd == "release-pack" {
         return release_pack(&args[2..]);
+    }
+    if cmd == "decisions" {
+        return decisions(&args[2..]);
     }
     let path = args.get(2).cloned().unwrap_or_default();
     if path.is_empty() && cmd != "help" && cmd != "--help" && cmd != "-h" {
@@ -254,6 +260,73 @@ fn release_pack(args: &[String]) -> Result<ExitCode> {
     Ok(ExitCode::from(if report.ok { 0 } else { 1 }))
 }
 
+/// `decisions ENTRIES --key HEX|KEYFILE [--key ...]`: decision ledger entries
+/// (`cloakpipe.decision/v1`, one JSON object per line), checked against the
+/// gate's public key(s). Usage and I/O problems exit 2; a verification
+/// failure exits 1.
+fn decisions(args: &[String]) -> Result<ExitCode> {
+    use cloakpipe_verify::decisions::{parse_jsonl, verify_decisions};
+    let mut file = None;
+    let mut keys = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => keys.push(gate_key(it.next().context("--key needs a public key (64 hex chars) or a key file")?)?),
+            flag if flag.starts_with("--") => anyhow::bail!("unexpected argument `{flag}`"),
+            path if file.is_none() => file = Some(path.to_string()),
+            extra => anyhow::bail!("unexpected argument `{extra}` (one entries file at a time)"),
+        }
+    }
+    let file = file.context("missing entries path; usage: cloakpipe-verify decisions ENTRIES.jsonl --key HEX|KEYFILE")?;
+    if keys.is_empty() {
+        anyhow::bail!("--key is required: entries prove nothing without the gate's pinned public key");
+    }
+    let text = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+    let result = parse_jsonl(&text).and_then(|entries| verify_decisions(&entries, &keys));
+    match result {
+        Ok(s) => {
+            let range = match (s.first_seq, s.last_seq) {
+                (Some(a), Some(b)) => format!("seq={a}..{b}"),
+                _ => "seq=none".to_string(),
+            };
+            let anchored = if s.from_genesis || s.entries == 0 { "" } else { " (range: anchored at its first prev_hash)" };
+            println!(
+                "OK  entries={} {range} chain OK, signatures OK, head={}{anchored}\n    allowed={} denied={} approvals_required={} shadow={} outcomes committed={} failed={} unknown={} reconciled={}",
+                s.entries,
+                s.head,
+                s.allowed,
+                s.denied,
+                s.approvals_required,
+                s.shadow,
+                s.committed_outcomes,
+                s.failed_outcomes,
+                s.unknown_outcomes,
+                s.reconciled
+            );
+            Ok(ExitCode::from(0))
+        }
+        Err(e) => {
+            println!("FAIL  {e}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// A gate public key: 64 hex chars, or a key file (`release keygen` format;
+/// `publicKey` is read, `privateKey` never is).
+fn gate_key(arg: &str) -> Result<[u8; 32]> {
+    let hex32 = |s: &str| hex::decode(s.trim()).ok().and_then(|b| <[u8; 32]>::try_from(b).ok());
+    if let Some(k) = hex32(arg) {
+        return Ok(k);
+    }
+    let src = std::fs::read_to_string(arg).with_context(|| format!("--key {arg}: not 64 hex chars, and not a readable key file"))?;
+    let v: serde_json::Value = serde_json::from_str(&src).with_context(|| format!("--key {arg}: not a key file"))?;
+    v.get("publicKey")
+        .and_then(serde_json::Value::as_str)
+        .and_then(hex32)
+        .with_context(|| format!("--key {arg}: publicKey must be 64 hex chars"))
+}
+
 struct Opts {
     trust_keys: std::collections::BTreeMap<String, [u8; 32]>,
     tsa_root: Option<String>,
@@ -366,6 +439,11 @@ USAGE:
   cloakpipe-verify proofs   <bundle.json>
   cloakpipe-verify manifest <bundle.json>
   cloakpipe-verify all      <bundle.json> [--trust-key KEYID=HEX]... [--tsa-root PEM] [--rekor-key PEM]
+  cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE [--key ...]
+      Verify gate decision entries (cloakpipe.decision/v1, one per line):
+      seq continuity, hash chain, entry hashes and each entry's Ed25519
+      signature by a pinned gate public key (64 hex chars, or a key file's
+      publicKey). Repeat --key for rotated keys. Offline.
   cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
                                 [--cert-trust KEYFILE] [--now RFC3339] [--json]
       Verify a release audit pack (docs/AUDIT_PACK.md). Each role has its

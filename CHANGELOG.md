@@ -40,6 +40,22 @@ may contain breaking changes; these are marked **Breaking**.
   `approve` and `action fingerprint` take a v1 manifest too.
 - `cloakpipe manifest validate <file>` and `cloakpipe manifest hash <file>
   [--json]` (release, version, manifest_digest, policy_digest).
+- Decision ledger: `cloakpipe mcp-proxy` appends one entry per gate decision
+  (`cloakpipe.decision/v1`: allow, deny or require_approval for each
+  `tools/call`, messages refused unread, side-effect outcomes
+  committed/failed/unknown, replays and `operations reconcile`). Entries
+  carry seq, ts, release, tool, a keyed `args_fingerprint` (never raw
+  values), decision, reason, policy_version (the manifest digest),
+  policy_digest (the Cedar policy file's sha256, when the manifest has
+  one), mode, task_id and outcome,
+  are hash-chained, and each is signed with Ed25519 by the gate signing key
+  (`--signing-key` / `CLOAKPIPE_SIGNING_KEY`, else
+  `$CLOAKPIPE_HOME/gate.key`, created owner-only on first use with its
+  public key printed once). `cloakpipe ledger entries | public-key` and
+  `cloakpipe-verify decisions <entries.jsonl> --key …` verify them offline.
+- `mcp-proxy --mode enforce|shadow`: shadow forwards every call the gate can
+  read and records what enforce mode would have decided (`mode: shadow`).
+
 - `examples/support-agent/`: a support agent whose prompt-injected
   `send_email` to an attacker is refused (`scope_mismatch` on `/to`, bound to
   the ticket's customer), on one `cloakpipe.manifest.yaml` with an
@@ -100,6 +116,21 @@ may contain breaking changes; these are marked **Breaking**.
 - **Deprecated:** the AgentRelease + ToolContract pair (`--tool-contract`).
   It still works for this release, with a warning on stderr; `--tool-contract`
   with a v1 manifest is a usage error, since its contracts are inline.
+- **Breaking (`cloakpipe mcp-proxy`): gate decisions are recorded by
+  default** in `$CLOAKPIPE_HOME/ledger.db` (`~/.cloakpipe/ledger.db`), or
+  `--ledger-db` / `CLOAKPIPE_LEDGER_DB`; `--no-ledger` opts out with a
+  warning. A ledger or key that cannot be opened stops the gate, and an
+  entry that cannot be written refuses its call as `fail_closed` (never
+  forwarded). Gate refusals, approvals and operation states are recorded as
+  decision entries instead of `gate_denial` / `gate_violation` /
+  `operation_state` metadata on PII hop records; those hop records are now
+  written only by `--transform pii`, and old ones are still read.
+  `operations reconcile` records a signed `reconcile` entry by default
+  instead of an `operation_reconciled` hop.
+- `mcp-proxy --gate warn` is now a hidden alias of `--mode shadow`.
+- **Breaking (`cloakpipe-mcp`):** `GateMode::Warn` is `GateMode::Shadow`;
+  `ProxyContext` has a `decisions` field; `reconcile_operation` takes a
+  `DecisionLog` and the release as `sha256:` text.
 - **Breaking (`cloakpipe mcp-proxy`): PII masking is opt-in.** By default
   the proxy forwards tool-call arguments and results unchanged: the gate
   allows or refuses a call and never rewrites an allowed one, so a tool now

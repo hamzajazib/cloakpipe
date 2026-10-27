@@ -46,12 +46,11 @@ pub struct ReconcileArgs {
     /// Operations database (default: $CLOAKPIPE_OPERATIONS_DB)
     #[arg(long = "operations-db")]
     pub operations_db: Option<PathBuf>,
-    /// Evidence ledger to record the reconciliation in
-    /// (default: $CLOAKPIPE_LEDGER_DB; none: not recorded)
-    #[arg(long = "ledger-db")]
-    pub ledger_db: Option<PathBuf>,
-    /// Agent Release manifest the operation ran under: binds the ledger hop
-    /// to its release
+    /// The decision ledger the reconciliation is recorded in, signed.
+    #[command(flatten)]
+    pub ledger: crate::evidence::LedgerArgs,
+    /// Agent Release manifest the operation ran under: binds the ledger
+    /// entry to its release
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Reconcile an in_flight operation (one a running gate may still get the
@@ -101,7 +100,7 @@ fn reconcile(a: &ReconcileArgs) -> Res<i32> {
         _ => OperationState::NotApplied,
     };
     let release = match &a.manifest {
-        Some(m) => Some(load_valid(m)?.manifest_hash().0),
+        Some(m) => Some(load_valid(m)?.manifest_hash().to_string()),
         None => None,
     };
     let mut store = open(&a.operations_db)?;
@@ -110,8 +109,9 @@ fn reconcile(a: &ReconcileArgs) -> Res<i32> {
         .map_err(usage)?
         .ok_or_else(|| invalid(format_args!("operation {}: no such operation", a.operation_id)))?
         .state;
-    let ledger = env_path(&a.ledger_db, "CLOAKPIPE_LEDGER_DB").map(|p| p.to_string_lossy().into_owned());
-    cloakpipe_mcp::reconcile_operation(&mut store, &a.operation_id, outcome, a.force, ledger.as_deref(), release).map_err(|e| match e {
+    let mut ledger = a.ledger.decision_log("reconciliations")?;
+    let recorded = ledger.is_some();
+    cloakpipe_mcp::reconcile_operation(&mut store, &a.operation_id, outcome, a.force, ledger.as_mut(), release.as_deref()).map_err(|e| match e {
         ReconcileError::NotFound
         | ReconcileError::NotPending(_)
         | ReconcileError::InFlight
@@ -124,7 +124,7 @@ fn reconcile(a: &ReconcileArgs) -> Res<i32> {
         "operationId": a.operation_id,
         "previousState": previous.as_str(),
         "state": outcome.as_str(),
-        "recorded": ledger.is_some(),
+        "recorded": recorded,
     });
     println!("{}", serde_json::to_string_pretty(&report).expect("JSON"));
     Ok(EXIT_OK)

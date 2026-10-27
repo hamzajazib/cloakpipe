@@ -13,6 +13,7 @@ mod audit_pack;
 #[cfg(feature = "certification")]
 mod cert;
 mod commands;
+mod evidence;
 mod gate;
 mod keys;
 mod manifest;
@@ -99,6 +100,11 @@ enum Commands {
     Operations {
         #[command(subcommand)]
         action: operations::OperationsCommands,
+    },
+    /// The gate's signed decision ledger: print its entries or the gate public key
+    Ledger {
+        #[command(subcommand)]
+        action: evidence::LedgerCommands,
     },
     /// Evaluation runs: import external results as certification evidence
     #[cfg(feature = "certification")]
@@ -223,6 +229,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Action { action } => std::process::exit(action::run(action)),
         Commands::Approve(args) => std::process::exit(action::approve(args)),
         Commands::Operations { action } => std::process::exit(operations::run(action)),
+        Commands::Ledger { action } => std::process::exit(evidence::run(action)),
         other => other,
     };
 
@@ -260,7 +267,8 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         | Commands::Anchor(_)
         | Commands::Action { .. }
         | Commands::Approve(_)
-        | Commands::Operations { .. } => unreachable!("handled above"),
+        | Commands::Operations { .. }
+        | Commands::Ledger { .. } => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }

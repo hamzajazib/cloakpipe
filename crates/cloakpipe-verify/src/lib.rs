@@ -11,6 +11,7 @@
 
 pub mod anchor;
 pub mod bundle;
+pub mod decisions;
 pub mod rekor;
 pub mod rfc3161;
 mod time;
