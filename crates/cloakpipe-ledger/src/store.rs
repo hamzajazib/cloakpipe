@@ -48,7 +48,32 @@ pub struct LedgerStore {
 impl LedgerStore {
     /// Opens or creates a ledger at `path`. Enables WAL for concurrent
     /// appends and reasonable crash safety.
+    ///
+    /// Several processes or threads may open one ledger at once (the gate,
+    /// its anchoring thread, `cloakpipe operations reconcile`). Setting up a
+    /// new file (switching it to WAL, creating tables) can then fail
+    /// transiently even with a busy timeout, so setup is retried for up to
+    /// ten seconds.
     pub fn open(path: &str) -> Result<Self, StoreError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match Self::open_once(path) {
+                Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                    if matches!(
+                        e.code,
+                        rusqlite::ErrorCode::DatabaseBusy
+                            | rusqlite::ErrorCode::DatabaseLocked
+                            | rusqlite::ErrorCode::SystemIoFailure
+                    ) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn open_once(path: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
