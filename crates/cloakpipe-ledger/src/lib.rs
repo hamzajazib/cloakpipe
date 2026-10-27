@@ -15,15 +15,24 @@
 //!   ADR-004).
 //!
 //! The verifier (`cloakpipe-verify`, M2) reads the same schema.
+//!
+//! The tool gate records its decisions as a separate record kind,
+//! [`decision`] (`cloakpipe.decision/v1`): one entry per decision,
+//! hash-chained and signed one by one with the gate signing key
+//! ([`gate_key`]), in its own table of the same ledger database.
 
 pub mod canonical;
 pub mod chain;
+pub mod decision;
 pub mod export;
+pub mod gate_key;
 pub mod record;
 pub mod sign;
 pub mod store;
 
 pub use canonical::canonicalize;
+pub use decision::{Decision, DecisionDraft, DecisionEntry, Event, Mode, Outcome};
+pub use gate_key::GateKey;
 pub use chain::{hash_record, ChainLinkError, GENESIS_HASH};
 pub use record::{
     Action, ActionKind, ConfidenceBucket, Detection, Detector, Egress, Hop, Identity, MetadataValue,

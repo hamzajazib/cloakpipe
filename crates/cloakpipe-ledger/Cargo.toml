@@ -20,6 +20,7 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = { workspace = true }

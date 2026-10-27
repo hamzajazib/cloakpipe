@@ -3,11 +3,17 @@
 //! Uses SQLite (one file per ledger) for simplicity — same engine as the
 //! vault. Each insert is a single transaction; records are never updated
 //! or deleted.
+//!
+//! The gate's decision entries ([`crate::decision`]) live in their own
+//! `decisions` table: one chain per ledger file, each entry signed as it is
+//! appended.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
 use crate::chain::{compute_hash, GENESIS_HASH};
+use crate::decision::{DecisionDraft, DecisionEntry, GENESIS};
+use crate::gate_key::GateKey;
 use crate::record::LedgerRecord;
 
 #[derive(Debug, Error)]
@@ -22,6 +28,8 @@ pub enum StoreError {
     PrevHashMismatch,
     #[error("record's stored record_hash does not match recomputed hash")]
     RecordHashMismatch,
+    #[error("decision entry {0} is corrupt: {1}")]
+    CorruptDecision(u64, String),
 }
 
 /// A record that has been durably stored, paired with its DB row id.
@@ -45,6 +53,8 @@ impl LedgerStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // The gate and `cloakpipe operations reconcile` may write at once.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -64,6 +74,12 @@ impl LedgerStore {
             );
             CREATE INDEX IF NOT EXISTS idx_records_tenant_seq
               ON records(tenant_id, seq);
+            CREATE TABLE IF NOT EXISTS decisions (
+                seq         INTEGER PRIMARY KEY,
+                entry_hash  TEXT NOT NULL,
+                prev_hash   TEXT NOT NULL,
+                entry_json  TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
@@ -143,6 +159,50 @@ impl LedgerStore {
             let (id, _seq, json) = row?;
             let record: LedgerRecord = serde_json::from_str(&json)?;
             out.push(StoredRecord { id, record });
+        }
+        Ok(out)
+    }
+}
+
+impl LedgerStore {
+    /// Chain `draft` onto the decision chain, sign it with `key` and store
+    /// it, in one write transaction (so concurrent writers never fork the
+    /// chain). Returns the stored entry.
+    pub fn append_decision(&mut self, draft: DecisionDraft, key: &GateKey) -> Result<DecisionEntry, StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let head: Option<(i64, String)> = tx
+            .query_row("SELECT seq, entry_hash FROM decisions ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let (seq, prev) = match head {
+            Some((seq, hash)) => (seq as u64 + 1, hash),
+            None => (0, GENESIS.to_string()),
+        };
+        let mut entry = DecisionEntry::link(draft, seq, &prev, key.keyid());
+        let digest: [u8; 32] = decode_hex_32(&entry.entry_hash).expect("entry_hash is 64 hex chars");
+        entry.sig = hex_lower(&key.sign(&digest));
+        tx.execute(
+            "INSERT INTO decisions (seq, entry_hash, prev_hash, entry_json) VALUES (?1, ?2, ?3, ?4)",
+            params![seq as i64, entry.entry_hash, entry.prev_hash, entry.to_json_line()],
+        )?;
+        tx.commit()?;
+        Ok(entry)
+    }
+
+    /// Every decision entry, in seq order.
+    pub fn decisions(&self) -> Result<Vec<DecisionEntry>, StoreError> {
+        self.decisions_from(0)
+    }
+
+    /// The decision entries from `seq` on, in seq order.
+    pub fn decisions_from(&self, seq: u64) -> Result<Vec<DecisionEntry>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT seq, entry_json FROM decisions WHERE seq >= ?1 ORDER BY seq ASC")?;
+        let rows = stmt.query_map([seq as i64], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row?;
+            let entry: DecisionEntry =
+                serde_json::from_str(&json).map_err(|e| StoreError::CorruptDecision(seq as u64, e.to_string()))?;
+            out.push(entry);
         }
         Ok(out)
     }
