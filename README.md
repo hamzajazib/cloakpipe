@@ -371,7 +371,7 @@ default:
 |---|---|
 | `ner` | ONNX Runtime and GLiNER-PII NER detectors for the PII transform and proxy |
 | `rag` | the `tree` and `vector` subcommands and the proxy's `/v1/embeddings` and `/tree/*` routes |
-| `certification` | Legacy: the evaluation import, certification and release audit pack commands ([docs/legacy/](docs/legacy/README.md)). It also restores the 0.11 gate behaviour of refusing every call unless the release holds a valid certification, so do not enable it for the gate alone |
+| `certification` | Legacy: the evaluation import, certification and release audit pack commands ([docs/legacy/](docs/legacy/README.md)). The certification gate in `mcp-proxy` is opt-in: it applies only when a certification flag (`--certification`, `--trust`, ...) is given; otherwise the manifest alone decides |
 | `full` | All of the above |
 
 ```bash

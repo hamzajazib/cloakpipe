@@ -9,6 +9,8 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+- `mcp-proxy` in a `certification` (or `full`) build no longer refuses every call as `uncertified` when no certification flag is given: the legacy certification gate applies only with `--certification`, `--trust`, `--trust-key`, `--revoked-*` or `--environment`.
+
 ### Added
 
 - `cloakpipe-cli` cargo features `ner`, `rag` and `full` (= `ner`, `rag`,

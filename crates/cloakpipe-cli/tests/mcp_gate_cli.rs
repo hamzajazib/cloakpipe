@@ -462,10 +462,22 @@ mod certification {
         assert_eq!(refusal(&msgs, 2).as_deref(), Some("undeclared_tool"), "{msgs:?}");
     }
 
+    /// The certification gate is opt-in even in a `certification` build:
+    /// with no certification flag, the manifest alone decides.
     #[test]
-    fn without_a_certification_nothing_is_called() {
+    fn without_certification_flags_the_manifest_alone_decides() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest()], &[], &[call(1, "refund")]);
+        let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest()], &[], &[call(1, "refund"), call(2, "delete_customer")]);
+        assert!(seen.contains("\"refund\""), "{seen} {err}");
+        assert_eq!(refusal(&msgs, 1), None, "{msgs:?} {err}");
+        assert_eq!(refusal(&msgs, 2).as_deref(), Some("undeclared_tool"), "{msgs:?}");
+    }
+
+    #[test]
+    fn trusting_a_key_without_a_certification_calls_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, key) = certify(dir.path(), "production");
+        let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest(), "--trust", &key], &[], &[call(1, "refund")]);
         assert!(!seen.contains("refund"), "{seen}");
         assert_eq!(refusal(&msgs, 1).as_deref(), Some("uncertified"), "{msgs:?} {err}");
     }
@@ -488,7 +500,8 @@ mod certification {
     #[test]
     fn warn_mode_forwards() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest(), "--gate", "warn"], &[], &[call(1, "refund")]);
+        let (_, key) = certify(dir.path(), "production");
+        let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest(), "--trust", &key, "--gate", "warn"], &[], &[call(1, "refund")]);
         assert!(seen.contains("refund"), "{seen}");
         assert_eq!(refusal(&msgs, 1), None);
         assert!(err.contains("shadow mode: forwarded") && err.contains("uncertified"), "the call's violation is reported: {err}");
