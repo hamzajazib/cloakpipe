@@ -113,7 +113,7 @@ fn upstream(dir: &Path, lose_ack: bool) -> String {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf '%s' \"$line\" | sed 's/^{{\"id\":\\([0-9]*\\),.*$/\\1/')\n  {reply}\ndone\n",
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf '%s' \"$line\" | grep -o '\"id\":[0-9]*' | head -n 1 | cut -d: -f2)\n  {reply}\ndone\n",
             effects.display()
         ),
     )

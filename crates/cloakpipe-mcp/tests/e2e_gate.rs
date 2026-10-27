@@ -43,7 +43,7 @@ fn fake_upstream(dir: &std::path::Path) -> (Vec<String>, std::path::PathBuf) {
             r#"#!/bin/sh
 while IFS= read -r line; do
   printf '%s\n' "$line" >> '{received}'
-  id=$(printf '%s' "$line" | sed 's/^{{"id":\([0-9]*\),.*$/\1/')
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
   printf '{{"id":%s,"jsonrpc":"2.0","result":{{"content":[]}}}}\n' "$id"
 done
 "#,

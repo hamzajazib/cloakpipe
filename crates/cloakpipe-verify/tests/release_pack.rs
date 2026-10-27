@@ -52,7 +52,13 @@ fn a_built_pack_verifies() {
 #[test]
 fn the_wire_format_uses_the_documented_field_names() {
     let doc = pack_value();
-    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    // Sorted: serde_json keeps insertion order when a dependency in the
+    // build (Cedar) turns on its `preserve_order` feature.
+    let keys = |v: &Value| {
+        let mut k = v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        k.sort();
+        k
+    };
     assert_eq!(keys(&doc), ["apiVersion", "digest", "kind", "signature", "spec"]);
     assert_eq!(doc["apiVersion"], PACK_API_VERSION);
     assert_eq!(doc["kind"], PACK_KIND);

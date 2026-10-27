@@ -38,8 +38,9 @@ impl Write for Capture {
 
 /// A fake MCP tool: records every line it receives to `received`, and answers a
 /// `tools/call` by echoing its (masked) arguments back as the result content.
-/// Relies on serde_json's default sorted-key output, where `params` serializes
-/// as `{"arguments":...,"name":"..."}`.
+/// `params` serializes as `{"name":"...","arguments":...}` (the agent's key
+/// order, kept when serde_json's `preserve_order` is on, as the Cedar engine
+/// turns it on) or as `{"arguments":...,"name":"..."}` (sorted keys).
 fn write_fake_upstream(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let received = dir.join("upstream_received.jsonl");
     let script = dir.join("fake_tool.sh");
@@ -49,7 +50,9 @@ fn write_fake_upstream(dir: &std::path::Path) -> (std::path::PathBuf, std::path:
             r#"#!/bin/sh
 while IFS= read -r line; do
   printf '%s\n' "$line" >> '{received}'
-  printf '%s\n' "$line" | sed 's/^.*"params":{{"arguments":\(.*\),"name":"[^"]*"}}}}$/{{"jsonrpc":"2.0","id":1,"result":{{"content":\1}}}}/'
+  printf '%s\n' "$line" | sed \
+    -e 's/^.*"params":{{"name":"[^"]*","arguments":\(.*\)}}}}$/{{"jsonrpc":"2.0","id":1,"result":{{"content":\1}}}}/' \
+    -e 's/^.*"params":{{"arguments":\(.*\),"name":"[^"]*"}}}}$/{{"jsonrpc":"2.0","id":1,"result":{{"content":\1}}}}/'
 done
 "#,
             received = received.display()
