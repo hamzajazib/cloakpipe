@@ -9,7 +9,7 @@
 //!                                          # anchor receipts valid offline
 //! cloakpipe-verify all     <bundle.json> [--trust-key KEYID=HEX]...
 //!                                          # everything; exit 0 / nonzero for CI
-//! cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE...
+//! cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE [--key ...]
 //!                                          # gate decision entries: chain, entry
 //!                                          # hashes, per-entry Ed25519 signatures
 //! cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
@@ -260,7 +260,7 @@ fn release_pack(args: &[String]) -> Result<ExitCode> {
     Ok(ExitCode::from(if report.ok { 0 } else { 1 }))
 }
 
-/// `decisions ENTRIES --key HEX|KEYFILE...`: decision ledger entries
+/// `decisions ENTRIES --key HEX|KEYFILE [--key ...]`: decision ledger entries
 /// (`cloakpipe.decision/v1`, one JSON object per line), checked against the
 /// gate's public key(s). Usage and I/O problems exit 2; a verification
 /// failure exits 1.
@@ -439,7 +439,7 @@ USAGE:
   cloakpipe-verify proofs   <bundle.json>
   cloakpipe-verify manifest <bundle.json>
   cloakpipe-verify all      <bundle.json> [--trust-key KEYID=HEX]... [--tsa-root PEM] [--rekor-key PEM]
-  cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE...
+  cloakpipe-verify decisions <entries.jsonl> --key HEX|KEYFILE [--key ...]
       Verify gate decision entries (cloakpipe.decision/v1, one per line):
       seq continuity, hash chain, entry hashes and each entry's Ed25519
       signature by a pinned gate public key (64 hex chars, or a key file's
