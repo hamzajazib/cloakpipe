@@ -59,7 +59,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server: gate tool calls with
     /// --manifest; mask PII in arguments only with --transform pii.
-    McpProxy(gate::McpProxyArgs),
+    McpProxy(Box<gate::McpProxyArgs>),
     /// CloakTree: vectorless document retrieval
     #[cfg(feature = "rag")]
     Tree {
@@ -260,7 +260,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&config).await,
-        Commands::McpProxy(args) => commands::mcp_proxy(&config, args).await,
+        Commands::McpProxy(args) => commands::mcp_proxy(&config, *args).await,
         #[cfg(feature = "rag")]
         Commands::Tree { action } => commands::tree(&config, action).await,
         #[cfg(feature = "rag")]
