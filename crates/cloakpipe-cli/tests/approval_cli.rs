@@ -3,7 +3,8 @@
 //! contract requires approval runs only with a signed receipt for that exact
 //! call, and the ledger records the receipt's digest, never the arguments.
 
-use cloakpipe_ledger::{LedgerStore, MetadataValue};
+use cloakpipe_ledger::decision::DecisionEntry;
+use cloakpipe_ledger::LedgerStore;
 use cloakpipe_release::action::fingerprint;
 use cloakpipe_release::parse_path;
 use serde_json::{json, Value};
@@ -134,7 +135,7 @@ struct Proxy {
     msgs: Vec<Value>,
     seen: Option<String>,
     err: String,
-    ledger: Vec<cloakpipe_ledger::record::LedgerRecord>,
+    ledger: Vec<DecisionEntry>,
 }
 
 fn proxy(dir: &Path, extra: &[&str], lines: &[String]) -> Proxy {
@@ -148,6 +149,8 @@ fn proxy(dir: &Path, extra: &[&str], lines: &[String]) -> Proxy {
         .args(&args)
         .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
         .env("CLOAKPIPE_LEDGER_DB", &ledger_db)
+        .env("CLOAKPIPE_HOME", dir.join("home"))
+        .env_remove("CLOAKPIPE_SIGNING_KEY")
         .env_remove("CLOAKPIPE_RELEASE")
         .env_remove("CLOAKPIPE_TASK_CONTEXT")
         .stdin(Stdio::piped())
@@ -159,7 +162,7 @@ fn proxy(dir: &Path, extra: &[&str], lines: &[String]) -> Proxy {
     let out = child.wait_with_output().unwrap();
     let ledger = if ledger_db.exists() {
         let store = LedgerStore::open(ledger_db.to_str().unwrap()).unwrap();
-        store.records_for_tenant(&cloakpipe_mcp::stable_ids().0).unwrap().into_iter().map(|r| r.record).collect()
+        store.decisions().unwrap()
     } else {
         Vec::new()
     };
@@ -242,15 +245,15 @@ fn an_approved_call_runs_and_the_ledger_records_the_receipt_digest() {
     assert_eq!(refusal(&r.msgs, 1), None, "{:?} {}", r.msgs, r.err);
     assert!(r.seen.unwrap_or_default().contains("crm.patch"));
 
-    let approved: Vec<_> = r.ledger.iter().filter(|x| x.metadata.contains_key("approval")).collect();
+    let approved: Vec<_> = r.ledger.iter().filter(|x| x.approval.is_some()).collect();
     assert_eq!(approved.len(), 1, "{:?}", r.ledger);
-    assert_eq!(approved[0].metadata.get("approval"), Some(&MetadataValue::Hash(digest)));
-    assert_eq!(approved[0].metadata.get("operation_id"), Some(&MetadataValue::OpaqueId(op)));
-    let dump = format!("{:?}", r.ledger);
+    assert_eq!(approved[0].approval, Some(format!("sha256:{}", hex::encode(digest))));
+    assert_eq!(approved[0].operation_id.as_deref(), Some(op.as_str()));
+    let dump = serde_json::to_string(&r.ledger).unwrap();
     for raw in ["demo-co", "lead-42", "review", "asked for a demo", fp.hex().as_str()] {
         assert!(!dump.contains(raw), "{raw} in the ledger: {dump}");
     }
-    assert!(!dump.contains(&format!("{:?}", fp.0)), "the fingerprint bytes are not recorded");
+    assert!(!dump.contains(&fp.hex()), "the raw fingerprint is not recorded");
 }
 
 #[test]

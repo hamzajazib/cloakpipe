@@ -1,9 +1,10 @@
 //! The interceptor enforces the tool gate: refused calls never reach the
 //! upstream tool, the agent gets a JSON-RPC error for them, and the refusal
-//! is evidence bound to the release.
+//! is a signed decision entry bound to the release.
 
-use cloakpipe_ledger::{ActionKind, LedgerStore, MetadataValue};
-use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
+use cloakpipe_ledger::decision::{Decision, DecisionEntry, Mode};
+use cloakpipe_ledger::{GateKey, LedgerStore};
+use cloakpipe_mcp::{run_proxy_io, DecisionLog, GateMode, ProxyContext, ToolGate};
 use cloakpipe_release::AgentRelease;
 use serde_json::{json, Value};
 use std::io::{Cursor, Write};
@@ -68,23 +69,24 @@ fn call(id: u64, tool: &str) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": {"q": "x"}}}).to_string()
 }
 
-fn run(gate: ToolGate, lines: &[String]) -> (Capture, String, Vec<cloakpipe_ledger::record::LedgerRecord>, [u8; 32]) {
+fn run(gate: ToolGate, lines: &[String]) -> (Capture, String, Vec<DecisionEntry>, String) {
     let dir = tempfile::tempdir().unwrap();
     let (upstream, received) = fake_upstream(dir.path());
     let ledger_db = dir.path().join("ledger.db");
-    let release = gate.release_bytes();
+    let release = gate.release().to_string();
     let ctx = ProxyContext {
         pii: None,
-        ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
-        release: Some(release),
+        ledger_db: None,
+        release: Some(gate.release_bytes()),
         gate: Some(gate),
+        decisions: Some(DecisionLog::open(ledger_db.to_str().unwrap(), GateKey::from_seed([1; 32])).unwrap()),
     };
     let out = Capture::default();
     let input = Cursor::new(lines.iter().map(|l| format!("{l}\n")).collect::<String>().into_bytes());
     run_proxy_io(upstream, ctx, input, out.clone()).unwrap();
     let seen = std::fs::read_to_string(&received).unwrap_or_default();
     let store = LedgerStore::open(ledger_db.to_str().unwrap()).unwrap();
-    let records = store.records_for_tenant(&stable_ids().0).unwrap().into_iter().map(|r| r.record).collect();
+    let records = store.decisions().unwrap();
     (out, seen, records, release)
 }
 
@@ -105,21 +107,22 @@ fn refused_calls_never_reach_the_tool() {
     assert!(refusal.get("result").is_none());
     assert!(msgs.iter().any(|m| m["id"] == 1 && m.get("result").is_some()), "{msgs:?}");
 
-    let blocks: Vec<_> = records.iter().filter(|r| r.actions.iter().any(|a| a.kind == ActionKind::Block)).collect();
+    let blocks: Vec<_> = records.iter().filter(|r| r.decision == Decision::Deny).collect();
     assert_eq!(blocks.len(), 1, "{records:?}");
-    assert_eq!(blocks[0].release_hash(), Some(release));
-    assert_eq!(blocks[0].metadata.get("gate_denial"), Some(&MetadataValue::OpaqueId("undeclared_tool".into())));
+    assert_eq!(blocks[0].release.as_deref(), Some(release.as_str()));
+    assert_eq!(blocks[0].reason, "undeclared_tool");
+    assert!(!blocks[0].forwarded);
+    assert!(records.iter().any(|r| r.decision == Decision::Allow && r.tool.as_deref() == Some("refund") && r.forwarded));
 }
 
 #[test]
-fn warn_mode_forwards_and_records_the_violation() {
-    let (out, seen, records, _) = run(manifest_gate(GateMode::Warn), &[call(2, "delete_customer")]);
-    assert!(seen.contains("delete_customer"), "warn mode forwards: {seen}");
+fn shadow_mode_forwards_and_records_the_violation() {
+    let (out, seen, records, _) = run(manifest_gate(GateMode::Shadow), &[call(2, "delete_customer")]);
+    assert!(seen.contains("delete_customer"), "shadow mode forwards: {seen}");
     assert!(out.messages().iter().all(|m| m.get("error").is_none()));
-    let flagged: Vec<_> = records.iter().filter(|r| r.metadata.contains_key("gate_violation")).collect();
-    assert_eq!(flagged.len(), 1, "{records:?}");
-    assert_eq!(flagged[0].metadata.get("gate_violation"), Some(&MetadataValue::OpaqueId("undeclared_tool".into())));
-    assert!(records.iter().all(|r| r.actions.iter().all(|a| a.kind != ActionKind::Block)));
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!((records[0].decision, records[0].reason.as_str()), (Decision::Deny, "undeclared_tool"));
+    assert_eq!((records[0].mode, records[0].forwarded), (Some(Mode::Shadow), true));
 }
 
 #[test]
@@ -159,18 +162,15 @@ fn unreadable_or_noncanonical_messages_are_refused_not_forwarded() {
         let msgs = out.messages();
         assert_eq!(msgs.len(), 1, "{what}: one error back to the agent: {msgs:?}");
         assert!(msgs[0]["error"]["code"].as_i64().is_some(), "{what}: {msgs:?}");
-        assert!(
-            records.iter().any(|r| r.actions.iter().any(|a| a.kind == ActionKind::Block)),
-            "{what}: the refusal is evidence"
-        );
+        assert!(records.iter().any(|r| r.decision == Decision::Deny && !r.forwarded), "{what}: the refusal is evidence");
     }
 }
 
 #[test]
-fn warn_mode_does_not_forward_what_it_cannot_read_either() {
-    // Warn mode reports policy violations, but a message the gate cannot
+fn shadow_mode_does_not_forward_what_it_cannot_read_either() {
+    // Shadow mode reports policy violations, but a message the gate cannot
     // check is never forwarded unchecked.
-    let (_, seen, _, _) = run(manifest_gate(GateMode::Warn), &[format!("[{}]", call(9, "delete_customer"))]);
+    let (_, seen, _, _) = run(manifest_gate(GateMode::Shadow), &[format!("[{}]", call(9, "delete_customer"))]);
     assert!(!seen.contains("delete_customer"), "{seen}");
 }
 

@@ -432,11 +432,14 @@ fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8;
 /// tool calls unchanged (or refusing them, with `--manifest`). With
 /// `--transform pii` it masks PII in tool-call arguments before they reach the
 /// tool and rehydrates pseudonym tokens in the results before the agent sees
-/// them; only then is a vault opened. Set `CLOAKPIPE_LEDGER_DB`
-/// to record a no-PII evidence hop per call/result, and `CLOAKPIPE_RELEASE`
-/// (`sha256:<hex>` from `cloakpipe release hash`) to bind each hop to the
-/// Agent Release being run. `--tool-contract` / `--task-context` add
-/// argument-level rules (docs/ACTION_BOUNDARY.md).
+/// them; only then is a vault opened. With a gate, every decision is
+/// appended, signed, to the decision ledger (by default
+/// `$CLOAKPIPE_HOME/ledger.db`; `--no-ledger` opts out). The PII transform's
+/// no-PII hop records go to the same database (`--ledger-db` /
+/// `CLOAKPIPE_LEDGER_DB` without a gate), bound to `CLOAKPIPE_RELEASE`
+/// (`sha256:<hex>` from `cloakpipe release hash`) or the gate's release.
+/// `--tool-contract` / `--task-context` add argument-level rules
+/// (docs/ACTION_BOUNDARY.md).
 pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Result<()> {
     // Configuration errors are already on stderr; fail before spawning
     // anything, with the documented exit code (1 invalid input, 2 usage).
@@ -445,6 +448,26 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Err(code) => std::process::exit(code),
     };
     let pii = args.pii();
+    // The decision ledger and its key, before anything runs: a gate that
+    // cannot record does not start.
+    let decisions = match &gate {
+        Some(_) => match args.ledger.decision_log("gate decisions") {
+            Ok(log) => log,
+            Err(code) => std::process::exit(code),
+        },
+        None => None,
+    };
+    // The PII transform's hop records share the ledger database.
+    let ledger_db = if gate.is_some() {
+        match args.ledger.ledger_path() {
+            Ok(path) => path.map(|p| p.to_string_lossy().into_owned()),
+            Err(code) => std::process::exit(code),
+        }
+    } else if args.ledger.no_ledger {
+        None
+    } else {
+        args.ledger.ledger_db.clone().map(|p| p.to_string_lossy().into_owned()).or_else(|| std::env::var("CLOAKPIPE_LEDGER_DB").ok())
+    };
     let upstream = args.upstream;
 
     let parts = shell_words::split(&upstream)
@@ -467,7 +490,6 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     } else {
         None
     };
-    let ledger_db = std::env::var("CLOAKPIPE_LEDGER_DB").ok();
     let mut release = release_from_var(std::env::var("CLOAKPIPE_RELEASE"))?;
     if let Some(gate) = &gate {
         let manifest = gate.release_bytes();
@@ -494,6 +516,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
                 ledger_db,
                 release,
                 gate,
+                decisions,
             },
         )
     })

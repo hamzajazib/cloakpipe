@@ -46,7 +46,13 @@ fn proxy(dir: &std::path::Path, extra: &[&str], envs: &[(&str, &str)], lines: &[
     let mut args = vec!["mcp-proxy", "--upstream", up.as_str()];
     args.extend_from_slice(extra);
     let mut cmd = bin();
-    cmd.current_dir(dir).args(&args).env("CLOAKPIPE_VAULT_KEY", VAULT_KEY).env_remove("CLOAKPIPE_RELEASE");
+    cmd.current_dir(dir)
+        .args(&args)
+        .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
+        .env("CLOAKPIPE_HOME", dir.join("home"))
+        .env_remove("CLOAKPIPE_RELEASE")
+        .env_remove("CLOAKPIPE_LEDGER_DB")
+        .env_remove("CLOAKPIPE_SIGNING_KEY");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -97,9 +103,11 @@ mod manifest_only {
             .args(extra)
             .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
             .env("MOCK_UPSTREAM_LOG", &log)
-            // The example's Cedar counters (state.db) stay in the test's directory.
+            // The example's Cedar counters (state.db) and the default
+            // ledger and gate key stay in the test's directory.
             .env("CLOAKPIPE_HOME", dir.join("home"))
             .env_remove("CLOAKPIPE_STATE_DB")
+            .env_remove("CLOAKPIPE_SIGNING_KEY")
             .env_remove("CLOAKPIPE_RELEASE")
             .env_remove("CLOAKPIPE_TASK_CONTEXT")
             .env_remove("CLOAKPIPE_OPERATIONS_DB")
@@ -360,13 +368,16 @@ mod manifest_only {
     }
 
     #[test]
-    fn warn_mode_forwards_and_reports() {
-        let dir = tempfile::tempdir().unwrap();
-        let extra = [example_gate(dir.path()), vec!["--gate".into(), "warn".into()]].concat();
-        let (_, msgs, seen, err) = example_proxy(dir.path(), &extra, &[tool_call(1, "export_customers", json!({}))]);
-        assert_eq!(seen.len(), 1, "warn mode forwards: {seen:?}");
-        assert_eq!(refusal(&msgs, 1), None);
-        assert!(err.contains("warn mode: forwarded") && err.contains("undeclared_tool"), "the call's violation is reported: {err}");
+    fn shadow_mode_forwards_and_reports() {
+        // `--gate warn` is the old spelling of `--mode shadow`.
+        for flags in [["--mode", "shadow"], ["--gate", "warn"]] {
+            let dir = tempfile::tempdir().unwrap();
+            let extra = [example_gate(dir.path()), flags.map(String::from).to_vec()].concat();
+            let (_, msgs, seen, err) = example_proxy(dir.path(), &extra, &[tool_call(1, "export_customers", json!({}))]);
+            assert_eq!(seen.len(), 1, "{flags:?}: shadow mode forwards: {seen:?}");
+            assert_eq!(refusal(&msgs, 1), None);
+            assert!(err.contains("shadow mode: forwarded") && err.contains("undeclared_tool"), "the call's violation is reported: {err}");
+        }
     }
 
     #[test]
@@ -480,7 +491,7 @@ mod certification {
         let (_, msgs, seen, err) = proxy(dir.path(), &["--manifest", &manifest(), "--gate", "warn"], &[], &[call(1, "refund")]);
         assert!(seen.contains("refund"), "{seen}");
         assert_eq!(refusal(&msgs, 1), None);
-        assert!(err.contains("warn mode: forwarded") && err.contains("uncertified"), "the call's violation is reported: {err}");
+        assert!(err.contains("shadow mode: forwarded") && err.contains("uncertified"), "the call's violation is reported: {err}");
     }
 
     #[test]

@@ -75,6 +75,7 @@ fn pii_never_reaches_tool_and_evidence_verifies_offline() {
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(RELEASE),
         gate: None,
+        decisions: None,
     };
 
     let request = serde_json::json!({

@@ -71,10 +71,17 @@ pub struct McpProxyArgs {
     #[cfg(feature = "certification")]
     #[arg(long)]
     pub environment: Option<String>,
-    /// enforce (default): refuse calls that fail the gate; warn: forward and
-    /// report.
-    #[arg(long, value_parser = ["enforce", "warn"])]
+    /// enforce (default): refuse calls that fail the gate; shadow: forward
+    /// every call the gate can read, and record what enforce would have
+    /// decided (entries marked `mode: shadow`).
+    #[arg(long, value_parser = ["enforce", "shadow"])]
+    pub mode: Option<String>,
+    /// Old name of --mode (warn = shadow).
+    #[arg(long, hide = true, value_parser = ["enforce", "warn"], conflicts_with = "mode")]
     pub gate: Option<String>,
+    /// The decision ledger every gate decision is appended to, signed.
+    #[command(flatten)]
+    pub ledger: crate::evidence::LedgerArgs,
     /// Legacy Agent Release only (deprecated; a v1 manifest declares its
     /// contracts inline). Tool contract (repeatable): argument-level rules
     /// for the tools it covers. Each must be bound by the release (`spec.policies` entry
@@ -139,6 +146,8 @@ impl McpProxyArgs {
         let certification = false;
         certification
             || self.gate.is_some()
+            || self.mode.is_some()
+            || self.ledger.signing_key.is_some()
             || !self.tool_contracts.is_empty()
             || self.task_context.is_some()
             || self.approvals.is_some()
@@ -171,8 +180,8 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
         }
         return Ok(None);
     };
-    let mode = match a.gate.as_deref() {
-        Some("warn") => cloakpipe_mcp::GateMode::Warn,
+    let mode = match (a.mode.as_deref(), a.gate.as_deref()) {
+        (Some("shadow"), _) | (_, Some("warn")) => cloakpipe_mcp::GateMode::Shadow,
         _ => cloakpipe_mcp::GateMode::Enforce,
     };
     let gate = match kind(manifest_path)? {

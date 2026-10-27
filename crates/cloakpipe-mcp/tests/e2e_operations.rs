@@ -4,9 +4,10 @@
 
 use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault, EntityCategory};
-use cloakpipe_ledger::{record::LedgerRecord, Hop, LedgerStore, MetadataValue};
+use cloakpipe_ledger::decision::{Decision, DecisionEntry, Event, Outcome};
+use cloakpipe_ledger::{GateKey, LedgerStore};
 use cloakpipe_mcp::operations::{OperationState, OperationStore};
-use cloakpipe_mcp::{reconcile_operation, run_proxy_io, stable_ids, GateMode, PiiTransform, ProxyContext, ToolGate};
+use cloakpipe_mcp::{reconcile_operation, run_proxy_io, DecisionLog, GateMode, PiiTransform, ProxyContext, ToolGate};
 use cloakpipe_release::action::{derive_operation_id, fingerprint};
 use cloakpipe_release::contract::ToolContract;
 use cloakpipe_release::{parse_path, AgentRelease, ArtifactRef, Format};
@@ -212,18 +213,31 @@ fn pii(vault: Vault) -> Option<PiiTransform> {
     Some(PiiTransform { detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(), vault })
 }
 
+/// The gate signing key every run and reconciliation signs with.
+fn gate_key() -> GateKey {
+    GateKey::from_seed([3; 32])
+}
+
+fn decision_log(ledger_db: &Path) -> DecisionLog {
+    DecisionLog::open(ledger_db.to_str().unwrap(), gate_key()).unwrap()
+}
+
 fn ctx_with(gate: ToolGate, ledger_db: &Path, pii: Option<PiiTransform>) -> ProxyContext {
     ProxyContext {
         pii,
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(gate.release_bytes()),
         gate: Some(gate),
+        decisions: Some(decision_log(ledger_db)),
     }
 }
 
-fn ledger(ledger_db: &Path) -> Vec<LedgerRecord> {
-    let store = LedgerStore::open(ledger_db.to_str().unwrap()).unwrap();
-    store.records_for_tenant(&stable_ids().0).unwrap().into_iter().map(|r| r.record).collect()
+/// The decision entries, after checking they verify offline.
+fn ledger(ledger_db: &Path) -> Vec<DecisionEntry> {
+    let entries = LedgerStore::open(ledger_db.to_str().unwrap()).unwrap().decisions().unwrap();
+    let values: Vec<Value> = entries.iter().map(|e| serde_json::to_value(e).unwrap()).collect();
+    cloakpipe_verify::decisions::verify_decisions(&values, &[gate_key().public_key()]).expect("the entries verify");
+    entries
 }
 
 /// Run the interceptor over `lines` (all sent at once).
@@ -273,11 +287,18 @@ fn state(dir: &Path, op: &str) -> OperationState {
     OperationStore::open(dir.join("ops.db")).unwrap().get(op).unwrap().expect("row").state
 }
 
-fn meta<'a>(r: &'a LedgerRecord, key: &str) -> Option<&'a str> {
-    match r.metadata.get(key) {
-        Some(MetadataValue::OpaqueId(s)) => Some(s),
-        _ => None,
-    }
+/// An entry's refusal reason (the call was not forwarded).
+fn denial(r: &DecisionEntry) -> Option<&str> {
+    (r.decision != Decision::Allow && !r.forwarded).then_some(r.reason.as_str())
+}
+
+/// An entry's outcome, as recorded.
+fn outcome(r: &DecisionEntry) -> Option<&'static str> {
+    r.outcome.map(|o| match o {
+        Outcome::Committed => "committed",
+        Outcome::Failed => "failed",
+        Outcome::Unknown => "unknown",
+    })
 }
 
 #[test]
@@ -305,8 +326,8 @@ fn a_lost_acknowledgment_is_unknown_until_reconciled_and_never_re_executed() {
     // 3. The operator checks the CRM: the patch did land.
     let ledger_db = dir.path().join("ledger.db");
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    let release = gate(dir.path(), task()).release_bytes();
-    reconcile_operation(&mut store, &op, OperationState::Done, false, ledger_db.to_str(), Some(release)).unwrap();
+    let release = gate(dir.path(), task()).release().to_string();
+    reconcile_operation(&mut store, &op, OperationState::Done, false, Some(&mut decision_log(&ledger_db)), Some(&release)).unwrap();
     drop(store);
     assert_eq!(state(dir.path(), &op), OperationState::Done);
 
@@ -319,26 +340,28 @@ fn a_lost_acknowledgment_is_unknown_until_reconciled_and_never_re_executed() {
 
     // The ledger tells the story with ids and states only.
     let records = ledger(&ledger_db);
-    let ops: Vec<(Hop, Option<&str>)> = records
+    let ops: Vec<(Event, Option<&str>)> = records
         .iter()
-        .filter(|r| meta(r, "operation_id") == Some(op.as_str()))
-        .map(|r| (r.hop, meta(r, "operation_state").or(meta(r, "gate_denial"))))
+        .filter(|r| r.operation_id.as_deref() == Some(op.as_str()))
+        .map(|r| (r.event, outcome(r).or(denial(r))))
         .collect();
     assert_eq!(
         ops,
         [
-            (Hop::McpToolCall, None),
-            (Hop::McpToolResult, Some("unknown")),
-            (Hop::McpToolCall, Some("reconcile_before_retry")),
-            (Hop::OperationReconciled, Some("done")),
-            (Hop::McpToolResult, Some("done")),
+            (Event::Call, None),
+            (Event::Outcome, Some("unknown")),
+            (Event::Call, Some("reconcile_before_retry")),
+            (Event::Reconcile, Some("committed")),
+            (Event::Replay, Some("committed")),
         ],
         "{records:?}"
     );
-    let replay = records.iter().rfind(|r| r.hop == Hop::McpToolResult).unwrap();
-    assert_eq!(replay.metadata.get("operation_replayed"), Some(&MetadataValue::Bool(true)));
-    assert!(records.iter().all(|r| r.release_hash() == Some(release)), "every hop is bound to the release");
-    let dump = format!("{records:?}");
+    assert!(records[0].forwarded && !records[2].forwarded && !records[4].forwarded, "{records:?}");
+    assert!(records.iter().all(|r| r.release.as_deref() == Some(release.as_str())), "every entry is bound to the release");
+    assert!(records.iter().all(|r| r.tool.as_deref() == Some("crm.patch")), "{records:?}");
+    let fp = records[0].args_fingerprint.clone().expect("keyed fingerprint");
+    assert!(records.iter().all(|r| r.args_fingerprint.as_ref() == Some(&fp)), "one call, one fingerprint: {records:?}");
+    let dump = serde_json::to_string(&records).unwrap();
     for raw in ["demo-co", "lead-42", "qualified", "called back"] {
         assert!(!dump.contains(raw), "{raw} leaked: {dump}");
     }
@@ -482,10 +505,10 @@ fn a_failed_operation_may_be_retried() {
     assert_eq!(state(dir.path(), &op), OperationState::Done);
     let states: Vec<_> = ledger(&dir.path().join("ledger.db"))
         .iter()
-        .filter(|r| r.hop == Hop::McpToolResult)
-        .filter_map(|r| meta(r, "operation_state").map(str::to_string))
+        .filter(|r| r.event == Event::Outcome)
+        .filter_map(|r| outcome(r).map(str::to_string))
         .collect();
-    assert_eq!(states, ["failed", "done"]);
+    assert_eq!(states, ["failed", "committed"]);
 }
 
 /// Another agent request reusing the id of a side-effecting call in flight
@@ -515,21 +538,21 @@ fn a_request_reusing_an_in_flight_operations_id_cannot_settle_it() {
 /// `--gate warn` forwards a call that fails the gate, and still tracks it
 /// as an operation: a lost reply is unknown and a retry is refused.
 #[test]
-fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
+fn shadow_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
     let dir = tempfile::tempdir().unwrap();
     let warn_gate = |dir: &Path| {
-        // Approval required and no receipt: approval_required, forwarded in warn mode.
+        // Approval required and no receipt: approval_required, forwarded in shadow mode.
         let c = contract(true);
         let mut g = manifest_gate(&release_binding(&c))
             .with_contracts(vec![c], Some(task()))
             .unwrap()
             .with_operations(OperationStore::open(dir.join("ops.db")).unwrap())
             .unwrap();
-        g.mode = GateMode::Warn;
+        g.mode = GateMode::Shadow;
         g
     };
     let msgs = run(dir.path(), Tool::LoseAck, warn_gate(dir.path()), &[call(1, &args())]);
-    assert_eq!(effects(dir.path()), 1, "warn mode forwarded the call: {msgs:?}");
+    assert_eq!(effects(dir.path()), 1, "shadow mode forwarded the call: {msgs:?}");
     let ops = OperationStore::open(dir.path().join("ops.db")).unwrap().list(None).unwrap();
     assert_eq!(ops.len(), 1, "the forwarded call is an operation: {msgs:?}");
     let op = ops[0].operation_id.clone();
@@ -541,9 +564,10 @@ fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
     assert_eq!(effects(dir.path()), 1, "the retry never reached the tool");
 
     let records = ledger(&dir.path().join("ledger.db"));
-    let forwarded = records.iter().find(|r| r.hop == Hop::McpToolCall).unwrap();
-    assert_eq!(meta(forwarded, "gate_violation"), Some("approval_required"), "{records:?}");
-    assert_eq!(meta(forwarded, "operation_id"), Some(op.as_str()), "{records:?}");
+    let forwarded = records.iter().find(|r| r.event == Event::Call).unwrap();
+    assert_eq!((forwarded.decision, forwarded.reason.as_str()), (Decision::RequireApproval, "approval_required"), "{records:?}");
+    assert!(forwarded.forwarded, "{records:?}");
+    assert_eq!(forwarded.operation_id.as_deref(), Some(op.as_str()), "{records:?}");
 }
 
 /// A reply to an operation that is no longer in flight (an operator
@@ -567,7 +591,7 @@ fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
     }
     // The operator decides it did not happen while the reply is still due.
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    reconcile_operation(&mut store, &op, OperationState::NotApplied, true, ledger_db.to_str(), None).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::NotApplied, true, Some(&mut decision_log(&ledger_db)), None).unwrap();
     drop(store);
     agent.shutdown(std::net::Shutdown::Write).unwrap();
     drop(proxy_side);
@@ -577,10 +601,10 @@ fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
     let records = ledger(&ledger_db);
     let states: Vec<_> = records
         .iter()
-        .filter(|r| meta(r, "operation_id") == Some(op.as_str()))
-        .filter_map(|r| meta(r, "operation_state").map(|s| (r.hop, s.to_string())))
+        .filter(|r| r.operation_id.as_deref() == Some(op.as_str()))
+        .filter_map(|r| outcome(r).map(|s| (r.event, s.to_string())))
         .collect();
-    assert_eq!(states, [(Hop::OperationReconciled, "not_applied".to_string())], "{records:?}");
+    assert_eq!(states, [(Event::Reconcile, "failed".to_string())], "{records:?}");
 }
 
 /// A tool that commits each call, then waits for `go` in `dir` and exits
@@ -619,7 +643,7 @@ fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    reconcile_operation(&mut store, &op, OperationState::Done, true, ledger_db.to_str(), None).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::Done, true, Some(&mut decision_log(&ledger_db)), None).unwrap();
     drop(store);
     std::fs::write(dir.path().join("go"), b"").unwrap();
     handle.join().unwrap();
@@ -636,10 +660,10 @@ fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
     let records = ledger(&ledger_db);
     let states: Vec<_> = records
         .iter()
-        .filter(|r| meta(r, "operation_id") == Some(op.as_str()))
-        .filter_map(|r| meta(r, "operation_state").map(|s| (r.hop, s.to_string())))
+        .filter(|r| r.operation_id.as_deref() == Some(op.as_str()))
+        .filter_map(|r| outcome(r).map(|s| (r.event, s.to_string())))
         .collect();
-    assert_eq!(states, [(Hop::OperationReconciled, "done".to_string())], "{records:?}");
+    assert_eq!(states, [(Event::Reconcile, "committed".to_string())], "{records:?}");
 }
 
 /// While a side-effecting call waits for the operations database (an
@@ -724,10 +748,10 @@ fn an_upstream_request_with_an_in_flight_id_does_not_settle_the_operation() {
     assert_eq!(state(dir.path(), &op), OperationState::Done);
     let states: Vec<_> = ledger(&dir.path().join("ledger.db"))
         .iter()
-        .filter(|r| r.hop == Hop::McpToolResult)
-        .filter_map(|r| meta(r, "operation_state").map(str::to_string))
+        .filter(|r| r.event == Event::Outcome)
+        .filter_map(|r| outcome(r).map(str::to_string))
         .collect();
-    assert_eq!(states, ["done"]);
+    assert_eq!(states, ["committed"]);
 }
 
 #[test]
@@ -738,7 +762,7 @@ fn a_side_effect_notification_is_refused() {
     assert!(msgs.is_empty(), "a notification gets no answer: {msgs:?}");
     assert_eq!(effects(dir.path()), 0);
     let records = ledger(&dir.path().join("ledger.db"));
-    assert!(records.iter().any(|r| meta(r, "gate_denial") == Some("request_id_missing")), "{records:?}");
+    assert!(records.iter().any(|r| denial(r) == Some("request_id_missing")), "{records:?}");
 }
 
 #[test]
@@ -751,10 +775,10 @@ fn start_up_marks_operations_left_in_flight_unknown_with_evidence() {
     run(dir.path(), Tool::Ok, gate(dir.path(), task()), &[]);
     assert_eq!(state(dir.path(), "op-crashed"), OperationState::Unknown);
     let records = ledger(&dir.path().join("ledger.db"));
-    let swept: Vec<_> = records.iter().filter(|r| meta(r, "operation_id") == Some("op-crashed")).collect();
+    let swept: Vec<_> = records.iter().filter(|r| r.operation_id.as_deref() == Some("op-crashed")).collect();
     assert_eq!(swept.len(), 1, "{records:?}");
-    assert_eq!(swept[0].hop, Hop::McpToolResult);
-    assert_eq!(meta(swept[0], "operation_state"), Some("unknown"));
+    assert_eq!(swept[0].event, Event::Outcome);
+    assert_eq!(outcome(swept[0]), Some("unknown"));
 }
 
 #[test]
@@ -820,9 +844,9 @@ mod approvals {
         assert_eq!(a["error"]["data"]["operationId"], "op-crm-7", "{a}");
         assert_eq!(effects(dir.path()), 1, "the conflicting call never reached the tool");
         let records = ledger(&dir.path().join("ledger.db"));
-        let denied: Vec<_> = records.iter().filter(|r| meta(r, "gate_denial") == Some("operation_conflict")).collect();
+        let denied: Vec<_> = records.iter().filter(|r| denial(r) == Some("operation_conflict")).collect();
         assert_eq!(denied.len(), 1, "{records:?}");
-        assert_eq!(meta(denied[0], "operation_id"), Some("op-crm-7"));
+        assert_eq!(denied[0].operation_id.as_deref(), Some("op-crm-7"));
     }
 
     #[test]
@@ -833,9 +857,9 @@ mod approvals {
         assert!(answer(&msgs, 1).get("result").is_some(), "{msgs:?}");
         assert_eq!(state(dir.path(), "op-crm-8"), OperationState::Done);
         let records = ledger(&dir.path().join("ledger.db"));
-        let call_hop = records.iter().find(|r| r.hop == Hop::McpToolCall).unwrap();
-        assert!(call_hop.metadata.contains_key("approval"));
-        assert_eq!(meta(call_hop, "operation_id"), Some("op-crm-8"));
+        let call = records.iter().find(|r| r.event == Event::Call).unwrap();
+        assert!(call.approval.is_some());
+        assert_eq!(call.operation_id.as_deref(), Some("op-crm-8"));
     }
 }
 
@@ -861,8 +885,7 @@ fn the_docs_name_what_the_code_uses() {
     );
     names.push(cloakpipe_release::action::OPERATION_ID_DOMAIN.to_string());
     names.push(RECONCILE_REQUIRED.to_string());
-    names.push(Hop::OperationReconciled.tag().to_string());
-    for n in ["operation_unknown", "operation_replayed", "operation_state", "operation_id_key", "HMAC-SHA256", "--operations-db", "CLOAKPIPE_OPERATIONS_DB"] {
+    for n in ["operation_unknown", "operation_id_key", "HMAC-SHA256", "--operations-db", "CLOAKPIPE_OPERATIONS_DB", "cloakpipe.decision/v1", "fail_closed"] {
         names.push(n.to_string());
     }
     for n in names {

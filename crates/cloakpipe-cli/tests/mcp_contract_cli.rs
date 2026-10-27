@@ -119,6 +119,9 @@ fn proxy(dir: &Path, extra: &[&str], envs: &[(&str, &str)], lines: &[String]) ->
     cmd.current_dir(dir)
         .args(&args)
         .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
+        .env("CLOAKPIPE_HOME", dir.join("home"))
+        .env_remove("CLOAKPIPE_LEDGER_DB")
+        .env_remove("CLOAKPIPE_SIGNING_KEY")
         .env_remove("CLOAKPIPE_RELEASE")
         .env_remove("CLOAKPIPE_TASK_CONTEXT");
     for (k, v) in envs {
