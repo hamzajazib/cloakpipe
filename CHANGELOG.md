@@ -46,6 +46,26 @@ may contain breaking changes; these are marked **Breaking**.
   idempotent `send_email` and a refund that needs approval over 100, a
   stdlib-only mock MCP server and the exact commands and output. The test
   suite runs it.
+- **Cedar policies in the tool gate** (new crate `cloakpipe-policy`, on
+  `cedar-policy` 4.x). The policy a v1 manifest references (`policy:`) is
+  parsed at start-up (an invalid one refuses to start) and evaluated for
+  every call that passed its contract: principal `Release::"<release>"`,
+  action `Action::"<tool>"` (`Tool::"<tool>"` is accepted too), resource
+  `Call::"<fingerprint>"` with the arguments as `resource.args`, and a
+  context of the task context, persistent per-tool counters
+  (`context.counters.<tool>_1h` / `_24h`) and the time. Decision order is
+  contract, Cedar, approval: no permit or a forbid is `policy_denied` (the
+  refusal and the ledger hop name the deciding policies by `@id`); a call
+  whose satisfied permits all carry `@approval("<route>")` needs a receipt,
+  with the routes merged into `approval_required`; any evaluation error is
+  `fail_closed`. Without `policy:` the gate is contract-only, as before.
+- `mcp-proxy --state-db` (default `$CLOAKPIPE_STATE_DB`, else
+  `$CLOAKPIPE_HOME/state.db`, `~/.cloakpipe` by default): the SQLite store
+  of the policy counters. Only forwarded calls are counted, and the counts
+  survive a restart. `cloakpipe manifest validate` parses the policy too.
+- `examples/support-agent/policies/support.cedar`: the spec's email rate
+  limit (50 an hour) and refund tiers (up to 100; 100 to 500 with
+  `@approval`).
 - `AgentRelease::gate_issues()` (`cloakpipe-release`): what the tool gate
   needs from a release (known `apiVersion`/`kind`, agent name, well-formed
   and distinct `tool:` and `policy:` references), without the certification
@@ -69,6 +89,11 @@ may contain breaking changes; these are marked **Breaking**.
 - The workspace and crate descriptions describe the tool-call gate
   ("Self-hosted policy-enforcement gate for AI agent tool calls") instead of
   a privacy proxy.
+- `cedar-policy-core` turns on serde_json's `preserve_order` feature, so
+  `mcp-proxy` now forwards an agent's JSON-RPC message with its keys in the
+  order the agent sent them (they used to be sorted). Digests and
+  fingerprints are unaffected: they hash the JCS (RFC 8785) form.
+- The support-agent example declares the refund `amount` as an integer.
 - **Breaking:** the denial for an argument the contract does not declare is
   `undeclared_argument` (was `argument_not_allowed`), for legacy tool
   contracts too.
