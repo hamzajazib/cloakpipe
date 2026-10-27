@@ -37,3 +37,5 @@ pub mod anchor;
 pub mod batch;
 pub mod merkle;
 pub mod receipt;
+#[cfg(feature = "testkit")]
+pub mod testkit;
