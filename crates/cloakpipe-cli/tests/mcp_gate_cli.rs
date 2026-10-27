@@ -31,7 +31,7 @@ fn upstream(dir: &std::path::Path) -> (String, PathBuf) {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf '%s' \"$line\" | sed 's/^{{\"id\":\\([0-9]*\\),.*$/\\1/')\n  printf '{{\"id\":%s,\"jsonrpc\":\"2.0\",\"result\":{{\"content\":[]}}}}\\n' \"$id\"\ndone\n",
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf '%s' \"$line\" | grep -o '\"id\":[0-9]*' | head -n 1 | cut -d: -f2)\n  printf '{{\"id\":%s,\"jsonrpc\":\"2.0\",\"result\":{{\"content\":[]}}}}\\n' \"$id\"\ndone\n",
             received.display()
         ),
     )
@@ -97,6 +97,9 @@ mod manifest_only {
             .args(extra)
             .env("CLOAKPIPE_VAULT_KEY", VAULT_KEY)
             .env("MOCK_UPSTREAM_LOG", &log)
+            // The example's Cedar counters (state.db) stay in the test's directory.
+            .env("CLOAKPIPE_HOME", dir.join("home"))
+            .env_remove("CLOAKPIPE_STATE_DB")
             .env_remove("CLOAKPIPE_RELEASE")
             .env_remove("CLOAKPIPE_TASK_CONTEXT")
             .env_remove("CLOAKPIPE_OPERATIONS_DB")
@@ -297,6 +300,9 @@ mod manifest_only {
     fn mcp_proxy_refuses_a_manifest_it_cannot_read() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = std::fs::read_to_string(example("cloakpipe.manifest.yaml")).unwrap();
+        // The policy it references, so each case fails for its own reason.
+        std::fs::create_dir_all(dir.path().join("policies")).unwrap();
+        std::fs::copy(example("policies/support.cedar"), dir.path().join("policies/support.cedar")).unwrap();
         let cases = [
             // An unknown key would silently drop a rule.
             ("side_effect: true", "sideEffect: true"),

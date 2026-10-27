@@ -242,10 +242,23 @@ where
                                         refusal = refusal.or(Some((denial, false)));
                                     }
                                 }
-                                let forwarding = match &refusal {
+                                let mut forwarding = match &refusal {
                                     None => true,
                                     Some((_, always)) => !always && gate.mode == GateMode::Warn,
                                 };
+                                // Count the call for the policy's counters before it
+                                // is forwarded: an uncounted call could slip past a
+                                // rate limit, so a counter failure refuses it.
+                                let mut counted = None;
+                                if forwarding {
+                                    match gate.record_forwarded(&tool, &now) {
+                                        Ok(id) => counted = id,
+                                        Err(d) => {
+                                            refusal = Some((d, true));
+                                            forwarding = false;
+                                        }
+                                    }
+                                }
                                 if let Some(op) = operation.as_ref().filter(|_| forwarding) {
                                     if !approved {
                                         evidence.push(opaque("operation_id", &op.operation_id));
@@ -256,6 +269,12 @@ where
                                         Coordinated::Forward => {}
                                         Coordinated::Replay(result) => replay = Some((result, op.operation_id.clone())),
                                         Coordinated::Deny(d) => refusal = Some((d, true)),
+                                    }
+                                }
+                                // Answered from the store or refused by it: not forwarded.
+                                if replay.is_some() || matches!(refusal, Some((_, true))) {
+                                    if let Some(id) = counted {
+                                        gate.forget_forwarded(id);
                                     }
                                 }
                                 if let Some((result, operation_id)) = replay {
@@ -281,6 +300,8 @@ where
                                         let mut meta = vec![opaque("gate_denial", &code)];
                                         meta.extend(denial.operation_id().map(|o| opaque("operation_id", o)));
                                         meta.extend(path.as_deref().map(|p| opaque("gate_path", p)));
+                                        // Policy ids come from the policy file, never the call.
+                                        meta.extend(denial.policies().map(|p| opaque("gate_policies", &p.join(","))));
                                         record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
                                         // A notification (no id member) takes no response;
                                         // `"id": null` is a request and is answered.
@@ -291,6 +312,9 @@ where
                                             }
                                             if let Some(op) = denial.operation_id() {
                                                 data["operationId"] = Value::String(op.to_string());
+                                            }
+                                            if let Some(policies) = denial.policies() {
+                                                data["policies"] = serde_json::json!(policies);
                                             }
                                             // What an approval broker needs to route the
                                             // request: the manifest's approver routes and

@@ -71,7 +71,7 @@ fn fake_tool(dir: &Path, tool: Tool) -> Vec<String> {
             r#"#!/bin/sh
 while IFS= read -r line; do
   printf '%s\n' "$line" >> '{effects}'
-  id=$(printf '%s' "$line" | sed 's/^{{"id":\([0-9]*\),.*$/\1/')
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
   tenant=$(printf '%s' "$line" | sed 's/.*"tenant":"\([^"]*\)".*/\1/')
   {reply}
 done
@@ -96,7 +96,7 @@ fn slow_tool(dir: &Path, ask_roots: bool) -> Vec<String> {
         format!(
             r#"#!/bin/sh
 while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed 's/^{{"id":\([0-9]*\),.*$/\1/')
+  id=$(printf '%s' "$line" | grep -o '"id":[0-9]*' | head -n 1 | cut -d: -f2)
   case "$line" in
     *'"method":"tools/call"'*)
       printf '%s\n' "$line" >> '{effects}'

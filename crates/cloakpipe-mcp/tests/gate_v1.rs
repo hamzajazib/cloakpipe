@@ -3,7 +3,7 @@
 //! conditional approval with a ttl.
 
 use cloakpipe_mcp::operations::OperationStore;
-use cloakpipe_mcp::{ApprovalRequest, Denial, GateConfigError, GateMode, ToolGate};
+use cloakpipe_mcp::{ApprovalRequest, Counters, Denial, GateConfigError, GateMode, ToolGate};
 use cloakpipe_receipt::approval::{sign_approval, Approval};
 use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_release::action::{derive_idempotent_operation_id, derive_operation_id, fingerprint};
@@ -28,12 +28,15 @@ fn store(dir: &Path) -> OperationStore {
     OperationStore::open(dir.join("ops.db")).unwrap()
 }
 
-/// A gate with the task context and an operations store in `dir`.
+/// A gate with the task context, an operations store in `dir` and the
+/// manifest's (permit-all) Cedar policy loaded.
 fn gate(dir: &Path) -> ToolGate {
     ToolGate::from_manifest(GateMode::Enforce, &manifest())
         .with_task_context(Some(task()))
         .unwrap()
         .with_operations(store(dir))
+        .unwrap()
+        .with_policy(Counters::in_memory().unwrap())
         .unwrap()
 }
 
