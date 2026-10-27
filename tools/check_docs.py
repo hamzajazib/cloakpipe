@@ -21,15 +21,25 @@ examples/*/README.md:
 2. Walkthroughs run. A code block preceded by
        <!-- check-docs: run SESSION [cwd=DIR] -->
    is executed with bash, the `cloakpipe` binaries first on PATH, HOME and
-   CLOAKPIPE_HOME pointing into a throwaway directory and, with cwd=DIR, in
-   a fresh copy of DIR. The run blocks of one session in one file share one
+   CLOAKPIPE_HOME pointing into a throwaway directory, from a scratch
+   "repository root" that holds a fresh copy of DIR (cwd=DIR, a path from
+   the repository root) so the block can `cd DIR` as a reader would. The run
+   blocks of one session in one file share one
    shell (variables and functions carry over) and must each succeed. A code
    block preceded by
        <!-- check-docs: expect SESSION -->
    lists lines that must appear in the output (stdout and stderr) of that
    session's most recent run block, in any order; `…` matches anything.
+   A session with `needs=network` on any of its run blocks (it downloads
+   something) runs only with --network.
        <!-- check-docs: absent SESSION TEXT -->
-   says TEXT must not appear in it.
+   says TEXT must not appear in it. A code block preceded by
+       <!-- check-docs: excerpt FILE -->
+   must be an excerpt of FILE (a path from the repository root): each of
+   its non-blank lines must be a line of FILE. A code block preceded by
+       <!-- check-docs: file SESSION PATH -->
+   is written to PATH (relative to the session's scratch root) before the
+   session runs, so a document can show a file and then use it.
 3. Local Markdown links resolve.
 4. The README and the core docs say what the product is (see REQUIRED).
 """
@@ -77,10 +87,10 @@ README_FORBIDDEN = ["Evaluate → Certify", "Evaluate, Certify", "release certif
 
 CHECKED_GLOBS = ["README.md", "docs/*.md", "examples/*/README.md"]
 
-DIRECTIVE = re.compile(r"<!--\s*check-docs:\s*(run|expect|absent)\s+(\S+)\s*(.*?)\s*-->")
+DIRECTIVE = re.compile(r"<!--\s*check-docs:\s*(run|expect|absent|excerpt|file)\s+(\S+)\s*(.*?)\s*-->")
 FENCE = re.compile(r"^(\s*)(```+|~~~+)\s*([\w+-]*)")
 SHELL_LANGS = {"bash", "sh", "shell", "console", "zsh"}
-CMD_SEPARATORS = {"|", "||", "&&", ";", "(", ")", "--", "$(", "`", "exec", "sudo", "then", "do", "else"}
+CMD_SEPARATORS = {"|", "||", "&&", ";", "(", ")", "{", "--", "$(", "`", "exec", "sudo", "then", "do", "else"}
 BINARIES = {"cloakpipe", "cloakpipe-verify"}
 
 
@@ -327,6 +337,23 @@ def check_commands(cli, rel, text):
     return errors
 
 
+def check_excerpts(rel, text):
+    errors = []
+    for start, lang, body, directives in code_blocks(text):
+        for kind, name, _ in directives:
+            if kind != "excerpt" or lang is None:
+                continue
+            src = ROOT / name
+            if not src.exists():
+                errors.append(f"{rel}:{start}: excerpt of {name}: no such file")
+                continue
+            have = {line.rstrip() for line in src.read_text().split("\n")}
+            for line in body.split("\n"):
+                if line.strip() and line.rstrip() not in have:
+                    errors.append(f"{rel}:{start}: not a line of {name}:\n    {line}")
+    return errors
+
+
 def check_links(rel, text):
     errors = []
     base = (ROOT / rel).parent
@@ -370,9 +397,11 @@ def expect_matches(expected, output):
     return re.search(pattern, output) is not None
 
 
-def run_sessions(cli, rel, text, keep):
+def run_sessions(cli, rel, text, keep, network=False):
     """Run the file's check-docs sessions; return (errors, runs)."""
     sessions = {}  # name -> list of (start, body, cwd)
+    files = {}  # name -> list of (path, body)
+    needs_network = set()
     checks = []  # (session, index of the run block it follows, kind, arg, start)
     # A directive applies to the code block after it; `expect` and `absent`
     # check the output of the session's last run block before them.
@@ -381,13 +410,20 @@ def run_sessions(cli, rel, text, keep):
             if kind == "run" and lang is not None:
                 m = re.search(r"cwd=(\S+)", rest)
                 sessions.setdefault(name, []).append((start, body, m.group(1) if m else None))
+                if "needs=network" in rest:
+                    needs_network.add(name)
             elif kind == "expect" and lang is not None:
                 checks.append((name, len(sessions.get(name, [])) - 1, "expect", body, start))
             elif kind == "absent":
                 checks.append((name, len(sessions.get(name, [])) - 1, "absent", rest, start))
+            elif kind == "file" and lang is not None:
+                files.setdefault(name, []).append((rest, body + "\n"))
     errors, runs = [], 0
     for name, blocks in sessions.items():
-        outputs = run_session(cli, rel, name, blocks, errors, keep)
+        if name in needs_network and not network:
+            print(f"check_docs: {rel}: session {name} needs the network; skipped (run with --network)")
+            continue
+        outputs = run_session(cli, rel, name, blocks, files.get(name, []), errors, keep)
         runs += len(blocks)
         for (s, idx, kind, arg, start) in checks:
             if s != name:
@@ -403,20 +439,23 @@ def run_sessions(cli, rel, text, keep):
                         errors.append(f"{rel}:{start}: session {name}: expected output line not found:\n    {line}")
             elif arg and arg in out:
                 errors.append(f"{rel}:{start}: session {name}: {arg!r} must not appear in the output")
-    for (s, *_rest) in checks:
+    for s in list(files) + [c[0] for c in checks]:
         if s not in sessions:
             errors.append(f"{rel}: check-docs refers to session {s!r} with no run block")
     return errors, runs
 
 
-def run_session(cli, rel, name, blocks, errors, keep):
+def run_session(cli, rel, name, blocks, files, errors, keep):
     tmp = Path(tempfile.mkdtemp(prefix=f"check-docs-{name}-"))
     work = tmp / "work"
+    work.mkdir()
     cwd = blocks[0][2]
     if cwd:
-        shutil.copytree(ROOT / cwd, work)
-    else:
-        work.mkdir()
+        shutil.copytree(ROOT / cwd, work / cwd)
+    for path, body in files:
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
     home = tmp / "home"
     home.mkdir()
     script = ["set -u"]
@@ -514,6 +553,7 @@ def main():
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--no-run", action="store_true", help="check commands and links, do not run walkthroughs")
     ap.add_argument("--keep", action="store_true", help="keep the walkthroughs' scratch directories")
+    ap.add_argument("--network", action="store_true", help="also run walkthroughs marked needs=network")
     a = ap.parse_args()
     self_test()
     if a.self_test:
@@ -529,8 +569,9 @@ def main():
         text = p.read_text()
         errors += check_commands(cli, rel, text)
         errors += check_links(rel, text)
+        errors += check_excerpts(rel, text)
         if not a.no_run:
-            e, n = run_sessions(cli, rel, text, a.keep)
+            e, n = run_sessions(cli, rel, text, a.keep, a.network)
             errors += e
             runs += n
     for e in errors:

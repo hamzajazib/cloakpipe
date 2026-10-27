@@ -1,0 +1,31 @@
+# Read-only project access for a coding agent (Claude Code, Cursor, Codex)
+# through the reference filesystem MCP server
+# (@modelcontextprotocol/server-filesystem). Only the reading tools are
+# declared, so write_file, edit_file, move_file and create_directory are
+# refused as undeclared_tool, and an argument not listed here as
+# undeclared_argument. The Cedar policy keeps secrets files out of reach.
+release: coding-agent-fs
+version: "1"
+policy: ./policies/readonly.cedar
+tools:
+  list_allowed_directories: {}
+  list_directory:
+    args:
+      path: { type: string, max_len: 4096, required: true }
+  directory_tree:
+    args:
+      path: { type: string, max_len: 4096, required: true }
+      excludePatterns: { type: array, max_len: 50, items: { type: string, max_len: 256 } }
+  search_files:
+    args:
+      path: { type: string, max_len: 4096, required: true }
+      pattern: { type: string, max_len: 256, required: true }
+      excludePatterns: { type: array, max_len: 50, items: { type: string, max_len: 256 } }
+  get_file_info:
+    args:
+      path: { type: string, max_len: 4096, required: true }
+  read_text_file:
+    args:
+      path: { type: string, max_len: 4096, required: true }
+      head: { type: integer, min: 1 }
+      tail: { type: integer, min: 1 }
