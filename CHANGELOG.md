@@ -11,6 +11,23 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- MCP over HTTP (Streamable HTTP, spec rev 2025-06-18) on both sides of
+  the gate, with the same decisions, refusals and ledger entries as stdio:
+  - `mcp-proxy --listen ADDR` serves agents on `POST /mcp` (JSON
+    responses; `Mcp-Session-Id` issued on `initialize` and required after
+    it; `DELETE` ends a session; `GET /mcp` is 405), `GET /health` with
+    the release name and digest, `Origin` checks, and an optional
+    `--listen-token-file` bearer token. The bound address is printed on
+    stderr; SIGTERM stops it cleanly.
+  - `mcp-proxy --upstream-url URL [--upstream-header 'Name: value'|'Name: env:VAR']`
+    fronts an HTTP MCP server (JSON or SSE replies, session id and
+    protocol version carried). It is mutually exclusive with `--upstream`.
+  - Upstream transport errors fail closed: `upstream_unavailable`
+    (JSON-RPC `-32003`), or `unknown` (recorded) for a side-effecting
+    call that was sent. Library: `Interceptor::on_upstream_error`,
+    `UpstreamTransport::Http`, `Upstream::http`, `cloakpipe_mcp::http::serve`.
+  - Not yet: SSE response streams and a `GET` stream to HTTP agents
+    (upstream notifications are not relayed to them), several upstreams.
 - Gate events (`cloakpipe_mcp::events`, library API): the MCP gate hands
   each decision worth attention to `ProxyContext::events` sinks after its
   ledger entry is written: `decision.deny`, `approval.requested`,
