@@ -480,11 +480,14 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     } else {
         args.ledger.ledger_db.clone().map(|p| p.to_string_lossy().into_owned()).or_else(|| std::env::var("CLOAKPIPE_LEDGER_DB").ok())
     };
-    let upstream = args.upstream;
-
-    let parts = shell_words::split(&upstream)
-        .map_err(|e| anyhow::anyhow!("failed to parse --upstream command ({upstream:?}): {e}"))?;
-    anyhow::ensure!(!parts.is_empty(), "--upstream command is empty");
+    let upstream = match crate::gate::upstream_from_args(&args) {
+        Ok(u) => u,
+        Err(code) => std::process::exit(code),
+    };
+    let listen = match crate::gate::listen_from_args(&args) {
+        Ok(l) => l,
+        Err(code) => std::process::exit(code),
+    };
 
     // The vault and detector exist only for the opt-in PII transform.
     let pii = if pii {
@@ -519,26 +522,52 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         );
     }
 
-    tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
-    tokio::task::spawn_blocking(move || {
-        let result = cloakpipe_mcp::run_proxy(
-            parts,
-            cloakpipe_mcp::ProxyContext {
-                pii,
-                ledger_db,
-                release,
-                gate,
-                decisions,
-                events: Vec::new(),
-            },
-        );
-        if let Some(l) = anchor_loop {
-            l.finish();
+    match &upstream.transport {
+        cloakpipe_mcp::UpstreamTransport::Stdio { command } => tracing::info!("CloakPipe MCP interceptor → upstream {command:?}"),
+        // The URL only up to its host: a path or query may carry a credential.
+        cloakpipe_mcp::UpstreamTransport::Http { url, .. } => {
+            let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            tracing::info!("CloakPipe MCP interceptor → upstream over HTTP at {host}")
         }
-        result
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?
+    }
+    let ctx = cloakpipe_mcp::ProxyContext {
+        pii,
+        ledger_db,
+        release,
+        gate,
+        decisions,
+        events: Vec::new(),
+    };
+    let result = match listen {
+        // The agent over HTTP; stops on Ctrl-C / SIGTERM.
+        Some(config) => cloakpipe_mcp::http::serve(config, upstream, ctx, shutdown_signal()).await,
+        None => tokio::task::spawn_blocking(move || cloakpipe_mcp::run_upstream_io(upstream, ctx, std::io::stdin(), std::io::stdout()))
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
+    };
+    if let Some(l) = anchor_loop {
+        tokio::task::spawn_blocking(move || l.finish()).await.map_err(|e| anyhow::anyhow!("anchoring task panicked: {e}"))?;
+    }
+    result
+}
+
+/// Ctrl-C, or SIGTERM (a service manager or `docker stop`).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => return std::future::pending().await,
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// CloakTree commands — vectorless document retrieval.

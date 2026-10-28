@@ -21,12 +21,15 @@ cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.12.0", optional = tr
 base64 = { version = "0.23", optional = true }
 chrono = { workspace = true }
 rmcp = { workspace = true }
+# MCP over HTTP (Streamable HTTP): the listener and the upstream client.
+axum = { workspace = true }
+reqwest = { workspace = true }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-uuid = { workspace = true, features = ["v5"] }
+uuid = { workspace = true, features = ["v4", "v5"] }
 sha2 = "0.10"
 rusqlite = { workspace = true }
 rand = { workspace = true }

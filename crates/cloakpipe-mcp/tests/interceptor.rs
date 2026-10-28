@@ -80,3 +80,29 @@ fn without_a_gate_messages_pass_through_verbatim() {
     );
     assert_eq!(i.on_upstream_line(DEFAULT_SERVER, "log line"), [Action::ToAgent("log line".into())]);
 }
+
+#[test]
+fn an_upstream_transport_error_answers_the_call_closed() {
+    let i = Interceptor::new(ctx(Some(support_gate()), None)).unwrap();
+    let actions = i.on_agent_line(&call(1, "refund"));
+    let [Action::ToUpstream { message, .. }] = actions.as_slice() else { panic!("{actions:?}") };
+    // The message never got an answer (connection refused, HTTP 500, …):
+    // the agent is told, rather than left waiting.
+    let error = agent_message(&i.on_upstream_error(DEFAULT_SERVER, message, "connection refused"));
+    assert_eq!(error["id"], 1);
+    assert_eq!(error["error"]["code"], cloakpipe_mcp::UPSTREAM_UNAVAILABLE);
+    assert_eq!(error["error"]["data"]["reason"], "upstream_unavailable");
+    assert!(!error.to_string().contains("connection refused"), "transport detail stays in the log: {error}");
+    // A notification takes no answer.
+    let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string();
+    assert!(i.on_upstream_error(DEFAULT_SERVER, &note, "connection refused").is_empty());
+}
+
+#[test]
+fn an_http_upstream_carries_its_url_and_headers() {
+    let up = Upstream::http(DEFAULT_SERVER, "https://tools.example/mcp", vec![("X-Api-Key".into(), "k".into())]);
+    assert_eq!(
+        up.transport,
+        UpstreamTransport::Http { url: "https://tools.example/mcp".into(), headers: vec![("X-Api-Key".into(), "k".into())] }
+    );
+}

@@ -204,6 +204,64 @@ proxy (`cloakpipe start`); see [Other commands](#other-commands).
 
 Details: [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md).
 
+### MCP over HTTP (unreleased, next release v0.13.0)
+
+Either side of the gate can speak MCP's Streamable HTTP transport (spec
+rev 2025-06-18) instead of stdio. Every `tools/call` gets the same
+decision, refusal and ledger entry as over stdio.
+
+**Agents connect over HTTP** with `--listen`:
+
+```bash
+cloakpipe mcp-proxy --listen 127.0.0.1:8900 \
+  --manifest examples/support-agent/cloakpipe.manifest.yaml \
+  --task-context examples/support-agent/task-context.json \
+  --operations-db ops.db \
+  --upstream "python3 examples/support-agent/mock_upstream.py"
+# stderr: cloakpipe: MCP over HTTP listening on http://127.0.0.1:8900/mcp
+claude mcp add --transport http support-tools http://127.0.0.1:8900/mcp
+```
+
+- `POST /mcp` takes one JSON-RPC message and answers a request with one
+  `application/json` response (a notification gets `202`). There are no
+  SSE response streams and no `GET /mcp` stream (`405`), so server-sent
+  notifications such as progress or `tools/list_changed` are not relayed
+  to HTTP agents.
+- `initialize` issues an `Mcp-Session-Id`, which every later request must
+  carry (`400` without one, `404` for an unknown one). `DELETE /mcp` ends
+  the session. All sessions share the one upstream; each request is
+  forwarded under a gate-unique id, so sessions never mix up replies.
+- `GET /health` returns `{"status":"ok","release":...,"release_digest":...}`
+  and needs no token.
+- A browser `Origin` must be a loopback origin or the gate's own
+  (DNS rebinding). `--listen-token-file FILE` requires
+  `Authorization: Bearer <token>` on every `/mcp` request
+  (`claude mcp add --transport http ... --header "Authorization: Bearer <token>"`).
+  The gate warns when it binds a non-loopback address; do that only with
+  a token.
+- Ctrl-C or SIGTERM stops it; side-effecting calls still in flight are
+  recorded as `unknown`, as over stdio.
+
+**The upstream is an HTTP MCP server** with `--upstream-url` (instead of
+`--upstream`):
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --upstream-url https://tools.example.com/mcp \
+  --upstream-header "Authorization: env:TOOLS_AUTH"
+```
+
+The gate POSTs each message with the given headers (an `env:VAR` value is
+read from the environment at start-up; values are never logged), accepts
+JSON or SSE replies, and carries the server's `Mcp-Session-Id` and the
+negotiated `MCP-Protocol-Version`. Upstream transport errors fail closed: a
+connection error, an HTTP error status, or a reply that never comes answers
+the agent with `upstream_unavailable` (JSON-RPC `-32003`), and a
+side-effecting call that was sent becomes `unknown` in the operations store
+and the ledger until reconciled. `--listen` and `--upstream-url` combine.
+One upstream per gate for now; several servers behind one gate are on the
+roadmap.
+
 ## Prove
 
 - **Decision ledger.** Each decision is one `cloakpipe.decision/v1` entry
@@ -336,7 +394,11 @@ change before 1.0)
   `side_effect.unknown`) with deterministic fingerprints to in-process
   sinks (`cloakpipe_mcp::events`, schema `cloakpipe.event/v1`); webhook,
   OpenTelemetry and log delivery, and their `mcp-proxy` flags, are next
-- [ ] An HTTP/SSE MCP transport (today the gate speaks stdio only)
+- [ ] MCP over HTTP. In progress (unreleased): `mcp-proxy --listen` serves
+  agents over Streamable HTTP and `--upstream-url` fronts an HTTP MCP
+  server ([MCP over HTTP](#mcp-over-http-unreleased-next-release-v0130));
+  SSE response streams and a server-to-client `GET` stream for HTTP agents
+  are not done
 
 **Later, not started**
 

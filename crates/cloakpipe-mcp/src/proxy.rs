@@ -120,6 +120,12 @@ pub const TOOL_REFUSED: i64 = -32001;
 /// operator must reconcile the operation before it may run again.
 pub const RECONCILE_REQUIRED: i64 = -32002;
 
+/// JSON-RPC error code of a request the upstream never answered because
+/// its transport failed (connection refused, HTTP error, a stream that
+/// ended without the reply): the call fails closed, `data.reason` is
+/// `upstream_unavailable`.
+pub const UPSTREAM_UNAVAILABLE: i64 = -32003;
+
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
 /// The PII transform as both pump threads share it.
 type SharedPii = Option<Arc<(Detector, Mutex<Vault>)>>;
@@ -167,10 +173,10 @@ pub const DEFAULT_SERVER: &str = "default";
 /// One upstream MCP server the gate fronts, by name.
 ///
 /// Extension point: today the interceptor routes every message to
-/// [`DEFAULT_SERVER`] and the only transport is a stdio command. More
-/// servers (routing `tools/call` by the tool's owner) and other transports
-/// (MCP over HTTP) are new [`UpstreamTransport`] variants and a routing rule
-/// in [`Interceptor::route`]; the decision logic does not change.
+/// [`DEFAULT_SERVER`]. More servers (routing `tools/call` by the tool's
+/// owner) are a routing rule in [`Interceptor::route`]; other transports
+/// are new [`UpstreamTransport`] variants. The decision logic does not
+/// change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
     /// The name actions address it by ([`Action::ToUpstream`]).
@@ -183,12 +189,20 @@ pub struct Upstream {
 pub enum UpstreamTransport {
     /// A child process speaking newline-delimited JSON-RPC on stdin/stdout.
     Stdio { command: Vec<String> },
+    /// An MCP server over Streamable HTTP ([`crate::http`]): each message is
+    /// POSTed to `url` with `headers`, the replies come back as JSON or SSE.
+    Http { url: String, headers: Vec<(String, String)> },
 }
 
 impl Upstream {
     /// A stdio upstream: `command` is the program and its arguments.
     pub fn stdio(name: impl Into<String>, command: Vec<String>) -> Self {
         Self { name: name.into(), transport: UpstreamTransport::Stdio { command } }
+    }
+
+    /// A Streamable HTTP upstream at `url`; `headers` go on every request.
+    pub fn http(name: impl Into<String>, url: impl Into<String>, headers: Vec<(String, String)>) -> Self {
+        Self { name: name.into(), transport: UpstreamTransport::Http { url: url.into(), headers } }
     }
 }
 
@@ -615,57 +629,7 @@ impl Interceptor {
             Err(_) => Vec::new(),
         };
         for (request, in_flight) in abandoned {
-            let operation_id = in_flight.operation_id.clone();
-            // Only a row this sweep changed is evidence of `unknown`. An
-            // operation an operator reconciled meanwhile keeps its verdict and
-            // gets no `unknown` hop, but its request is still answered (an MCP
-            // client must never wait forever), with the reconciled state. A row
-            // the store could not write stays in flight (a restart sweeps and
-            // records it); its outcome is still unknown to the agent.
-            let swept = match self.operations.as_ref().map(|s| s.lock()) {
-                Some(Ok(mut s)) => match s.settle(&operation_id, OperationState::Unknown, None) {
-                    Ok(true) => Ok(None),
-                    Ok(false) => s.get(&operation_id).map(|row| row.map(|r| r.state)).map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                },
-                _ => Err("lock poisoned".to_string()),
-            };
-            let (reason, message, state) = match swept {
-                Ok(Some(state)) => {
-                    tracing::info!("operations store: {operation_id} was reconciled meanwhile ({state}); left as is");
-                    ("operation_reconciled", format!("the tool server went away before answering; an operator reconciled this call as {state}"), Some(state))
-                }
-                Ok(None) => {
-                    if let Some(base) = &self.base {
-                        let draft = base.outcome(&in_flight, Outcome::Unknown);
-                        let entry = record_decision(&self.decisions, draft.clone(), Some(&in_flight.fingerprint)).unwrap_or_else(|e| {
-                            tracing::warn!("decision ledger: unknown outcome of {operation_id} not recorded: {e}");
-                            None
-                        });
-                        emit(&self.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
-                    }
-                    if self.pii.is_some() {
-                        let meta = operation_meta(OperationState::Unknown, &operation_id);
-                        record_hop(&self.ledger, self.tenant, self.agent, self.release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &meta);
-                    }
-                    ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
-                }
-                Err(e) => {
-                    tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will");
-                    ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
-                }
-            };
-            let id: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
-            let mut data = serde_json::json!({ "reason": reason, "operationId": operation_id });
-            if let Some(state) = state {
-                data["state"] = Value::String(state.as_str().to_string());
-            }
-            let notice = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": RECONCILE_REQUIRED, "message": message, "data": data },
-            });
-            actions.push(Action::ToAgent(notice.to_string()));
+            actions.push(self.abandon(&request, in_flight));
         }
         // The gate has stopped: give the operations database up now, even if
         // the agent side (still parked on the agent's stdin) holds the store.
@@ -673,6 +637,104 @@ impl Interceptor {
             s.release_gate();
         }
         actions
+    }
+
+    /// A side-effecting call that will never get its reply (the upstream
+    /// went away, or its transport failed after the call was sent): the tool
+    /// may or may not have acted, so its operation is `unknown` until an
+    /// operator reconciles it. Records that and answers the agent.
+    fn abandon(&self, request: &str, in_flight: InFlight) -> Action {
+        let operation_id = in_flight.operation_id.clone();
+        // Only a row this sweep changed is evidence of `unknown`. An
+        // operation an operator reconciled meanwhile keeps its verdict and
+        // gets no `unknown` hop, but its request is still answered (an MCP
+        // client must never wait forever), with the reconciled state. A row
+        // the store could not write stays in flight (a restart sweeps and
+        // records it); its outcome is still unknown to the agent.
+        let swept = match self.operations.as_ref().map(|s| s.lock()) {
+            Some(Ok(mut s)) => match s.settle(&operation_id, OperationState::Unknown, None) {
+                Ok(true) => Ok(None),
+                Ok(false) => s.get(&operation_id).map(|row| row.map(|r| r.state)).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+            _ => Err("lock poisoned".to_string()),
+        };
+        let (reason, message, state) = match swept {
+            Ok(Some(state)) => {
+                tracing::info!("operations store: {operation_id} was reconciled meanwhile ({state}); left as is");
+                ("operation_reconciled", format!("the tool server went away before answering; an operator reconciled this call as {state}"), Some(state))
+            }
+            Ok(None) => {
+                if let Some(base) = &self.base {
+                    let draft = base.outcome(&in_flight, Outcome::Unknown);
+                    let entry = record_decision(&self.decisions, draft.clone(), Some(&in_flight.fingerprint)).unwrap_or_else(|e| {
+                        tracing::warn!("decision ledger: unknown outcome of {operation_id} not recorded: {e}");
+                        None
+                    });
+                    emit(&self.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
+                }
+                if self.pii.is_some() {
+                    let meta = operation_meta(OperationState::Unknown, &operation_id);
+                    record_hop(&self.ledger, self.tenant, self.agent, self.release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &meta);
+                }
+                ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
+            }
+            Err(e) => {
+                tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will");
+                ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
+            }
+        };
+        let id: Value = serde_json::from_str(request).unwrap_or(Value::Null);
+        let mut data = serde_json::json!({ "reason": reason, "operationId": operation_id });
+        if let Some(state) = state {
+            data["state"] = Value::String(state.as_str().to_string());
+        }
+        let notice = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": RECONCILE_REQUIRED, "message": message, "data": data },
+        });
+        Action::ToAgent(notice.to_string())
+    }
+
+    /// The transport could not deliver `message` (one line this interceptor
+    /// sent to upstream `server`) or never got its reply: connection
+    /// refused, an HTTP error status, a stream that ended early. The request
+    /// fails closed: a side-effecting call is abandoned as `unknown` (see
+    /// [`Self::finish`]), any other request is answered with
+    /// [`UPSTREAM_UNAVAILABLE`]. A notification takes no answer. `error` is
+    /// logged, never sent to the agent.
+    pub fn on_upstream_error(&self, server: &str, message: &str, error: &str) -> Vec<Action> {
+        tracing::warn!(server, "upstream transport error: {error}");
+        let Ok(msg) = serde_json::from_str::<Value>(message) else { return Vec::new() };
+        let Some(id) = msg.get("method").and(msg.get("id")) else { return Vec::new() };
+        let request = id.to_string();
+        let in_flight = self.pending.lock().ok().and_then(|mut p| match p.by_request.remove(&request) {
+            Some(op) => Some(op),
+            None => {
+                // No reply will come: it is no longer outstanding.
+                if let Some(n) = p.outstanding.get_mut(&request) {
+                    *n -= 1;
+                    if *n == 0 {
+                        p.outstanding.remove(&request);
+                    }
+                }
+                None
+            }
+        });
+        if let Some(in_flight) = in_flight {
+            return vec![self.abandon(&request, in_flight)];
+        }
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": UPSTREAM_UNAVAILABLE,
+                "message": "the upstream MCP server did not answer this request (transport error); it failed closed",
+                "data": { "reason": "upstream_unavailable" },
+            },
+        });
+        vec![Action::ToAgent(reply.to_string())]
     }
 }
 
@@ -694,13 +756,17 @@ where
 }
 
 /// The stdio runner: the agent on `agent_in`/`agent_out`, `upstream` a
-/// child process, and an [`Interceptor`] between them.
+/// child process (or an MCP server over HTTP, [`crate::http`]), and an
+/// [`Interceptor`] between them.
 pub fn run_upstream_io<R, W>(upstream: Upstream, ctx: ProxyContext, agent_in: R, agent_out: W) -> Result<()>
 where
     R: std::io::Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let UpstreamTransport::Stdio { command } = &upstream.transport;
+    let command = match &upstream.transport {
+        UpstreamTransport::Stdio { command } => command,
+        UpstreamTransport::Http { .. } => return crate::http::run_stdio_agent(&upstream, ctx, agent_in, agent_out),
+    };
     anyhow::ensure!(!command.is_empty(), "upstream MCP command is empty");
     let interceptor = Arc::new(Interceptor::new(ctx)?);
 
@@ -1229,7 +1295,7 @@ fn fold(s: &str) -> String {
 }
 
 /// Write one JSON-RPC line to the agent.
-fn write_line<W: Write>(out: &Mutex<W>, line: &str) -> std::io::Result<()> {
+pub(crate) fn write_line<W: Write>(out: &Mutex<W>, line: &str) -> std::io::Result<()> {
     let mut w = out.lock().map_err(|_| std::io::Error::other("agent writer poisoned"))?;
     w.write_all(line.as_bytes())?;
     w.write_all(b"\n")?;
