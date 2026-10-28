@@ -112,6 +112,9 @@ pub struct DecisionDraft {
     pub approval: Option<String>,
     pub outcome: Option<Outcome>,
     pub forwarded: bool,
+    /// The digest of the tools lock the gate checked upstream tool
+    /// definitions against (`mcp-proxy --tools-lock`), if any.
+    pub tools_lock: Option<String>,
 }
 
 impl DecisionDraft {
@@ -133,6 +136,7 @@ impl DecisionDraft {
             approval: None,
             outcome: None,
             forwarded: false,
+            tools_lock: None,
         }
     }
 
@@ -173,6 +177,10 @@ pub struct DecisionEntry {
     pub approval: Option<String>,
     pub outcome: Option<Outcome>,
     pub forwarded: bool,
+    /// Only when the gate ran with a tools lock: an entry without one hashes
+    /// exactly as entries written before this member existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_lock: Option<String>,
     pub signer: String,
     pub prev_hash: String,
     pub entry_hash: String,
@@ -204,6 +212,7 @@ impl DecisionEntry {
             approval: draft.approval,
             outcome: draft.outcome,
             forwarded: draft.forwarded,
+            tools_lock: draft.tools_lock,
             signer,
             prev_hash: prev_hash.to_string(),
             entry_hash: String::new(),
