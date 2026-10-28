@@ -9,6 +9,7 @@
 
 pub mod events;
 pub mod gate;
+pub mod http;
 pub mod operations;
 pub mod proxy;
 pub use events::{EventKind, EventSink, GateEvent, NoopSink, EVENT_SCHEMA};
@@ -16,8 +17,9 @@ pub use gate::{ApprovalRequest, ApprovedCall, Authorization, Denial, GateConfigE
 pub use cloakpipe_policy::{Counters, PolicyEngine};
 pub use proxy::{
     reconcile_operation, run_proxy, run_proxy_io, run_upstream_io, stable_ids, Action, DecisionLog, Interceptor, PiiTransform, ProxyContext,
-    Upstream, UpstreamTransport, DEFAULT_SERVER,
+    Upstream, UpstreamTransport, DEFAULT_SERVER, RECONCILE_REQUIRED, TOOL_REFUSED, UPSTREAM_UNAVAILABLE,
 };
+pub use http::ListenConfig;
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},
