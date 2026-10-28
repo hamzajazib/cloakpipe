@@ -104,5 +104,28 @@ fn any_other_publish_error_fails_at_once() {
 #[test]
 fn the_release_workflow_publishes_through_the_script() {
     let wf = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).unwrap();
-    assert!(wf.contains("run: scripts/publish-crates.sh"));
+    assert!(wf.contains("run: ../tools/scripts/publish-crates.sh"));
+}
+
+/// A manual run re-publishes an old tag, which may predate the script: the
+/// tag is checked out into `src`, the workflow's own commit into `tools`.
+#[test]
+fn the_script_comes_from_the_workflow_commit_not_the_tag() {
+    let wf: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).unwrap(),
+    )
+    .unwrap();
+    let steps = wf["jobs"]["crates"]["steps"].as_sequence().unwrap();
+    let checkout = |path: &str| {
+        steps
+            .iter()
+            .find(|s| s["with"]["path"].as_str() == Some(path))
+            .unwrap_or_else(|| panic!("no checkout into `{path}`"))
+            .clone()
+    };
+    assert!(checkout("src")["with"]["ref"].as_str().unwrap().contains("inputs.tag"));
+    assert_eq!(checkout("tools")["with"]["ref"].as_str(), Some("${{ github.sha }}"));
+    for step in steps.iter().filter(|s| s.get("run").is_some()) {
+        assert_eq!(step["working-directory"].as_str(), Some("src"), "{step:?}");
+    }
 }
