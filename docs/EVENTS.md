@@ -27,21 +27,23 @@ changes it.
 | `side_effect.replayed` | a retry of a completed side effect was answered from the operations store |
 | `side_effect.unknown` | a forwarded side effect never got its reply: reconcile it |
 | `anchor.failed` | anchoring a ledger epoch failed (`reason` is `rfc3161` or `rekor`) |
+| `tool.drift` | an upstream tool no longer matches its pin in the tools lock, or changed during the session (`reason` is `tool_drift`): once when the gate finds it, then with each refused call |
 
-`tool.drift` is reserved for `tools/list` pinning, which is not built yet.
 An expired approval receipt is a `decision.deny` with reason
 `approval_expired`.
 
 Each event is one JSON object with `"schema": "cloakpipe.event/v1"` and
 these members: `kind`, `fingerprint`, `ts`, `release`, `release_digest`,
 `policy_version` (the Cedar policy digest), `tool`, `reason`, `path` (the
-contract path of an argument denial, such as `/to`), `decision`, `mode`,
+contract path of an argument denial, such as `/to`), `server` (the
+upstream server of a `tool.drift` event, else `null`), `decision`, `mode`,
 `operation_id`, `ledger_seq` and `entry_hash`. The last two name the
-decision ledger entry the event follows.
+decision ledger entry the event follows (`null` for a `tool.drift` raised
+when the gate finds the drift, before any call).
 
 The **fingerprint** is `sha256:` plus the hex SHA-256 of
 `kind|reason|tool|path|policy_version`, with an absent member counted as
-an empty string. The same failure gets the same fingerprint on every run
+an empty string (for `tool.drift`, `tool` is `<server>/<tool>`). The same failure gets the same fingerprint on every run
 and every gate, so an alerting pipeline can group repeats into one issue.
 A policy change is a new issue.
 
@@ -61,11 +63,12 @@ attacker's address appears nowhere in it:
   "tool": "send_email",
   "reason": "scope_mismatch",
   "path": "/to",
+  "server": null,
   "decision": "deny",
   "mode": "enforce",
   "operation_id": null,
   "ledger_seq": 2,
-  "entry_hash": "sha256:…"
+  "entry_hash": "1d5b7808…"
 }
 ```
 
@@ -233,7 +236,6 @@ queue the work and return straight away.
 
 ## Not built yet
 
-- `tool.drift`, which needs `tools/list` pinning
 - a different secret or format for each webhook (today one
   `--webhook-format` and one secret apply to every `--webhook`)
 - delivery that survives a restart. The queue is in memory, but the signed

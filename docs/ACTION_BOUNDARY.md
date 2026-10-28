@@ -564,9 +564,9 @@ too: drift is about the server, not a release rule under trial.
 Each drifted tool raises a `tool.drift` event when the gate finds it (no
 ledger entry), and again with each refused call (with its ledger entry).
 The event names the server, and its fingerprint's tool component is
-`<server>/<tool>`, so the two events share one fingerprint. Events reach
-in-process sinks only for now; webhook and OpenTelemetry delivery are
-next.
+`<server>/<tool>`, so the two events share one fingerprint. They are
+delivered like every other event (webhooks, OpenTelemetry, the events log:
+[EVENTS.md](EVENTS.md)).
 
 ## The decision ledger
 

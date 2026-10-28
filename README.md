@@ -231,7 +231,8 @@ claude mcp add --transport http support-tools http://127.0.0.1:8900/mcp
 - `initialize` issues an `Mcp-Session-Id`, which every later request must
   carry (`400` without one, `404` for an unknown one). `DELETE /mcp` ends
   the session. All sessions share the one upstream; each request is
-  forwarded under a gate-unique id, so sessions never mix up replies.
+  forwarded under a gate-unique id, so sessions never mix up replies, and
+  a `notifications/cancelled` only cancels a request of its own session.
 - `GET /health` returns `{"status":"ok","release":...,"release_digest":...}`
   and needs no token.
 - A browser `Origin` must be a loopback origin or the gate's own
@@ -304,7 +305,7 @@ Details:
 Unreleased (next release v0.13.0). Each decision that needs attention
 raises a gate event: `decision.deny`, `approval.requested`,
 `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
-`side_effect.unknown` or `anchor.failed`. An event carries the tool, the
+`side_effect.unknown`, `tool.drift` or `anchor.failed`. An event carries the tool, the
 reason, the contract path, the release, the ledger entry and a
 deterministic fingerprint (the same failure always gets the same
 fingerprint). It never carries an argument value.

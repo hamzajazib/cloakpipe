@@ -17,12 +17,16 @@ may contain breaking changes; these are marked **Breaking**.
     responses; `Mcp-Session-Id` issued on `initialize` and required after
     it; `DELETE` ends a session; `GET /mcp` is 405), `GET /health` with
     the release name and digest, `Origin` checks, and an optional
-    `--listen-token-file` bearer token. The bound address is printed on
-    stderr; SIGTERM stops it cleanly.
+    `--listen-token-file` bearer token (scheme case-insensitive). An
+    agent's `notifications/cancelled` reaches the upstream under the
+    gate's id for that session's own request, and never cancels another
+    session's. The bound address is printed on stderr; SIGTERM stops it
+    cleanly.
   - `mcp-proxy --upstream-url URL [--upstream-header 'Name: value'|'Name: env:VAR']`
     fronts an HTTP MCP server (JSON or SSE replies, session id and
     protocol version carried). It is mutually exclusive with `--upstream`,
-    `--server` and `--tools-lock`.
+    `--server` and `--tools-lock`; `--upstream-header` without it is a
+    usage error.
   - Upstream transport errors fail closed: `upstream_unavailable`
     (JSON-RPC `-32003`), or `unknown` (recorded) for a side-effecting
     call that was sent. Library: `Interceptor::on_upstream_error`,
@@ -36,7 +40,7 @@ may contain breaking changes; these are marked **Breaking**.
   each decision worth attention to `ProxyContext::events` sinks after its
   ledger entry is written: `decision.deny`, `approval.requested`,
   `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
-  `side_effect.unknown` and `tool.drift` (`anchor.failed` is reserved).
+  `side_effect.unknown`, `tool.drift` and `anchor.failed`.
   Each event names its ledger entry (`ledger_seq`, `entry_hash`), carries a
   deterministic fingerprint (`sha256(kind|reason|tool|path|policy_version)`)
   and never an argument value; `GateEvent::to_json` is the stable
