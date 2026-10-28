@@ -20,6 +20,7 @@ mod keys;
 mod manifest;
 mod operations;
 mod release;
+mod tools;
 mod verify;
 
 use clap::{Parser, Subcommand};
@@ -98,6 +99,11 @@ enum Commands {
     },
     /// Sign an approval receipt for one exact tool call (for mcp-proxy --approvals)
     Approve(action::ApproveArgs),
+    /// Upstream MCP tool definitions: pin them in cloakpipe.tools.lock, diff against it
+    Tools {
+        #[command(subcommand)]
+        action: tools::ToolsCommands,
+    },
     /// Side-effecting tool calls tracked by mcp-proxy --operations-db: list, reconcile
     Operations {
         #[command(subcommand)]
@@ -240,6 +246,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Action { action } => std::process::exit(action::run(action)),
         Commands::Approve(args) => std::process::exit(action::approve(args)),
         Commands::Operations { action } => std::process::exit(operations::run(action)),
+        Commands::Tools { action } => std::process::exit(tools::run(action)),
         Commands::Ledger { action } => std::process::exit(evidence::run(action)),
         Commands::Verify(args) => std::process::exit(verify::run(args)),
         Commands::Events { action } => std::process::exit(events::run(action)),
@@ -281,6 +288,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         | Commands::Action { .. }
         | Commands::Approve(_)
         | Commands::Operations { .. }
+        | Commands::Tools { .. }
         | Commands::Ledger { .. }
         | Commands::Verify(_)
         | Commands::Events { .. } => unreachable!("handled above"),

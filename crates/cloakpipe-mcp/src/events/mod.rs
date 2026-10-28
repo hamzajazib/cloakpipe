@@ -4,10 +4,13 @@
 //! [`ProxyContext::events`](crate::ProxyContext::events) at each decision
 //! point that deserves attention: a refused call, an approval request, a
 //! receipt that does not match, a would-deny in shadow mode, a side effect
-//! replayed or left unknown. An allowed call emits nothing.
+//! replayed or left unknown, an upstream tool whose definition drifted. An
+//! allowed call emits nothing.
 //!
 //! An event is emitted after its decision ledger entry is written, so it
-//! names the entry (`ledger_seq`, `entry_hash`). It carries only what the
+//! names the entry (`ledger_seq`, `entry_hash`). The exception is the
+//! `tool.drift` raised when the gate finds a drifted tool, before any call:
+//! it has no entry. It carries only what the
 //! ledger may: the tool name, the reason code, the contract path, the
 //! release, the policy digest, the decision and mode, the operation id and
 //! fingerprints, never an argument value, a tool result or a credential.
@@ -70,7 +73,10 @@ pub enum EventKind {
     /// Shadow mode forwarded a call enforce mode would have refused.
     #[serde(rename = "shadow.finding")]
     ShadowFinding,
-    /// Reserved: an upstream's `tools/list` no longer matches its pin.
+    /// An upstream tool's definition no longer matches its pin in the tools
+    /// lock (or has none), or changed during the session: it is hidden from
+    /// the agent and calls to it are refused (`tool_drift`). Emitted when the
+    /// gate finds it (no ledger entry) and for each refused call.
     #[serde(rename = "tool.drift")]
     ToolDrift,
     /// Reserved: anchoring the ledger head failed.
@@ -117,6 +123,8 @@ pub struct GateEvent {
     pub policy_version: Option<String>,
     /// The tool, when the call named one the ledger may record.
     pub tool: Option<String>,
+    /// The upstream server the event is about (`tool.drift`).
+    pub server: Option<String>,
     /// The reason code (`undeclared_tool`, `scope_mismatch`, ...): the rule id.
     pub reason: String,
     /// The contract path of an argument denial (from the contract, never the call).
@@ -142,6 +150,7 @@ impl GateEvent {
             release_digest: None,
             policy_version: policy_version.map(str::to_string),
             tool: tool.map(str::to_string),
+            server: None,
             reason: reason.to_string(),
             path: path.map(str::to_string),
             decision: None,
@@ -150,6 +159,16 @@ impl GateEvent {
             ledger_seq: None,
             entry_hash: None,
         }
+    }
+
+    /// The event about upstream `server`: its fingerprint's tool component
+    /// becomes `<server>/<tool>`, so the same tool on two servers is two
+    /// issues.
+    pub fn with_server(mut self, server: &str) -> Self {
+        let tool = format!("{server}/{}", self.tool.as_deref().unwrap_or(""));
+        self.fingerprint = fingerprint(self.kind, &self.reason, Some(&tool), self.path.as_deref(), self.policy_version.as_deref());
+        self.server = Some(server.to_string());
+        self
     }
 
     /// The stable wire form (`"schema": "cloakpipe.event/v1"`): every member
@@ -169,7 +188,9 @@ impl GateEvent {
 /// kind | reason | tool | path | policy_version
 /// ```
 ///
-/// (the five strings joined with `|`, an absent one as the empty string).
+/// (the five strings joined with `|`, an absent one as the empty string;
+/// for an event about an upstream server, `tool` is `<server>/<tool>`:
+/// [`GateEvent::with_server`]).
 /// The same failure (rule, tool, contract path, policy) gets the same
 /// fingerprint across runs and gates, so an alerting pipeline can group
 /// repeats into one issue; a change of policy is a new issue. It holds no
@@ -292,9 +313,20 @@ mod tests {
         assert_eq!(v["ledger_seq"], 3);
         assert_eq!(v["fingerprint"], e.fingerprint);
         assert_eq!(v["path"], Value::Null);
-        for member in ["ts", "release", "release_digest", "policy_version", "tool", "reason", "operation_id", "entry_hash"] {
+        for member in ["ts", "release", "release_digest", "policy_version", "tool", "server", "reason", "operation_id", "entry_hash"] {
             assert!(v.get(member).is_some(), "{member} missing: {v}");
         }
+    }
+
+    #[test]
+    fn a_drift_fingerprint_names_the_server() {
+        let e = GateEvent::new(EventKind::ToolDrift, "tool_drift", Some("send"), None, POLICY).with_server("mail");
+        assert_eq!(e.server.as_deref(), Some("mail"));
+        assert_eq!(e.tool.as_deref(), Some("send"));
+        assert_eq!(e.fingerprint, fingerprint(EventKind::ToolDrift, "tool_drift", Some("mail/send"), None, POLICY));
+        let other = GateEvent::new(EventKind::ToolDrift, "tool_drift", Some("send"), None, POLICY).with_server("files");
+        assert_ne!(e.fingerprint, other.fingerprint);
+        assert_eq!(e.to_json()["server"], "mail");
     }
 
     fn hex(bytes: &[u8]) -> String {

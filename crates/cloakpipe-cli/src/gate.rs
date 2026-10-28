@@ -39,11 +39,27 @@ use std::path::{Path, PathBuf};
 pub struct McpProxyArgs {
     /// Upstream MCP server command + args, e.g.
     /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-    #[arg(long, required_unless_present = "upstream_url", conflicts_with = "upstream_url")]
+    /// (the server named `default`)
+    #[arg(long, required_unless_present_any = ["upstream_url", "servers"], conflicts_with = "upstream_url")]
     pub upstream: Option<String>,
+    /// Another upstream MCP server, as NAME=COMMAND (repeatable): the gate
+    /// starts each, merges their tools/list and routes each tools/call to the
+    /// server that serves the tool. A tool name two servers share refuses to
+    /// start unless the manifest declares it per server as <server>__<tool>.
+    /// Requests other than tools go to the server named `default`
+    /// (--upstream), or the only one; else they are refused.
+    #[arg(long = "server", value_name = "NAME=COMMAND")]
+    pub servers: Vec<String>,
+    /// Tools lock (from `cloakpipe tools pin`): a tool whose definition does
+    /// not match its pin, or that has none, is hidden from tools/list and
+    /// refused (tool_drift). Without it, a tool whose definition changes
+    /// during the session is.
+    #[arg(long = "tools-lock")]
+    pub tools_lock: Option<PathBuf>,
     /// Upstream MCP server over Streamable HTTP, e.g.
-    /// --upstream-url https://tools.example.com/mcp (instead of --upstream).
-    #[arg(long = "upstream-url", value_name = "URL")]
+    /// --upstream-url https://tools.example.com/mcp (instead of --upstream;
+    /// not with --server or --tools-lock yet).
+    #[arg(long = "upstream-url", value_name = "URL", conflicts_with_all = ["servers", "tools_lock"])]
     pub upstream_url: Option<String>,
     /// Header sent on every request to --upstream-url (repeatable), as
     /// 'Name: value'; a value `env:VAR` is read from that environment
@@ -388,19 +404,13 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     b.create(dir)
 }
 
-/// The upstream `mcp-proxy` fronts: `--upstream` (a stdio command) or
-/// `--upstream-url` with its `--upstream-header`s (`env:VAR` values read
-/// now, so a missing variable fails before anything starts).
-pub(crate) fn upstream_from_args(a: &McpProxyArgs) -> Res<cloakpipe_mcp::Upstream> {
+/// The upstreams `mcp-proxy` fronts: `--upstream` (a stdio command, the
+/// server named `default`) and `--server NAME=COMMAND`s, or `--upstream-url`
+/// with its `--upstream-header`s (`env:VAR` values read now, so a missing
+/// variable fails before anything starts).
+pub(crate) fn upstreams_from_args(a: &McpProxyArgs) -> Res<Vec<cloakpipe_mcp::Upstream>> {
     let name = cloakpipe_mcp::DEFAULT_SERVER;
-    if let Some(command) = &a.upstream {
-        let parts = shell_words::split(command).map_err(|e| usage(format_args!("--upstream {command:?}: {e}")))?;
-        if parts.is_empty() {
-            return Err(usage("--upstream command is empty"));
-        }
-        return Ok(cloakpipe_mcp::Upstream::stdio(name, parts));
-    }
-    let Some(url) = &a.upstream_url else { return Err(usage("--upstream or --upstream-url is required")) };
+    let Some(url) = &a.upstream_url else { return crate::tools::upstreams(a.upstream.as_deref(), &a.servers) };
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(usage("--upstream-url must be an http:// or https:// URL"));
     }
@@ -421,7 +431,7 @@ pub(crate) fn upstream_from_args(a: &McpProxyArgs) -> Res<cloakpipe_mcp::Upstrea
         };
         headers.push((name.to_string(), value));
     }
-    Ok(cloakpipe_mcp::Upstream::http(name, url.clone(), headers))
+    Ok(vec![cloakpipe_mcp::Upstream::http(name, url.clone(), headers)])
 }
 
 /// `--listen` with its token: `Ok(None)` without `--listen`.

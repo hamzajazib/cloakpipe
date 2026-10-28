@@ -451,6 +451,123 @@ Each is a [decision entry](#the-decision-ledger) naming the `operation_id`:
 
 The ledger never holds arguments, results or raw fingerprints.
 
+## Several servers and tool pinning
+
+Unreleased (next release).
+
+### One gate in front of several servers
+
+`--server NAME=COMMAND` (repeatable) adds an upstream server. `--upstream`
+is still accepted and is the server named `default`.
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --server 'mail=npx -y @acme/mail-mcp' \
+  --server 'files=npx -y @modelcontextprotocol/server-filesystem /srv/docs'
+```
+
+With more than one server, the gate is the MCP client of each one:
+
+- **Start-up.** At start-up it initializes every server itself, as client
+  `cloakpipe-gate` with no client capabilities. It then lists each server's
+  tools, following `nextCursor` to the last page. A server that does not
+  start, or does not answer within 30 s, stops the gate.
+- **What it answers itself.** It answers the agent's `initialize` (as
+  server `cloakpipe-gate`) and `ping`. The agent's `notifications/initialized`
+  goes no further.
+- **`tools/list`.** It lists every server again (every page) and answers
+  with one merged list, in server order. The agent never gets a cursor.
+- **`tools/call`.** Each call goes to the server that lists the tool. The
+  gate sends it under a request id of its own, and the reply comes back to
+  the agent under the agent's id. All gate stages, the ledger and events
+  work exactly as with one server.
+- **Collisions.** A tool name that two servers list stops the gate at
+  start-up. The exception is a tool the manifest declares per server, as
+  `<server>__<tool>` (for example `mail__search` and `files__search`). Each
+  copy is then listed and called under that name, and the gate calls it by
+  its own name on its server. A copy the manifest does not declare is
+  refused as `undeclared_tool`. Server names use letters, digits, `-` and
+  `_`, and may not contain `__`.
+- **Other requests** (`resources/*`, `prompts/*`, `completion/complete`,
+  `logging/setLevel`, ...) go to the server named `default` (`--upstream`),
+  or to the only server when there is one. Otherwise they are refused with
+  JSON-RPC error `-32601`. Other notifications from the agent go to every
+  server. `notifications/cancelled` goes to the server handling the
+  request.
+- **Requests from a server** (sampling, roots, elicitation) are refused
+  with `-32601`, since the gate declared no client capabilities. Notifications
+  from a server are relayed to the agent.
+- **A server that exits.** The agent requests waiting on it are answered
+  with error `-32003`, reason `upstream_unavailable`, and later calls to it
+  get the same answer. A side-effecting call it left in flight is recorded
+  as `unknown` when the gate stops, as with one server.
+
+### Pinning tool definitions
+
+The model reads tool descriptions as instructions. A server can change a
+description or a schema after you reviewed it (tool poisoning, or a "rug
+pull"), and that changes what the agent does without any change to your
+manifest. A tools lock pins each definition as it was when you reviewed it:
+
+```bash
+cloakpipe tools pin --manifest cloakpipe.manifest.yaml \
+  --server 'mail=npx -y @acme/mail-mcp' --server 'files=...'   # writes cloakpipe.tools.lock
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --server 'mail=...' --server 'files=...' --tools-lock cloakpipe.tools.lock
+```
+
+The lock file looks like this:
+
+```json
+{
+  "schema": "cloakpipe.tools-lock/v1",
+  "digest": "sha256:…",
+  "servers": { "mail": { "send": "sha256:…", "search": "sha256:…" }, "files": { "read": "sha256:…" } }
+}
+```
+
+- **What is hashed.** A tool's hash is SHA-256 over the RFC 8785 (JCS)
+  canonical JSON of its `name`, `description`, `inputSchema` and
+  `annotations`, counting only the members it has. Other members, such as
+  `title` and `_meta`, are not pinned.
+- **The lock digest.** `digest` is SHA-256 over the canonical JSON of
+  `{"schema", "servers"}`. A lock whose digest does not match its content
+  was edited, and `mcp-proxy` refuses to start on it (exit 2). To change
+  it, pin again.
+- **`tools pin`** starts the servers, lists their tools and writes the lock
+  (`--out`, default `cloakpipe.tools.lock`). With `--manifest`, it refuses
+  (exit 1) a tool name collision the manifest does not resolve.
+- **`tools diff --lock cloakpipe.tools.lock`** compares the lock with what
+  the servers list now (`--upstream` / `--server`), or with another lock
+  (`--against new.lock`). It prints each tool as `added`, `removed` or
+  `changed` with its hashes, and exits 1 when anything changed (0 when
+  nothing did). Review the change, then pin again.
+
+With `--tools-lock`, a tool whose definition does not match its pin is
+hidden from the agent's `tools/list`, and every call to it is refused as
+`tool_drift` (JSON-RPC error `-32001`). This also applies to a tool the lock
+does not pin at all. Each refusal is recorded in the decision ledger like
+any other. `--tools-lock` also works with a single `--upstream`, which the
+lock names `default`, and then the gate initializes that server itself too.
+
+Without a lock, the first definition the gate sees for each tool in a
+session is its baseline. With several servers, that is the start-up
+listing. With a plain `--upstream`, it is the first `tools/list` reply. If a
+server later lists a tool differently, for example after
+`notifications/tools/list_changed` (on which the gate lists that server
+again at once), the tool is hidden and refused as `tool_drift`.
+
+A drifted tool stays refused until the gate restarts, even if the server
+changes it back. It is refused in shadow mode too, and without a manifest
+too: drift is about the server, not a release rule under trial.
+
+Each drifted tool raises a `tool.drift` event when the gate finds it (no
+ledger entry), and again with each refused call (with its ledger entry).
+The event names the server, and its fingerprint's tool component is
+`<server>/<tool>`, so the two events share one fingerprint. Events reach
+in-process sinks only for now; webhook and OpenTelemetry delivery are
+next.
+
 ## The decision ledger
 
 Every decision the gate makes is one entry in the decision ledger, a record
@@ -479,6 +596,9 @@ and are still read. An entry is one flat JSON object:
   only the key holder can link an entry to a call.
 - `mode`: `enforce`, or `shadow`, where the decision is what enforce mode
   would have done; `forwarded` says whether the call reached the tool.
+- `tools_lock`: the digest of the tools lock the gate ran with
+  (`--tools-lock`). It is present only then, so an entry without it hashes
+  exactly as entries written before this member existed.
 - `entry_hash` is SHA-256 of `cloakpipe.decision.v1`, a newline, and the
   entry without `entry_hash` and `sig` as JSON with sorted keys and no
   whitespace. `prev_hash` chains it to the previous entry (64 zeros for

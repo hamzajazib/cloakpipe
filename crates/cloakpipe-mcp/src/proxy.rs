@@ -43,13 +43,16 @@ use cloakpipe_ledger::{
 use cloakpipe_release::action::fingerprint;
 use cloakpipe_release::ReleaseHash;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::catalog::{Catalog, Drift};
 use crate::events::{DecisionRecord, EventKind, EventSink, GateEvent};
+use crate::servers::{ServerTools, StdioServer, DISCOVERY_TIMEOUT, GATE_NAME, PROTOCOL_VERSION};
+use crate::tools_lock::ToolsLock;
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
@@ -173,11 +176,11 @@ pub const DEFAULT_SERVER: &str = "default";
 
 /// One upstream MCP server the gate fronts, by name.
 ///
-/// Extension point: today the interceptor routes every message to
-/// [`DEFAULT_SERVER`]. More servers (routing `tools/call` by the tool's
-/// owner) are a routing rule in [`Interceptor::route`]; other transports
-/// are new [`UpstreamTransport`] variants. The decision logic does not
-/// change.
+/// [`Interceptor::new`] passes one upstream's messages through as
+/// [`DEFAULT_SERVER`]; [`Interceptor::with_servers`] routes each
+/// `tools/call` to the server that owns the tool. Other transports (MCP
+/// over HTTP) are new [`UpstreamTransport`] variants; the decision logic
+/// does not change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
     /// The name actions address it by ([`Action::ToUpstream`]).
@@ -226,6 +229,11 @@ pub enum Action {
 /// Agent messages are decided one at a time, in the order they are given:
 /// a transport delivering several agent messages at once is serialized.
 /// Upstream messages may be given concurrently with agent ones.
+///
+/// Upstream tool definitions are watched for drift ([`crate::catalog`]):
+/// a tool whose definition changes during the session (or, with a tools
+/// lock, does not match its pin) is hidden from `tools/list` and refused as
+/// `tool_drift`, with a `tool.drift` event.
 pub struct Interceptor {
     /// The gate; held while one agent message is decided.
     gate: Mutex<Option<ToolGate>>,
@@ -239,13 +247,52 @@ pub struct Interceptor {
     agent: uuid::Uuid,
     release: Option<[u8; 32]>,
     events: Vec<Arc<dyn EventSink>>,
+    /// Which server serves which tool, and which tools drifted.
+    catalog: Catalog,
+    /// Several servers (or a tools lock): the gate is the client of each.
+    router: Option<Router>,
+    /// One upstream: the agent's `tools/list` requests awaiting a reply
+    /// (request id, serialized), whose listings are checked for drift.
+    list_requests: Mutex<HashSet<String>>,
 }
 
 impl Interceptor {
     /// Check the gate can run and record what a previous process left: a
     /// side-effecting call it left in flight is now `unknown` (recorded
     /// before anything runs; a gate that cannot record does not start).
+    ///
+    /// One upstream ([`DEFAULT_SERVER`]): messages pass through, and the
+    /// first definition listed for each tool is its baseline for drift.
     pub fn new(ctx: ProxyContext) -> Result<Self> {
+        Self::build(ctx, Catalog::passthrough(), None)
+    }
+
+    /// The gate in front of several servers, initialized and listed at
+    /// start-up ([`crate::servers`]): it answers the agent's `initialize`
+    /// and `ping` itself, merges every server's `tools/list`, routes each
+    /// `tools/call` to the server that owns the tool (and any other request
+    /// to the server named `default`, or the only one), under request ids
+    /// of its own.
+    ///
+    /// A tool name two servers list refuses to start, unless the manifest
+    /// declares it per server as `<server>__<tool>` (each copy is then served
+    /// under that name). With `lock`, each tool must match its pin: one
+    /// that does not (or has none) is hidden and refused as `tool_drift`, and
+    /// every decision entry records the lock digest. Without one, the
+    /// start-up listing is the baseline.
+    pub fn with_servers(ctx: ProxyContext, servers: Vec<ServerTools>, lock: Option<ToolsLock>) -> Result<Self> {
+        let gate = ctx.gate.as_ref();
+        let declares = |tool: &str| gate.is_some_and(|g| g.declares(tool));
+        let (catalog, drifts) = Catalog::routed(&servers, lock, &declares)?;
+        let router = Router::new(&servers);
+        let interceptor = Self::build(ctx, catalog, Some(router))?;
+        for drift in &drifts {
+            interceptor.emit_drift(drift);
+        }
+        Ok(interceptor)
+    }
+
+    fn build(ctx: ProxyContext, catalog: Catalog, router: Option<Router>) -> Result<Self> {
         if let Some(gate) = &ctx.gate {
             // A side-effect tool without an operations store must not run.
             gate.ready()?;
@@ -256,7 +303,7 @@ impl Interceptor {
 
         let decisions: SharedDecisions = ctx.decisions.map(|d| Arc::new(Mutex::new(d)));
         let gate = ctx.gate;
-        let base = gate.as_ref().map(EntryBase::of);
+        let base = gate.as_ref().map(|g| EntryBase { tools_lock: catalog.lock_digest(), ..EntryBase::of(g) });
         let operations: SharedOperations = gate.as_ref().and_then(ToolGate::operations);
         // Evidence for the start-up sweep: operations a previous process left in
         // flight are now unknown. Recorded before anything runs: a gate that
@@ -272,7 +319,7 @@ impl Interceptor {
                 let draft = base.outcome(&in_flight, Outcome::Unknown);
                 let entry = record_decision(&decisions, draft.clone(), Some(&in_flight.fingerprint))
                     .map_err(|e| anyhow::anyhow!("the decision ledger cannot be written ({e}); refusing to start"))?;
-                emit(&ctx.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
+                emit(&ctx.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref(), None);
             }
         }
 
@@ -289,19 +336,46 @@ impl Interceptor {
             agent,
             release: ctx.release,
             events: ctx.events,
+            catalog,
+            router,
+            list_requests: Mutex::new(HashSet::new()),
         })
     }
 
-    /// The upstream server a message from the agent goes to. Extension
-    /// point for more than one upstream; today, always [`DEFAULT_SERVER`].
-    pub fn route(&self, _msg: &Value) -> &str {
-        DEFAULT_SERVER
+    /// The upstream server a message from the agent goes to: the server
+    /// that serves a `tools/call`'s tool, else the one other requests go to
+    /// (one upstream: always [`DEFAULT_SERVER`]).
+    pub fn route(&self, msg: &Value) -> &str {
+        let servers = self.catalog.servers();
+        if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
+            if let Some((i, _)) = msg.pointer("/params/name").and_then(Value::as_str).and_then(|t| self.catalog.route(t)) {
+                return &servers[i];
+            }
+        }
+        &servers[self.router.as_ref().and_then(|r| r.default).unwrap_or(0)]
     }
 
     /// Decide one message from the agent (a line of JSON-RPC): forward it
     /// (as re-serialized here, or verbatim when it is not JSON and there is
-    /// no gate), answer it, or refuse it.
+    /// no gate), answer it, or refuse it. With several servers, a forwarded
+    /// message is then routed ([`Self::with_servers`]).
     pub fn on_agent_line(&self, line: &str) -> Vec<Action> {
+        let actions = self.decide_agent(line);
+        let mut out = Vec::with_capacity(actions.len());
+        for action in actions {
+            match action {
+                Action::ToUpstream { message, .. } if self.router.is_some() => out.extend(self.dispatch(&message)),
+                Action::ToUpstream { server, message } => {
+                    self.note_list_request(&message);
+                    out.push(Action::ToUpstream { server, message });
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    fn decide_agent(&self, line: &str) -> Vec<Action> {
         let received = unix_nanos();
         // One agent message at a time: request ids are only registered here,
         // and `coordinate` relies on no other agent message racing it.
@@ -321,7 +395,7 @@ impl Interceptor {
                     Ok(entry) => (reason, entry),
                     Err(_) => (FAIL_CLOSED, None),
                 };
-                let event = emit(&self.events, base, EventKind::DecisionDeny, reason, &draft, entry.as_ref());
+                let event = emit(&self.events, base, EventKind::DecisionDeny, reason, &draft, entry.as_ref(), None);
                 report(&self.events, base, received, &draft, reason, entry.as_ref(), event.as_ref());
                 let refusal = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -352,7 +426,7 @@ impl Interceptor {
                             Ok(entry) => (code, entry),
                             Err(_) => (FAIL_CLOSED.to_string(), None),
                         };
-                        let event = emit(&self.events, base, EventKind::DecisionDeny, &code, &draft, entry.as_ref());
+                        let event = emit(&self.events, base, EventKind::DecisionDeny, &code, &draft, entry.as_ref(), None);
                         report(&self.events, base, received, &draft, &code, entry.as_ref(), event.as_ref());
                         let refusal = serde_json::json!({
                             "jsonrpc": "2.0",
@@ -381,21 +455,26 @@ impl Interceptor {
                         // The operation this call is, if it is side-effecting.
                         let mut operation = None;
                         let mut approval = None;
-                        match gate.authorize(&tool, arguments, &now) {
+                        // A declared tool must also be one an upstream serves
+                        // as pinned: a drifted or unserved one is refused in
+                        // shadow mode too.
+                        let upstream = if gate.declares(&tool) { self.catalog.refuse(&tool) } else { None };
+                        match upstream.map(Err).unwrap_or_else(|| gate.authorize(&tool, arguments, &now)) {
                             Ok(auth) => {
                                 approval = auth.approval;
                                 operation = auth.operation;
                             }
                             Err(denial) => {
+                                let always = denial.is_upstream();
                                 // Shadow mode forwards it: a side-effecting call is
                                 // still an operation (tracking is not a release rule).
-                                if gate.mode == GateMode::Shadow {
+                                if gate.mode == GateMode::Shadow && !always {
                                     match gate.operation(&tool, arguments, &now) {
                                         Ok(op) => operation = op,
                                         Err(d) => refusal = Some((d, true)),
                                     }
                                 }
-                                refusal = refusal.or(Some((denial, false)));
+                                refusal = refusal.or(Some((denial, always)));
                             }
                         }
                         let mut forwarding = match &refusal {
@@ -469,6 +548,7 @@ impl Interceptor {
                         let kind = match (&refusal, &replay, &recorded) {
                             (_, _, Err(_)) => Some(EventKind::DecisionDeny),
                             (_, Some(_), _) => Some(EventKind::SideEffectReplayed),
+                            (Some((Denial::ToolDrift { .. }, _)), _, _) => Some(EventKind::ToolDrift),
                             (Some(_), _, _) if !enforced => Some(EventKind::ShadowFinding),
                             (Some((Denial::ApprovalRequired, _)), _, _) => Some(EventKind::ApprovalRequested),
                             (Some((Denial::ApprovalInvalid, _)), _, _) => Some(EventKind::ApprovalMismatch),
@@ -482,7 +562,8 @@ impl Interceptor {
                                 (Ok(_), EventKind::SideEffectReplayed) => REPLAYED,
                                 (Ok(_), _) => draft.reason.as_str(),
                             };
-                            emit(&self.events, base, kind, reason, &draft, entry)
+                            let server = refusal.as_ref().and_then(|(d, _)| d.server());
+                            emit(&self.events, base, kind, reason, &draft, entry, server)
                         });
                         // Every tools/call decision, allows included (for
                         // tracing). Unrecorded, it was refused.
@@ -556,6 +637,12 @@ impl Interceptor {
                             }
                             tracing::warn!(reason = %code, "MCP tool call fails the release gate (shadow mode: forwarded)");
                         }
+                    } else {
+                        // No gate: a drifted or unserved tool is still refused.
+                        let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                        if let Some(denial) = self.catalog.refuse(tool) {
+                            return self.refuse_ungated(msg.get("id"), tool, &denial);
+                        }
                     }
                     // Only the opt-in PII transform rewrites an allowed call.
                     if let Some(pii) = pii {
@@ -585,10 +672,24 @@ impl Interceptor {
 
     /// One message (a line of JSON-RPC) from upstream `server` for the
     /// agent: the reply to a side-effecting call settles its operation
-    /// first, and under the PII transform result tokens are rehydrated.
+    /// first, and under the PII transform result tokens are rehydrated. A
+    /// listing of tools is checked for drift first. With several servers,
+    /// the reply's id is the agent's again, and replies to the gate's own
+    /// requests (listing pages) are taken here.
     pub fn on_upstream_line(&self, server: &str, line: &str) -> Vec<Action> {
-        // One upstream today: replies are matched by request id alone.
+        if self.router.is_some() {
+            return self.on_routed_line(server, line);
+        }
+        // One upstream: replies are matched by request id alone.
         debug_assert_eq!(server, DEFAULT_SERVER);
+        if let Some(filtered) = self.check_listing(line) {
+            return self.relay(&filtered);
+        }
+        self.relay(line)
+    }
+
+    /// An upstream message on its way to the agent (its id the agent's).
+    fn relay(&self, line: &str) -> Vec<Action> {
         let (pii, ledger) = (&self.pii, &self.ledger);
         let (tenant, agent, release) = (self.tenant, self.agent, self.release);
         let out = match serde_json::from_str::<Value>(line) {
@@ -684,7 +785,7 @@ impl Interceptor {
                         tracing::warn!("decision ledger: unknown outcome of {operation_id} not recorded: {e}");
                         None
                     });
-                    emit(&self.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
+                    emit(&self.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref(), None);
                 }
                 if self.pii.is_some() {
                     let meta = operation_meta(OperationState::Unknown, &operation_id);
@@ -720,7 +821,20 @@ impl Interceptor {
     pub fn on_upstream_error(&self, server: &str, message: &str, error: &str) -> Vec<Action> {
         tracing::warn!(server, "upstream transport error: {error}");
         let Ok(msg) = serde_json::from_str::<Value>(message) else { return Vec::new() };
-        let Some(id) = msg.get("method").and(msg.get("id")) else { return Vec::new() };
+        let Some(mut id) = msg.get("method").and(msg.get("id")).cloned() else { return Vec::new() };
+        // Several servers: the message went out under the gate's own id.
+        if self.router.is_some() {
+            let waiting = id.as_u64().and_then(|n| self.router_state().and_then(|mut st| st.waiting.remove(&n)));
+            match waiting {
+                Some(Waiting::Agent { id: agent, .. }) => id = agent,
+                // A page of a listing: that server's tools are left out of it.
+                Some(Waiting::List { job, server }) => {
+                    let failed = serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": UPSTREAM_UNAVAILABLE, "message": "transport error" } });
+                    return self.on_page(job, server, &failed);
+                }
+                None => return Vec::new(),
+            }
+        }
         let request = id.to_string();
         let in_flight = self.pending.lock().ok().and_then(|mut p| match p.by_request.remove(&request) {
             Some(op) => Some(op),
@@ -749,6 +863,580 @@ impl Interceptor {
         });
         vec![Action::ToAgent(reply.to_string())]
     }
+}
+
+/// JSON-RPC "method not found".
+const METHOD_NOT_FOUND: i64 = -32601;
+
+/// The reason of a call refused because its tool drifted.
+const TOOL_DRIFT: &str = "tool_drift";
+
+/// The gate's side of several servers: what it answers itself, and the
+/// requests it sent and awaits.
+struct Router {
+    /// The `initialize` result the agent gets.
+    init: Value,
+    /// Where requests other than tools go: the server named `default`, or
+    /// the only one.
+    default: Option<usize>,
+    state: Mutex<RouterState>,
+}
+
+#[derive(Default)]
+struct RouterState {
+    next_id: u64,
+    next_job: u64,
+    /// The gate's request id -> what it waits for.
+    waiting: HashMap<u64, Waiting>,
+    jobs: HashMap<u64, ListJob>,
+    /// Servers that went away.
+    gone: HashSet<usize>,
+}
+
+enum Waiting {
+    /// An agent request, and the agent's id for it.
+    Agent { id: Value, server: usize },
+    /// A page of a listing.
+    List { job: u64, server: usize },
+}
+
+/// Listing tools, page by page, server by server.
+struct ListJob {
+    /// The agent's `tools/list` it answers; `None`: a re-listing after a
+    /// server's `notifications/tools/list_changed`.
+    agent: Option<Value>,
+    remaining: HashSet<usize>,
+    tools: BTreeMap<usize, Vec<Value>>,
+    pages: usize,
+}
+
+impl Router {
+    fn new(servers: &[ServerTools]) -> Self {
+        let default = servers.iter().position(|s| s.name == DEFAULT_SERVER).or((servers.len() == 1).then_some(0));
+        let primary = servers.get(default.unwrap_or(0)).map(|s| &s.init).unwrap_or(&Value::Null);
+        let mut capabilities = serde_json::json!({ "tools": { "listChanged": true } });
+        if let Some(d) = default {
+            // What the server other requests go to offers besides tools.
+            for c in ["resources", "prompts", "completions", "logging"] {
+                if let Some(v) = servers[d].init.pointer(&format!("/capabilities/{c}")) {
+                    capabilities[c] = v.clone();
+                }
+            }
+        }
+        let init = serde_json::json!({
+            "protocolVersion": primary.get("protocolVersion").cloned().unwrap_or_else(|| Value::String(PROTOCOL_VERSION.into())),
+            "capabilities": capabilities,
+            "serverInfo": { "name": GATE_NAME, "version": env!("CARGO_PKG_VERSION") },
+        });
+        Self { init, default, state: Mutex::new(RouterState { next_id: 1, ..RouterState::default() }) }
+    }
+}
+
+/// A `tools/list` request of the gate's own, awaited as a page of `job`.
+fn page_request(st: &mut RouterState, server_name: &str, job: u64, server: usize, cursor: Option<String>) -> Action {
+    let n = st.next_id;
+    st.next_id += 1;
+    st.waiting.insert(n, Waiting::List { job, server });
+    let mut msg = serde_json::json!({ "jsonrpc": "2.0", "id": n, "method": "tools/list" });
+    if let Some(cursor) = cursor {
+        msg["params"] = serde_json::json!({ "cursor": cursor });
+    }
+    Action::ToUpstream { server: server_name.to_string(), message: msg.to_string() }
+}
+
+/// Whether a tool name is safe to report: an identifier, never free text.
+fn identifier(tool: &str) -> bool {
+    !tool.is_empty() && tool.len() <= 128 && tool.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.:/@".contains(&b))
+}
+
+/// Upstream servers: routing, listings and drift.
+impl Interceptor {
+    fn router_state(&self) -> Option<std::sync::MutexGuard<'_, RouterState>> {
+        let router = self.router.as_ref()?;
+        Some(match router.state.lock() {
+            Ok(st) => st,
+            Err(poisoned) => poisoned.into_inner(),
+        })
+    }
+
+    /// Whether the gate awaits none of its own requests (listing pages):
+    /// a transport may then close the servers' side.
+    pub fn idle(&self) -> bool {
+        self.router_state().is_none_or(|st| !st.waiting.values().any(|w| matches!(w, Waiting::List { .. })))
+    }
+
+    /// Answer the agent's request `id` with `result`, as an upstream reply.
+    fn answer(&self, id: &Value, result: Value) -> Vec<Action> {
+        self.relay(&serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string())
+    }
+
+    /// Answer the agent's request `id` with an error, as an upstream reply.
+    fn answer_error(&self, id: &Value, code: i64, message: &str, reason: Option<&str>) -> Vec<Action> {
+        let mut error = serde_json::json!({ "code": code, "message": message });
+        if let Some(reason) = reason {
+            error["data"] = serde_json::json!({ "reason": reason });
+        }
+        self.relay(&serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string())
+    }
+
+    /// Route one message the gate let through to the server(s) it is for.
+    fn dispatch(&self, message: &str) -> Vec<Action> {
+        let Some(router) = &self.router else { return Vec::new() };
+        let Ok(mut msg) = serde_json::from_str::<Value>(message) else {
+            tracing::warn!("several servers: an agent message that is not JSON is not forwarded");
+            return Vec::new();
+        };
+        let method = msg.get("method").and_then(Value::as_str).map(str::to_string);
+        let id = msg.get("id").filter(|id| !id.is_null()).cloned();
+        match (method.as_deref(), id) {
+            // A reply: the gate relays no server requests, so it answers nothing.
+            (None, _) => Vec::new(),
+            (Some("initialize"), Some(id)) => self.answer(&id, router.init.clone()),
+            (Some("ping"), Some(id)) => self.answer(&id, serde_json::json!({})),
+            (Some("tools/list"), Some(id)) => self.start_listing(Some(id), (0..self.catalog.servers().len()).collect()),
+            (Some("tools/call"), _) => {
+                let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
+                match self.catalog.route(&tool) {
+                    Some((server, name)) => {
+                        msg["params"]["name"] = Value::String(name);
+                        self.send_routed(server, msg)
+                    }
+                    None => match msg.get("id") {
+                        Some(id) => self.answer_error(id, TOOL_REFUSED, "tool call refused by CloakPipe: tool_unavailable", Some("tool_unavailable")),
+                        None => Vec::new(),
+                    },
+                }
+            }
+            // The gate initialized each server itself at start-up.
+            (Some("notifications/initialized"), None) => Vec::new(),
+            (Some("notifications/cancelled"), None) => self.cancel(msg),
+            (Some(_), None) => {
+                let st = self.router_state();
+                let gone = st.as_ref().map(|st| st.gone.clone()).unwrap_or_default();
+                drop(st);
+                let line = msg.to_string();
+                (0..self.catalog.servers().len())
+                    .filter(|i| !gone.contains(i))
+                    .map(|i| Action::ToUpstream { server: self.catalog.servers()[i].clone(), message: line.clone() })
+                    .collect()
+            }
+            (Some(method), Some(id)) => match router.default {
+                Some(server) => self.send_routed(server, msg),
+                None => {
+                    let message = format!(
+                        "{method} is not routed by the CloakPipe gate in front of several servers: only tools are. \
+                         Give one server as --upstream (named default) to send other requests to it"
+                    );
+                    self.answer_error(&id, METHOD_NOT_FOUND, &message, None)
+                }
+            },
+        }
+    }
+
+    /// Send an agent request (or notification) to `server`, under an id of
+    /// the gate's own.
+    fn send_routed(&self, server: usize, mut msg: Value) -> Vec<Action> {
+        let id = msg.get("id").filter(|id| !id.is_null()).cloned();
+        let name = self.catalog.servers()[server].clone();
+        let Some(mut st) = self.router_state() else { return Vec::new() };
+        if st.gone.contains(&server) {
+            drop(st);
+            let message = format!("upstream MCP server {name} went away");
+            return id.map(|id| self.answer_error(&id, UPSTREAM_UNAVAILABLE, &message, Some("upstream_unavailable"))).unwrap_or_default();
+        }
+        if let Some(id) = id {
+            let n = st.next_id;
+            st.next_id += 1;
+            st.waiting.insert(n, Waiting::Agent { id, server });
+            msg["id"] = Value::from(n);
+        }
+        vec![Action::ToUpstream { server: name, message: msg.to_string() }]
+    }
+
+    /// The agent cancels a request: tell the server it went to, by its id there.
+    fn cancel(&self, mut msg: Value) -> Vec<Action> {
+        let Some(request) = msg.pointer("/params/requestId").cloned() else { return Vec::new() };
+        let Some(st) = self.router_state() else { return Vec::new() };
+        let found = st.waiting.iter().find_map(|(n, w)| match w {
+            Waiting::Agent { id, server } if *id == request => Some((*n, *server)),
+            _ => None,
+        });
+        drop(st);
+        let Some((n, server)) = found else { return Vec::new() };
+        msg["params"]["requestId"] = Value::from(n);
+        vec![Action::ToUpstream { server: self.catalog.servers()[server].clone(), message: msg.to_string() }]
+    }
+
+    /// List the tools of `servers`, every page; answer the agent's `agent`
+    /// request with them merged.
+    fn start_listing(&self, agent: Option<Value>, servers: Vec<usize>) -> Vec<Action> {
+        let Some(mut st) = self.router_state() else { return Vec::new() };
+        let live: Vec<usize> = servers.into_iter().filter(|s| !st.gone.contains(s)).collect();
+        let job = st.next_job;
+        st.next_job += 1;
+        let listing = ListJob { agent, remaining: live.iter().copied().collect(), tools: BTreeMap::new(), pages: 0 };
+        if live.is_empty() {
+            drop(st);
+            return self.finish_listing(listing);
+        }
+        st.jobs.insert(job, listing);
+        live.into_iter().map(|s| page_request(&mut st, &self.catalog.servers()[s], job, s, None)).collect()
+    }
+
+    /// One page of a listing.
+    fn on_page(&self, job: u64, server: usize, msg: &Value) -> Vec<Action> {
+        let Some(mut st) = self.router_state() else { return Vec::new() };
+        let Some(listing) = st.jobs.get_mut(&job) else { return Vec::new() };
+        listing.pages += 1;
+        let mut next = None;
+        match msg.get("result") {
+            Some(result) => {
+                if let Some(tools) = result.get("tools").and_then(Value::as_array) {
+                    listing.tools.entry(server).or_default().extend(tools.iter().cloned());
+                }
+                next = result.get("nextCursor").and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_string);
+                if next.is_some() && listing.pages >= crate::servers::MAX_PAGES * self.catalog.servers().len() {
+                    tracing::warn!("server {}: tools/list did not end; listing cut short", self.catalog.servers()[server]);
+                    next = None;
+                }
+            }
+            None => {
+                tracing::warn!("server {} refused tools/list; its tools are left out of this listing", self.catalog.servers()[server]);
+                listing.tools.remove(&server);
+            }
+        }
+        if let Some(cursor) = next {
+            return vec![page_request(&mut st, &self.catalog.servers()[server], job, server, Some(cursor))];
+        }
+        listing.remaining.remove(&server);
+        if !listing.remaining.is_empty() {
+            return Vec::new();
+        }
+        let Some(listing) = st.jobs.remove(&job) else { return Vec::new() };
+        drop(st);
+        self.finish_listing(listing)
+    }
+
+    /// Check a finished listing for drift and answer the agent with what it
+    /// may see.
+    fn finish_listing(&self, listing: ListJob) -> Vec<Action> {
+        let mut merged = Vec::new();
+        for (server, tools) in listing.tools {
+            let (visible, drifts) = self.catalog.observe(server, tools);
+            merged.extend(visible);
+            for drift in &drifts {
+                self.emit_drift(drift);
+            }
+        }
+        match listing.agent {
+            Some(id) => self.answer(&id, serde_json::json!({ "tools": merged })),
+            None => Vec::new(),
+        }
+    }
+
+    /// A message from one of several servers.
+    fn on_routed_line(&self, server: &str, line: &str) -> Vec<Action> {
+        let Some(index) = self.catalog.index(server) else { return Vec::new() };
+        let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
+            tracing::warn!("server {server}: a message that is not JSON is dropped");
+            return Vec::new();
+        };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            if let Some(id) = msg.get("id").filter(|id| !id.is_null()) {
+                // A server request (sampling, roots, elicitation): the gate
+                // declared no client capabilities, and relays none.
+                let refusal = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": METHOD_NOT_FOUND, "message": format!("{method} is not relayed by the CloakPipe gate") },
+                });
+                return vec![Action::ToUpstream { server: server.to_string(), message: refusal.to_string() }];
+            }
+            if method == "notifications/tools/list_changed" {
+                // List it again now, so a changed tool is refused even if the
+                // agent calls it without listing first.
+                let mut actions = self.start_listing(None, vec![index]);
+                actions.push(Action::ToAgent(line.to_string()));
+                return actions;
+            }
+            return vec![Action::ToAgent(line.to_string())];
+        }
+        let Some(n) = msg.get("id").and_then(Value::as_u64) else { return Vec::new() };
+        let waiting = self.router_state().and_then(|mut st| st.waiting.remove(&n));
+        match waiting {
+            Some(Waiting::Agent { id, .. }) => {
+                msg["id"] = id;
+                self.relay(&msg.to_string())
+            }
+            Some(Waiting::List { job, server }) => self.on_page(job, server, &msg),
+            None => Vec::new(),
+        }
+    }
+
+    /// Upstream `server` went away (exited, or can no longer be written to):
+    /// the agent requests it left unanswered get an `upstream_unavailable`
+    /// error, and later ones are refused. A side-effecting call it left in
+    /// flight is recorded `unknown` (as [`Self::finish`] does) and the agent
+    /// told so.
+    pub fn server_gone(&self, server: &str) -> Vec<Action> {
+        let Some(index) = self.catalog.index(server) else { return Vec::new() };
+        let Some(mut st) = self.router_state() else { return Vec::new() };
+        st.gone.insert(index);
+        let ours: Vec<u64> = st
+            .waiting
+            .iter()
+            .filter(|(_, w)| matches!(w, Waiting::Agent { server, .. } | Waiting::List { server, .. } if *server == index))
+            .map(|(n, _)| *n)
+            .collect();
+        let (mut agent, mut jobs) = (Vec::new(), HashSet::new());
+        for n in ours {
+            match st.waiting.remove(&n) {
+                Some(Waiting::Agent { id, .. }) => agent.push(id),
+                Some(Waiting::List { job, .. }) => {
+                    jobs.insert(job);
+                }
+                None => {}
+            }
+        }
+        let mut finished = Vec::new();
+        for job in jobs {
+            let done = st.jobs.get_mut(&job).map(|l| {
+                l.remaining.remove(&index);
+                l.tools.remove(&index);
+                l.remaining.is_empty()
+            });
+            if done == Some(true) {
+                finished.extend(st.jobs.remove(&job));
+            }
+        }
+        drop(st);
+        let message = format!("upstream MCP server {server} went away before answering");
+        let mut actions = Vec::new();
+        for id in &agent {
+            let request = id.to_string();
+            // A side-effecting call it left in flight: unknown now, not only
+            // at the gate's exit.
+            match self.pending.lock().ok().and_then(|mut p| p.by_request.remove(&request)) {
+                Some(in_flight) => actions.push(self.abandon(&request, in_flight)),
+                None => actions.extend(self.answer_error(id, UPSTREAM_UNAVAILABLE, &message, Some("upstream_unavailable"))),
+            }
+        }
+        for listing in finished {
+            actions.extend(self.finish_listing(listing));
+        }
+        actions
+    }
+
+    /// One upstream: remember the agent's `tools/list` requests, so their
+    /// replies are checked for drift.
+    fn note_list_request(&self, message: &str) {
+        if !message.contains("tools/list") {
+            return;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(message) else { return };
+        if msg.get("method").and_then(Value::as_str) != Some("tools/list") {
+            return;
+        }
+        if let (Some(id), Ok(mut requests)) = (msg.get("id").filter(|id| !id.is_null()), self.list_requests.lock()) {
+            requests.insert(id.to_string());
+        }
+    }
+
+    /// One upstream: a reply to the agent's `tools/list`, with drifted tools
+    /// removed. `None`: not such a reply (relay it as it is).
+    fn check_listing(&self, line: &str) -> Option<String> {
+        let mut requests = self.list_requests.lock().ok()?;
+        if requests.is_empty() {
+            return None;
+        }
+        let mut msg: Value = serde_json::from_str(line).ok()?;
+        if msg.get("method").is_some() {
+            return None;
+        }
+        if !requests.remove(&msg.get("id")?.to_string()) {
+            return None;
+        }
+        drop(requests);
+        let tools = msg.pointer_mut("/result/tools")?.as_array_mut()?;
+        let (visible, drifts) = self.catalog.observe(0, std::mem::take(tools));
+        *tools = visible;
+        for drift in &drifts {
+            self.emit_drift(drift);
+        }
+        Some(msg.to_string())
+    }
+
+    /// A tool found drifted: say so, and emit `tool.drift` (no ledger
+    /// entry: nothing was decided yet; each refused call gets one).
+    fn emit_drift(&self, drift: &Drift) {
+        let against = if self.catalog.lock_digest().is_some() { "does not match its pin in the tools lock" } else { "changed during the session" };
+        tracing::warn!("tool {}/{} {against}: hidden from tools/list and refused ({TOOL_DRIFT})", drift.server, drift.tool);
+        if self.events.is_empty() {
+            return;
+        }
+        let tool = Some(drift.tool.as_str()).filter(|t| identifier(t));
+        let policy = self.base.as_ref().and_then(|b| b.policy_digest.clone());
+        let mut event = GateEvent::new(EventKind::ToolDrift, TOOL_DRIFT, tool, None, policy.as_deref()).with_server(&drift.server);
+        if let Some(base) = &self.base {
+            event.release = Some(base.release_name.clone());
+            event.release_digest = Some(base.release.clone());
+            event.mode = Some(base.mode);
+        }
+        for sink in &self.events {
+            sink.emit(&event);
+        }
+    }
+
+    /// Without a gate: refuse a call to a drifted or unserved tool (no
+    /// ledger: there is no gate to record it), with an event.
+    fn refuse_ungated(&self, id: Option<&Value>, tool: &str, denial: &Denial) -> Vec<Action> {
+        let code = denial.code();
+        let shown = Some(tool).filter(|t| identifier(t));
+        if !self.events.is_empty() {
+            let kind = if denial.server().is_some() { EventKind::ToolDrift } else { EventKind::DecisionDeny };
+            let mut event = GateEvent::new(kind, &code, shown, None, None);
+            if let Some(server) = denial.server() {
+                event = event.with_server(server);
+            }
+            event.decision = Some(Decision::Deny);
+            for sink in &self.events {
+                sink.emit(&event);
+            }
+        }
+        let Some(id) = id else { return Vec::new() };
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": TOOL_REFUSED,
+                "message": format!("tool call refused by CloakPipe: {code}"),
+                "data": { "reason": code, "tool": tool },
+            },
+        });
+        vec![Action::ToAgent(reply.to_string())]
+    }
+}
+
+/// [`run_servers_io`] with the agent on the process's stdin/stdout.
+pub fn run_servers(upstreams: Vec<Upstream>, ctx: ProxyContext, lock: Option<ToolsLock>) -> Result<()> {
+    run_servers_io(upstreams, ctx, lock, std::io::stdin(), std::io::stdout())
+}
+
+type Writers = HashMap<String, Arc<Mutex<Option<std::process::ChildStdin>>>>;
+
+/// The gate in front of several stdio servers (or one, with a tools lock):
+/// each is spawned, initialized and listed (one that fails to start stops
+/// the gate), then an [`Interceptor::with_servers`] sits between the agent
+/// and all of them. When the agent closes its side, the servers' stdin is
+/// closed (once the gate's own listing requests are answered); returns when
+/// every server has exited.
+pub fn run_servers_io<R, W>(upstreams: Vec<Upstream>, ctx: ProxyContext, lock: Option<ToolsLock>, agent_in: R, agent_out: W) -> Result<()>
+where
+    R: std::io::Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    anyhow::ensure!(!upstreams.is_empty(), "no upstream MCP server");
+    let mut servers = upstreams.iter().map(StdioServer::spawn).collect::<Result<Vec<_>>>()?;
+    let mut listing = Vec::new();
+    for server in &mut servers {
+        listing.push(server.discover(DISCOVERY_TIMEOUT)?);
+    }
+    let interceptor = Arc::new(Interceptor::with_servers(ctx, listing, lock)?);
+
+    let agent_out = Arc::new(Mutex::new(agent_out));
+    let mut writers: Writers = HashMap::new();
+    let (mut children, mut readers) = (Vec::new(), Vec::new());
+    for server in servers {
+        let name = server.name.clone();
+        let (child, stdin, lines) = server.into_parts();
+        writers.insert(name.clone(), Arc::new(Mutex::new(Some(stdin))));
+        children.push(child);
+        readers.push((name, lines));
+    }
+    let writers = Arc::new(writers);
+
+    // Egress: agent stdin → interceptor → the servers (or the agent).
+    {
+        let (interceptor, writers, agent_out) = (interceptor.clone(), writers.clone(), agent_out.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(agent_in).lines() {
+                let Ok(line) = line else { break };
+                if !perform(&interceptor, &writers, &agent_out, interceptor.on_agent_line(&line)) {
+                    break;
+                }
+            }
+            // The agent is done: let the gate's own requests finish, then
+            // close every server's stdin (they exit on EOF).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !interceptor.idle() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            for w in writers.values() {
+                if let Ok(mut w) = w.lock() {
+                    w.take();
+                }
+            }
+        });
+    }
+
+    // Ingress: each server's stdout → interceptor → the agent.
+    let ingress: Vec<_> = readers
+        .into_iter()
+        .map(|(name, lines)| {
+            let (interceptor, writers, agent_out) = (interceptor.clone(), writers.clone(), agent_out.clone());
+            std::thread::spawn(move || {
+                for line in lines {
+                    if !perform(&interceptor, &writers, &agent_out, interceptor.on_upstream_line(&name, &line)) {
+                        return;
+                    }
+                }
+                perform(&interceptor, &writers, &agent_out, interceptor.server_gone(&name));
+            })
+        })
+        .collect();
+
+    for mut child in children {
+        let _ = child.wait();
+    }
+    for thread in ingress {
+        let _ = thread.join();
+    }
+    // Exit sweep: side-effecting calls still in flight are unknown.
+    for action in interceptor.finish() {
+        if let Action::ToAgent(notice) = action {
+            let _ = write_line(&agent_out, &notice);
+        }
+    }
+    flush_events(&interceptor.events, EVENT_FLUSH);
+    Ok(())
+}
+
+/// Carry out `actions` (and what they lead to): a server that cannot be
+/// written to is gone. `false`: the agent can no longer be written to.
+fn perform<W: Write>(interceptor: &Interceptor, writers: &Writers, agent_out: &Mutex<W>, actions: Vec<Action>) -> bool {
+    let mut queue: std::collections::VecDeque<Action> = actions.into();
+    while let Some(action) = queue.pop_front() {
+        match action {
+            Action::ToAgent(line) => {
+                if write_line(agent_out, &line).is_err() {
+                    return false;
+                }
+            }
+            Action::ToUpstream { server, message } => {
+                let sent = writers.get(&server).is_some_and(|w| match w.lock() {
+                    Ok(mut w) => match w.as_mut() {
+                        Some(stdin) => stdin.write_all(message.as_bytes()).and_then(|_| stdin.write_all(b"\n")).and_then(|_| stdin.flush()).is_ok(),
+                        None => false,
+                    },
+                    Err(_) => false,
+                });
+                if !sent {
+                    queue.extend(interceptor.server_gone(&server));
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Run the interceptor: spawn `upstream` and pump JSON-RPC both ways. Returns
@@ -1130,6 +1818,8 @@ struct EntryBase {
     policy_digest: Option<String>,
     mode: Mode,
     task_id: Option<String>,
+    /// The tools lock digest, when the gate runs with one.
+    tools_lock: Option<String>,
 }
 
 impl EntryBase {
@@ -1144,6 +1834,7 @@ impl EntryBase {
             policy_digest: gate.policy_digest(),
             mode,
             task_id: gate.task_id().map(str::to_string),
+            tools_lock: None,
         }
     }
 
@@ -1155,6 +1846,7 @@ impl EntryBase {
             policy_digest: self.policy_digest.clone(),
             mode: Some(self.mode),
             task_id: self.task_id.clone(),
+            tools_lock: self.tools_lock.clone(),
             ..DecisionDraft::call()
         }
     }
@@ -1170,6 +1862,7 @@ impl EntryBase {
             operation_id: Some(op.operation_id.clone()),
             outcome: Some(outcome),
             forwarded: true,
+            tools_lock: self.tools_lock.clone(),
             ..DecisionDraft::outcome()
         }
     }
@@ -1181,8 +1874,9 @@ const REPLAYED: &str = "already_committed";
 const UNKNOWN: &str = "operation_unknown";
 
 /// Hand an event to every sink: `draft` is the decision as recorded (as
-/// `entry`, when it was written), `reason` the event's reason code. The
-/// event, unless there are no sinks.
+/// `entry`, when it was written), `reason` the event's reason code.
+/// `server`: the upstream the event is about (`tool.drift`). The event,
+/// unless there are no sinks.
 fn emit(
     sinks: &[Arc<dyn EventSink>],
     base: &EntryBase,
@@ -1190,11 +1884,15 @@ fn emit(
     reason: &str,
     draft: &DecisionDraft,
     entry: Option<&DecisionEntry>,
+    server: Option<&str>,
 ) -> Option<GateEvent> {
     if sinks.is_empty() {
         return None;
     }
     let mut event = GateEvent::new(kind, reason, draft.tool.as_deref(), draft.path.as_deref(), base.policy_digest.as_deref());
+    if let Some(server) = server {
+        event = event.with_server(server);
+    }
     event.release = Some(base.release_name.clone());
     event.release_digest = Some(base.release.clone());
     event.decision = Some(draft.decision);
@@ -1280,10 +1978,7 @@ fn call_fingerprint(gate: &ToolGate, tool: &str, arguments: Option<&Value>) -> O
 /// one's when it reads as an identifier (the agent chose it: free text is
 /// never recorded).
 fn recordable_tool(gate: &ToolGate, tool: &str) -> Option<String> {
-    let identifier = !tool.is_empty()
-        && tool.len() <= 128
-        && tool.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.:/@".contains(&b));
-    (gate.declares(tool) || identifier).then(|| tool.to_string())
+    (gate.declares(tool) || identifier(tool)).then(|| tool.to_string())
 }
 
 /// The JSON-RPC error for a refused call.

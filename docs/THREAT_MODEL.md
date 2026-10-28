@@ -102,7 +102,12 @@ server's credentials should exist only in the gate's child process.
 **A malicious or compromised tool server.** Results are passed back to
 the agent unchanged (apart from the opt-in PII transform), so a tool can
 inject instructions into the model. Tool descriptions in `tools/list` are
-also passed through unchanged; pinning and diffing them is planned.
+passed through, but not unchecked (unreleased, next release). A tool whose
+definition changes during a session is hidden and refused (`tool_drift`).
+With a tools lock (`cloakpipe tools pin`, `mcp-proxy --tools-lock`), so is
+any tool that does not match the definition you reviewed. Pinning catches a
+description that changes. It does not judge whether the description you
+pinned was honest, and it does not touch results.
 
 **A wrong task context.** The gate trusts the orchestrator. If the
 orchestrator puts the attacker's address in the task context, the gate

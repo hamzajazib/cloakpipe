@@ -454,6 +454,20 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Err(code) => std::process::exit(code),
     };
     let pii = args.pii();
+    // The upstream servers and the tools lock, checked before anything runs.
+    let mut upstreams = match crate::gate::upstreams_from_args(&args) {
+        Ok(u) => u,
+        Err(code) => std::process::exit(code),
+    };
+    let tools_lock = match &args.tools_lock {
+        Some(path) => match crate::tools::load_lock("--tools-lock", path) {
+            Ok(lock) => Some(lock),
+            Err(code) => std::process::exit(code),
+        },
+        None => None,
+    };
+    // Several servers, or a lock: the gate is the client of each server.
+    let routed = !args.servers.is_empty() || tools_lock.is_some();
     // The decision ledger and its key, before anything runs: a gate that
     // cannot record does not start.
     // Anchoring flags are checked (and their trust inputs read) before
@@ -503,10 +517,6 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     } else {
         args.ledger.ledger_db.clone().map(|p| p.to_string_lossy().into_owned()).or_else(|| std::env::var("CLOAKPIPE_LEDGER_DB").ok())
     };
-    let upstream = match crate::gate::upstream_from_args(&args) {
-        Ok(u) => u,
-        Err(code) => std::process::exit(code),
-    };
     let listen = match crate::gate::listen_from_args(&args) {
         Ok(l) => l,
         Err(code) => std::process::exit(code),
@@ -545,13 +555,18 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         );
     }
 
-    match &upstream.transport {
-        cloakpipe_mcp::UpstreamTransport::Stdio { command } => tracing::info!("CloakPipe MCP interceptor → upstream {command:?}"),
-        // The URL only up to its host: a path or query may carry a credential.
-        cloakpipe_mcp::UpstreamTransport::Http { url, .. } => {
-            let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-            tracing::info!("CloakPipe MCP interceptor → upstream over HTTP at {host}")
+    for u in &upstreams {
+        match &u.transport {
+            cloakpipe_mcp::UpstreamTransport::Stdio { command } => tracing::info!("CloakPipe MCP interceptor → upstream {} {command:?}", u.name),
+            // The URL only up to its host: a path or query may carry a credential.
+            cloakpipe_mcp::UpstreamTransport::Http { url, .. } => {
+                let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                tracing::info!("CloakPipe MCP interceptor → upstream {} over HTTP at {host}", u.name)
+            }
         }
+    }
+    if let Some(lock) = &tools_lock {
+        tracing::info!(tools_lock = %lock.digest(), "upstream tools pinned ({} tools)", lock.tool_count());
     }
     let ctx = cloakpipe_mcp::ProxyContext {
         pii,
@@ -563,10 +578,17 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     };
     let result = match listen {
         // The agent over HTTP; stops on Ctrl-C / SIGTERM.
-        Some(config) => cloakpipe_mcp::http::serve(config, upstream, ctx, shutdown_signal()).await,
-        None => tokio::task::spawn_blocking(move || cloakpipe_mcp::run_upstream_io(upstream, ctx, std::io::stdin(), std::io::stdout()))
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
+        Some(_) if routed => Err(anyhow::anyhow!("--listen with --server or --tools-lock is not supported yet")),
+        Some(config) => cloakpipe_mcp::http::serve(config, upstreams.remove(0), ctx, shutdown_signal()).await,
+        None => tokio::task::spawn_blocking(move || {
+            if routed {
+                cloakpipe_mcp::run_servers(upstreams, ctx, tools_lock)
+            } else {
+                cloakpipe_mcp::run_upstream_io(upstreams.remove(0), ctx, std::io::stdin(), std::io::stdout())
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
     };
     // Queued events (the HTTP listener has no flush of its own), then the
     // last epoch's anchoring, which may raise events too.

@@ -262,6 +262,30 @@ and the ledger until reconciled. `--listen` and `--upstream-url` combine.
 One upstream per gate for now; several servers behind one gate are on the
 roadmap.
 
+### Several servers and pinned tools (unreleased, next release)
+
+One gate can front several MCP servers. Give each one as
+`--server NAME=COMMAND`; `--upstream` is the server named `default`. The
+gate starts and lists every server, answers the agent with one merged
+`tools/list`, and routes each `tools/call` to the server that serves the
+tool. A tool name two servers share stops the gate at start-up, unless the
+manifest declares it per server as `<server>__<tool>`.
+
+Pin the tool definitions you reviewed, and the gate hides and refuses
+(`tool_drift`) any tool whose name, description, input schema or
+annotations change afterwards:
+
+```bash
+cloakpipe tools pin --server 'mail=npx -y @acme/mail-mcp' --server 'files=...'
+cloakpipe tools diff --lock cloakpipe.tools.lock --server 'mail=...' --server 'files=...'
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --server 'mail=...' --server 'files=...' --tools-lock cloakpipe.tools.lock
+```
+
+Even without a lock, a tool whose definition changes during a session is
+hidden and refused. Details:
+[docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#several-servers-and-tool-pinning).
+
 ## Alert
 
 Unreleased (next release v0.13.0). Each decision that needs attention
@@ -369,9 +393,11 @@ args = ["mcp-proxy", "--manifest", "/path/to/cloakpipe/examples/filesystem/cloak
 
 What to know:
 
-- The host still lists every tool the server offers (`tools/list` is passed
-  through unchanged); undeclared ones are refused when called. The agent sees
-  the refusal as a tool error with its reason.
+- The host still lists every tool the server offers; undeclared ones are
+  refused when called. The agent sees the refusal as a tool error with its
+  reason. The exception is a tool whose definition changed during the
+  session (or that does not match `--tools-lock`): it is left out of the
+  list and refused as `tool_drift`.
 - An interactive coding agent has no orchestrator writing a task context,
   so use manifests without `one_of_context` there, or pass
   `--task-context <file>`.
@@ -422,16 +448,20 @@ change before 1.0)
 - [x] MCP over HTTP (unreleased, next release v0.13.0): `mcp-proxy --listen`
   serves agents over Streamable HTTP and `--upstream-url` fronts an HTTP MCP
   server ([MCP over HTTP](#mcp-over-http-unreleased-next-release-v0130))
+- [x] Unreleased (next release): one gate in front of several stdio MCP
+  servers (`--server NAME=COMMAND`, merged `tools/list`, per-tool routing),
+  `tools/list` pinning (`cloakpipe tools pin|diff`, `--tools-lock`) and
+  drift detection (`tool_drift`, `tool.drift` events)
 
 **Next**
 
 - [ ] Published crates and tagged binaries, and a one-command install for
   Claude Code, Cursor and Codex
-- [ ] One gate in front of several MCP servers, with `tools/list` pinning
-  and drift detection
-- [ ] `tool.drift` events; a separate secret and format for each webhook
+- [ ] A separate secret and format for each webhook
 - [ ] SSE response streams and a server-to-client `GET /mcp` stream for
   HTTP agents
+- [ ] HTTP upstreams behind `--server` and `--tools-lock` (today these take
+  stdio servers; `--upstream-url` fronts one HTTP server)
 
 **Later, not started**
 
