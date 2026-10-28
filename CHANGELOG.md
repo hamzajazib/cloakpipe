@@ -26,6 +26,29 @@ may contain breaking changes; these are marked **Breaking**.
   `run_proxy_io` are unchanged; decisions are unchanged.
   **Breaking (library)**: `ProxyContext` has a new `events` field, so a
   struct literal needs `events: Vec::new()`.
+- Event delivery (docs/EVENTS.md). New `mcp-proxy` flags:
+  - `--events-log PATH` appends each event to a JSONL file.
+  - `--webhook URL` (repeatable) POSTs each event, signed with
+    `--webhook-secret-file` as `CloakPipe-Signature:
+    t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>.<body>"))`, together with
+    `CloakPipe-Event` and `CloakPipe-Fingerprint` headers.
+    `--webhook-format generic|slack|discord` picks raw JSON, a Slack Block
+    Kit message or a Discord embed.
+  - `--otel-endpoint URL` (or `--otel` with `OTEL_EXPORTER_OTLP_ENDPOINT`)
+    exports one `cloakpipe.decision` span per tool-call decision, allows
+    included, over OTLP/HTTP JSON.
+
+  Delivery runs on background threads with bounded queues: three tries,
+  5 s timeout, drops counted on stderr, and a flush of up to 5 s on exit.
+  It never delays or changes a decision.
+
+  Also new:
+  - `cloakpipe events test` sends a sample event, and `cloakpipe events
+    verify-signature` checks a signature the way a receiver should.
+  - A failed scheduled anchor is now an `anchor.failed` event.
+  - Library: `JsonlSink`, `WebhookSink`, `OtelSink`, `DecisionRecord`,
+    `AnchorLoop::spawn_with`. `EventSink` gains default `decision` and
+    `flush` methods.
 
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input

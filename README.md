@@ -10,7 +10,7 @@ A self-hosted policy-enforcement gate for AI agent tool calls.
 [![License: MIT](https://img.shields.io/github/license/rohansx/cloakpipe)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-cloakpipe.co-0f6)](https://cloakpipe.co/docs)
 
-[Quickstart](#60-second-quickstart) · [Declare](#declare) · [Enforce](#enforce) · [Prove](#prove) · [Claude Code, Cursor, Codex](#use-it-with-claude-code-cursor-and-codex) · [Roadmap](#roadmap)
+[Quickstart](#60-second-quickstart) · [Declare](#declare) · [Enforce](#enforce) · [Alert](#alert) · [Prove](#prove) · [Claude Code, Cursor, Codex](#use-it-with-claude-code-cursor-and-codex) · [Roadmap](#roadmap)
 
 </div>
 
@@ -204,6 +204,40 @@ proxy (`cloakpipe start`); see [Other commands](#other-commands).
 
 Details: [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md).
 
+## Alert
+
+Unreleased (next release v0.13.0). Each decision that needs attention
+raises a gate event: `decision.deny`, `approval.requested`,
+`approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
+`side_effect.unknown` or `anchor.failed`. An event carries the tool, the
+reason, the contract path, the release, the ledger entry and a
+deterministic fingerprint (the same failure always gets the same
+fingerprint). It never carries an argument value.
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml --upstream "python3 server.py" \
+  --events-log ~/.cloakpipe/events.jsonl \
+  --webhook "$SLACK_WEBHOOK_URL" --webhook-format slack \
+  --otel-endpoint http://localhost:4318
+```
+
+- `--webhook URL` (repeatable) POSTs each event as JSON. Use
+  `--webhook-format slack` or `discord` for a chat message. With
+  `--webhook-secret-file`, each request is signed with
+  `CloakPipe-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>.<body>"))`.
+- `--otel-endpoint` exports one OpenTelemetry span per tool-call decision,
+  allows included, over OTLP/HTTP.
+- `--events-log` appends every event as a line of JSON.
+- `cloakpipe events test --webhook URL --webhook-format slack` sends a
+  sample event. `cloakpipe events verify-signature` checks a signature the
+  way a receiver should.
+
+Delivery runs on background threads with bounded queues: three tries, 5 s
+timeout, and drops are counted. A dead endpoint never delays a decision or
+changes it.
+
+Details: [docs/EVENTS.md](docs/EVENTS.md).
+
 ## Prove
 
 - **Decision ledger.** Each decision is one `cloakpipe.decision/v1` entry
@@ -295,8 +329,9 @@ What to know:
   consequences, the tool call, against rules written in advance. An
   injection that stays inside the contract (a polite email to the right
   customer) gets through; keep contracts tight.
-- **Not observability.** There are no traces, dashboards or token metrics.
-  The ledger records decisions as evidence, not telemetry.
+- **Not observability.** There are no dashboards or token metrics. The
+  ledger records decisions as evidence. The optional OpenTelemetry spans
+  describe the gate's own decisions, not the agent's work.
 - **Not an identity provider or a secrets broker.** It does not issue
   credentials or hold the tool server's tokens.
 - **Not a sandbox.** It does not isolate the agent or the tool process. An
@@ -322,6 +357,10 @@ change before 1.0)
   and Rekor anchoring; tar audit pack; offline verifier
 - [x] Opt-in PII transform for tool arguments; regex PII HTTP proxy for
   OpenAI- and Anthropic-compatible APIs
+- [x] Events (unreleased, next release v0.13.0): typed gate events with
+  deterministic fingerprints, delivered as HMAC-signed webhooks (generic,
+  Slack, Discord), OpenTelemetry spans per decision and a JSONL log
+  ([docs/EVENTS.md](docs/EVENTS.md))
 
 **Next**
 
@@ -329,13 +368,7 @@ change before 1.0)
   Claude Code, Cursor and Codex
 - [ ] One gate in front of several MCP servers, with `tools/list` pinning
   and drift detection
-- [ ] Events: signed webhooks and OpenTelemetry spans per decision, with
-  stable fingerprints. In progress (unreleased): the gate already raises
-  typed events (`decision.deny`, `approval.requested`,
-  `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
-  `side_effect.unknown`) with deterministic fingerprints to in-process
-  sinks (`cloakpipe_mcp::events`, schema `cloakpipe.event/v1`); webhook,
-  OpenTelemetry and log delivery, and their `mcp-proxy` flags, are next
+- [ ] `tool.drift` events; a separate secret and format for each webhook
 - [ ] An HTTP/SSE MCP transport (today the gate speaks stdio only)
 
 **Later, not started**
