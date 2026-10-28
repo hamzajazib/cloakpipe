@@ -9,6 +9,12 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+### Added
+
+- Every `v*` tag is now published to crates.io by the release workflow
+  (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
+  publishes an existing tag to crates.io without rebuilding the image.
+
 ## [0.12.0] - 2026-10-27
 
 CloakPipe is now a self-hosted policy-enforcement gate for AI agent tool
