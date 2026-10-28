@@ -204,6 +204,30 @@ proxy (`cloakpipe start`); see [Other commands](#other-commands).
 
 Details: [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md).
 
+### Several servers and pinned tools (unreleased, next release)
+
+One gate can front several MCP servers. Give each one as
+`--server NAME=COMMAND`; `--upstream` is the server named `default`. The
+gate starts and lists every server, answers the agent with one merged
+`tools/list`, and routes each `tools/call` to the server that serves the
+tool. A tool name two servers share stops the gate at start-up, unless the
+manifest declares it per server as `<server>__<tool>`.
+
+Pin the tool definitions you reviewed, and the gate hides and refuses
+(`tool_drift`) any tool whose name, description, input schema or
+annotations change afterwards:
+
+```bash
+cloakpipe tools pin --server 'mail=npx -y @acme/mail-mcp' --server 'files=...'
+cloakpipe tools diff --lock cloakpipe.tools.lock --server 'mail=...' --server 'files=...'
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --server 'mail=...' --server 'files=...' --tools-lock cloakpipe.tools.lock
+```
+
+Even without a lock, a tool whose definition changes during a session is
+hidden and refused. Details:
+[docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#several-servers-and-tool-pinning).
+
 ## Prove
 
 - **Decision ledger.** Each decision is one `cloakpipe.decision/v1` entry
@@ -277,9 +301,11 @@ args = ["mcp-proxy", "--manifest", "/path/to/cloakpipe/examples/filesystem/cloak
 
 What to know:
 
-- The host still lists every tool the server offers (`tools/list` is passed
-  through unchanged); undeclared ones are refused when called. The agent sees
-  the refusal as a tool error with its reason.
+- The host still lists every tool the server offers; undeclared ones are
+  refused when called. The agent sees the refusal as a tool error with its
+  reason. The exception is a tool whose definition changed during the
+  session (or that does not match `--tools-lock`): it is left out of the
+  list and refused as `tool_drift`.
 - An interactive coding agent has no orchestrator writing a task context,
   so use manifests without `one_of_context` there, or pass
   `--task-context <file>`.
@@ -322,18 +348,20 @@ change before 1.0)
   and Rekor anchoring; tar audit pack; offline verifier
 - [x] Opt-in PII transform for tool arguments; regex PII HTTP proxy for
   OpenAI- and Anthropic-compatible APIs
+- [x] Unreleased (next release): one gate in front of several stdio MCP
+  servers (`--server NAME=COMMAND`, merged `tools/list`, per-tool routing),
+  `tools/list` pinning (`cloakpipe tools pin|diff`, `--tools-lock`) and
+  drift detection (`tool_drift`, `tool.drift` events)
 
 **Next**
 
 - [ ] Published crates and tagged binaries, and a one-command install for
   Claude Code, Cursor and Codex
-- [ ] One gate in front of several MCP servers, with `tools/list` pinning
-  and drift detection
 - [ ] Events: signed webhooks and OpenTelemetry spans per decision, with
   stable fingerprints. In progress (unreleased): the gate already raises
   typed events (`decision.deny`, `approval.requested`,
   `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
-  `side_effect.unknown`) with deterministic fingerprints to in-process
+  `side_effect.unknown`, `tool.drift`) with deterministic fingerprints to in-process
   sinks (`cloakpipe_mcp::events`, schema `cloakpipe.event/v1`); webhook,
   OpenTelemetry and log delivery, and their `mcp-proxy` flags, are next
 - [ ] An HTTP/SSE MCP transport (today the gate speaks stdio only)

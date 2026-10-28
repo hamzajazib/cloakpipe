@@ -14,8 +14,8 @@ may contain breaking changes; these are marked **Breaking**.
 - Gate events (`cloakpipe_mcp::events`, library API): the MCP gate hands
   each decision worth attention to `ProxyContext::events` sinks after its
   ledger entry is written: `decision.deny`, `approval.requested`,
-  `approval.mismatch`, `shadow.finding`, `side_effect.replayed` and
-  `side_effect.unknown` (`tool.drift` and `anchor.failed` are reserved).
+  `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
+  `side_effect.unknown` and `tool.drift` (`anchor.failed` is reserved).
   Each event names its ledger entry (`ledger_seq`, `entry_hash`), carries a
   deterministic fingerprint (`sha256(kind|reason|tool|path|policy_version)`)
   and never an argument value; `GateEvent::to_json` is the stable
@@ -27,6 +27,28 @@ may contain breaking changes; these are marked **Breaking**.
   **Breaking (library)**: `ProxyContext` has a new `events` field, so a
   struct literal needs `events: Vec::new()`.
 
+- `mcp-proxy --server NAME=COMMAND` (repeatable): one gate in front of
+  several stdio MCP servers. The gate initializes and lists every server at
+  start-up, answers `initialize`/`ping` itself, merges `tools/list` (all
+  pages), routes each `tools/call` to the server that serves the tool under
+  its own request ids, and sends other requests to the server named
+  `default` (`--upstream`) or the only one, else refuses them (`-32601`).
+  A tool name two servers share refuses to start unless the manifest
+  declares it per server as `<server>__<tool>`. Library:
+  `Interceptor::with_servers`, `run_servers[_io]`, `servers`, `ServerTools`.
+- Tool pinning: `cloakpipe tools pin` writes `cloakpipe.tools.lock` (per
+  server, per tool, sha256 over the JCS of `name`, `description`,
+  `inputSchema`, `annotations`, under a lock digest); `cloakpipe tools diff`
+  shows added/removed/changed tools (exit 1 on changes); `mcp-proxy
+  --tools-lock` hides a tool that does not match its pin (or has none) from
+  `tools/list` and refuses calls to it as `tool_drift`, recorded in the
+  ledger and emitted as `tool.drift`. Without a lock, a tool whose
+  definition changes during the session is refused until restart (also
+  with a plain `--upstream`). Decision entries carry the lock digest
+  (`tools_lock`) when there is one; entries without it hash as before, so
+  older ledgers still verify. **Breaking (library)**: `Denial` has new
+  variants (`ToolDrift`, `ToolUnavailable`), and `GateEvent` (`server`) and
+  `DecisionDraft`/`DecisionEntry` (`tools_lock`) have new fields.
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
   publishes an existing tag to crates.io without rebuilding the image.
