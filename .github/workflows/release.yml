@@ -76,4 +76,4 @@ jobs:
             exit 1
           fi
       - name: Publish
-        run: cargo publish --workspace --locked
+        run: scripts/publish-crates.sh
