@@ -7,13 +7,9 @@
 //! and against the real binary. No docker needed.
 #![cfg(unix)]
 
-use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::process::{Command, Output};
 
 fn repo(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path)
@@ -216,175 +212,185 @@ fn the_compose_example_runs_the_gate_in_front_of_an_example_upstream() {
     assert!(repo("examples/support-agent/mock_http_upstream.py").exists());
 }
 
-/// A gate started through the entrypoint with the real binary; killed on drop.
-struct Gate {
-    child: std::process::Child,
-    base: String,
-}
+/// Against the real binary (default build: the legacy `certification`
+/// build refuses every call of an uncertified release).
+#[cfg(not(feature = "certification"))]
+mod real_gate {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-impl Gate {
-    /// `env` on top of a manifest (the support-agent example), a token, a
-    /// loopback listener on a free port and a /data directory in `dir`.
-    fn start(dir: &Path, env: &[(&str, String)]) -> Self {
-        let (_, token) = files(dir);
-        // The image's /data volume.
-        std::fs::create_dir_all(dir.join("data")).unwrap();
-        let bin = PathBuf::from(env!("CARGO_BIN_EXE_cloakpipe"));
-        let mut cmd = Command::new("sh");
-        cmd.arg(repo("docker/gate-entrypoint.sh"));
-        for var in VARS {
-            cmd.env_remove(var);
-        }
-        for var in ["CLOAKPIPE_RELEASE", "CLOAKPIPE_LEDGER_DB", "CLOAKPIPE_SIGNING_KEY", "CLOAKPIPE_TASK_CONTEXT", "CLOAKPIPE_STATE_DB", "OTEL_EXPORTER_OTLP_ENDPOINT"] {
-            cmd.env_remove(var);
-        }
-        cmd.env("PATH", format!("{}:{}", bin.parent().unwrap().display(), std::env::var("PATH").unwrap()))
-            .env("CLOAKPIPE_HOME", dir.join("data"))
-            .env("CLOAKPIPE_OPERATIONS_DB", dir.join("data/operations.db"))
-            .env("CLOAKPIPE_MANIFEST", repo("examples/support-agent/cloakpipe.manifest.yaml"))
-            .env("CLOAKPIPE_TASK_CONTEXT", repo("examples/support-agent/task-context.json"))
-            .env("CLOAKPIPE_LISTEN", "127.0.0.1:0")
-            .env("CLOAKPIPE_LISTEN_TOKEN_FILE", &token);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let pipe = child.stderr.take().unwrap();
-        std::thread::spawn(move || {
-            let mut seen = String::new();
-            for line in BufReader::new(pipe).lines() {
-                let Ok(line) = line else { break };
-                seen.push_str(&line);
-                seen.push('\n');
-                if let Some(rest) = line.split("listening on ").nth(1) {
-                    let _ = tx.send(Ok(rest.trim().trim_end_matches("/mcp").to_string()));
+    /// A gate started through the entrypoint with the real binary; killed on drop.
+    struct Gate {
+        child: std::process::Child,
+        base: String,
+    }
+
+    impl Gate {
+        /// `env` on top of a manifest (the support-agent example), a token, a
+        /// loopback listener on a free port and a /data directory in `dir`.
+        fn start(dir: &Path, env: &[(&str, String)]) -> Self {
+            let (_, token) = files(dir);
+            // The image's /data volume.
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            let bin = PathBuf::from(env!("CARGO_BIN_EXE_cloakpipe"));
+            let mut cmd = Command::new("sh");
+            cmd.arg(repo("docker/gate-entrypoint.sh"));
+            for var in VARS {
+                cmd.env_remove(var);
+            }
+            for var in ["CLOAKPIPE_RELEASE", "CLOAKPIPE_LEDGER_DB", "CLOAKPIPE_SIGNING_KEY", "CLOAKPIPE_TASK_CONTEXT", "CLOAKPIPE_STATE_DB", "OTEL_EXPORTER_OTLP_ENDPOINT"] {
+                cmd.env_remove(var);
+            }
+            cmd.env("PATH", format!("{}:{}", bin.parent().unwrap().display(), std::env::var("PATH").unwrap()))
+                .env("CLOAKPIPE_HOME", dir.join("data"))
+                .env("CLOAKPIPE_OPERATIONS_DB", dir.join("data/operations.db"))
+                .env("CLOAKPIPE_MANIFEST", repo("examples/support-agent/cloakpipe.manifest.yaml"))
+                .env("CLOAKPIPE_TASK_CONTEXT", repo("examples/support-agent/task-context.json"))
+                .env("CLOAKPIPE_LISTEN", "127.0.0.1:0")
+                .env("CLOAKPIPE_LISTEN_TOKEN_FILE", &token);
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let mut child = cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pipe = child.stderr.take().unwrap();
+            std::thread::spawn(move || {
+                let mut seen = String::new();
+                for line in BufReader::new(pipe).lines() {
+                    let Ok(line) = line else { break };
+                    seen.push_str(&line);
+                    seen.push('\n');
+                    if let Some(rest) = line.split("listening on ").nth(1) {
+                        let _ = tx.send(Ok(rest.trim().trim_end_matches("/mcp").to_string()));
+                    }
                 }
-            }
-            let _ = tx.send(Err(seen));
-        });
-        let base = match rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(Ok(base)) => base,
-            other => {
-                let _ = child.kill();
-                panic!("the gate did not start: {other:?}");
-            }
-        };
-        Self { child, base }
-    }
-
-    /// POST one message with the token: (status, session, body).
-    fn post(&self, session: Option<&str>, msg: Value) -> (u16, Option<String>, Value) {
-        let mut req = reqwest::blocking::Client::new()
-            .post(format!("{}/mcp", self.base))
-            .header("Authorization", "Bearer a-long-random-token")
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body(msg.to_string());
-        if let Some(s) = session {
-            req = req.header("Mcp-Session-Id", s);
+                let _ = tx.send(Err(seen));
+            });
+            let base = match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(Ok(base)) => base,
+                other => {
+                    let _ = child.kill();
+                    panic!("the gate did not start: {other:?}");
+                }
+            };
+            Self { child, base }
         }
-        let resp = req.send().unwrap();
-        let status = resp.status().as_u16();
-        let sid = resp.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
-        (status, sid, serde_json::from_str(&resp.text().unwrap()).unwrap_or(Value::Null))
-    }
 
-    /// SIGTERM (docker stop): the exit code.
-    fn stop(mut self) -> Option<i32> {
-        let _ = Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status();
-        self.child.wait().unwrap().code()
-    }
-}
-
-impl Drop for Gate {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// The real binary accepts what the entrypoint builds: it serves /health
-/// over HTTP in front of the example's stdio upstream, with every event
-/// flag set.
-#[cfg(not(feature = "certification"))]
-#[test]
-fn the_entrypoint_starts_the_real_gate() {
-    let dir = tempfile::tempdir().unwrap();
-    let secret = dir.path().join("webhook.secret");
-    std::fs::write(&secret, "s3cret\n").unwrap();
-    let upstream = format!("python3 {}", repo("examples/support-agent/mock_upstream.py").display());
-    let gate = Gate::start(
-        dir.path(),
-        &[
-            ("CLOAKPIPE_UPSTREAM", upstream),
-            ("CLOAKPIPE_WEBHOOK_URL", "http://127.0.0.1:9/hook".into()),
-            ("CLOAKPIPE_WEBHOOK_SECRET_FILE", secret.to_string_lossy().into_owned()),
-            ("CLOAKPIPE_WEBHOOK_FORMAT", "generic".into()),
-            ("CLOAKPIPE_OTEL_ENDPOINT", "http://127.0.0.1:9".into()),
-            ("CLOAKPIPE_EVENTS_LOG", dir.path().join("data/events.jsonl").to_string_lossy().into_owned()),
-        ],
-    );
-    let health: Value = reqwest::blocking::get(format!("{}/health", gate.base)).unwrap().json().unwrap();
-    assert_eq!(health["status"], "ok", "{health}");
-    assert_eq!(health["release"], "support-agent", "{health}");
-    // /mcp needs the token.
-    let denied = reqwest::blocking::Client::new().post(format!("{}/mcp", gate.base)).body("{}").send().unwrap();
-    assert_eq!(denied.status().as_u16(), 401);
-    assert_eq!(gate.stop(), Some(0), "stops cleanly on SIGTERM (docker stop)");
-}
-
-/// What docker/compose.example.yaml runs, without docker: the gate (through
-/// the entrypoint) in front of examples/support-agent/mock_http_upstream.py
-/// over HTTP, enforcing Example 2.
-#[cfg(not(feature = "certification"))]
-#[test]
-fn the_compose_example_gate_enforces_example_2_over_http() {
-    let dir = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut tools = Command::new("python3")
-        .arg(repo("examples/support-agent/mock_http_upstream.py"))
-        .env("MOCK_PORT", port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let received = Arc::new(Mutex::new(String::new()));
-    {
-        let (pipe, received) = (tools.stderr.take().unwrap(), received.clone());
-        std::thread::spawn(move || {
-            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                received.lock().unwrap().push_str(&format!("{line}\n"));
+        /// POST one message with the token: (status, session, body).
+        fn post(&self, session: Option<&str>, msg: Value) -> (u16, Option<String>, Value) {
+            let mut req = reqwest::blocking::Client::new()
+                .post(format!("{}/mcp", self.base))
+                .header("Authorization", "Bearer a-long-random-token")
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .body(msg.to_string());
+            if let Some(s) = session {
+                req = req.header("Mcp-Session-Id", s);
             }
-        });
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(std::time::Instant::now() < deadline, "the example upstream did not start");
-        std::thread::sleep(Duration::from_millis(50));
+            let resp = req.send().unwrap();
+            let status = resp.status().as_u16();
+            let sid = resp.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
+            (status, sid, serde_json::from_str(&resp.text().unwrap()).unwrap_or(Value::Null))
+        }
+
+        /// SIGTERM (docker stop): the exit code.
+        fn stop(mut self) -> Option<i32> {
+            let _ = Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status();
+            self.child.wait().unwrap().code()
+        }
     }
 
-    let gate = Gate::start(dir.path(), &[("CLOAKPIPE_UPSTREAM_URL", format!("http://127.0.0.1:{port}/mcp"))]);
-    let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agent", "version": "1"}}});
-    let (status, sid, body) = gate.post(None, init);
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["result"]["serverInfo"]["name"], "mock-support-tools", "{body}");
-    let sid = sid.expect("a session");
-    let call = |id: u64, tool: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
-    let email = |to: &str| json!({"ticket_id": "T-1042", "to": to, "subject": "Your refund", "body": "Hi Dana, your refund is on its way."});
-    let (_, _, read) = gate.post(Some(&sid), call(1, "read_ticket", json!({"ticket_id": "T-1042"})));
-    assert_eq!(read["result"]["content"][0]["text"], "read_ticket: done", "{read}");
-    let (_, _, sent) = gate.post(Some(&sid), call(2, "send_email", email("dana@customer.example")));
-    assert_eq!(sent["result"]["content"][0]["text"], "send_email: done", "{sent}");
-    let (_, _, injected) = gate.post(Some(&sid), call(3, "send_email", email("attacker@evil.example")));
-    assert_eq!(injected["error"]["data"]["reason"], "scope_mismatch", "{injected}");
-    assert_eq!(gate.stop(), Some(0));
-    let _ = tools.kill();
-    let _ = tools.wait();
-    let seen = received.lock().unwrap().clone();
-    assert!(seen.contains("upstream received: read_ticket") && seen.contains("dana@customer.example"), "{seen}");
-    assert!(!seen.contains("evil.example"), "the injected mail never reached the tool: {seen}");
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The real binary accepts what the entrypoint builds: it serves /health
+    /// over HTTP in front of the example's stdio upstream, with every event
+    /// flag set.
+    #[test]
+    fn the_entrypoint_starts_the_real_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("webhook.secret");
+        std::fs::write(&secret, "s3cret\n").unwrap();
+        let upstream = format!("python3 {}", repo("examples/support-agent/mock_upstream.py").display());
+        let gate = Gate::start(
+            dir.path(),
+            &[
+                ("CLOAKPIPE_UPSTREAM", upstream),
+                ("CLOAKPIPE_WEBHOOK_URL", "http://127.0.0.1:9/hook".into()),
+                ("CLOAKPIPE_WEBHOOK_SECRET_FILE", secret.to_string_lossy().into_owned()),
+                ("CLOAKPIPE_WEBHOOK_FORMAT", "generic".into()),
+                ("CLOAKPIPE_OTEL_ENDPOINT", "http://127.0.0.1:9".into()),
+                ("CLOAKPIPE_EVENTS_LOG", dir.path().join("data/events.jsonl").to_string_lossy().into_owned()),
+            ],
+        );
+        let health: Value = reqwest::blocking::get(format!("{}/health", gate.base)).unwrap().json().unwrap();
+        assert_eq!(health["status"], "ok", "{health}");
+        assert_eq!(health["release"], "support-agent", "{health}");
+        // /mcp needs the token.
+        let denied = reqwest::blocking::Client::new().post(format!("{}/mcp", gate.base)).body("{}").send().unwrap();
+        assert_eq!(denied.status().as_u16(), 401);
+        assert_eq!(gate.stop(), Some(0), "stops cleanly on SIGTERM (docker stop)");
+    }
+
+    /// What docker/compose.example.yaml runs, without docker: the gate (through
+    /// the entrypoint) in front of examples/support-agent/mock_http_upstream.py
+    /// over HTTP, enforcing Example 2.
+    #[test]
+    fn the_compose_example_gate_enforces_example_2_over_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut tools = Command::new("python3")
+            .arg(repo("examples/support-agent/mock_http_upstream.py"))
+            .env("MOCK_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let received = Arc::new(Mutex::new(String::new()));
+        {
+            let (pipe, received) = (tools.stderr.take().unwrap(), received.clone());
+            std::thread::spawn(move || {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    received.lock().unwrap().push_str(&format!("{line}\n"));
+                }
+            });
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(std::time::Instant::now() < deadline, "the example upstream did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let gate = Gate::start(dir.path(), &[("CLOAKPIPE_UPSTREAM_URL", format!("http://127.0.0.1:{port}/mcp"))]);
+        let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "agent", "version": "1"}}});
+        let (status, sid, body) = gate.post(None, init);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["result"]["serverInfo"]["name"], "mock-support-tools", "{body}");
+        let sid = sid.expect("a session");
+        let call = |id: u64, tool: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
+        let email = |to: &str| json!({"ticket_id": "T-1042", "to": to, "subject": "Your refund", "body": "Hi Dana, your refund is on its way."});
+        let (_, _, read) = gate.post(Some(&sid), call(1, "read_ticket", json!({"ticket_id": "T-1042"})));
+        assert_eq!(read["result"]["content"][0]["text"], "read_ticket: done", "{read}");
+        let (_, _, sent) = gate.post(Some(&sid), call(2, "send_email", email("dana@customer.example")));
+        assert_eq!(sent["result"]["content"][0]["text"], "send_email: done", "{sent}");
+        let (_, _, injected) = gate.post(Some(&sid), call(3, "send_email", email("attacker@evil.example")));
+        assert_eq!(injected["error"]["data"]["reason"], "scope_mismatch", "{injected}");
+        assert_eq!(gate.stop(), Some(0));
+        let _ = tools.kill();
+        let _ = tools.wait();
+        let seen = received.lock().unwrap().clone();
+        assert!(seen.contains("upstream received: read_ticket") && seen.contains("dana@customer.example"), "{seen}");
+        assert!(!seen.contains("evil.example"), "the injected mail never reached the tool: {seen}");
+    }
 }
 
 /// The root docker-compose.yml still runs the PII proxy: it asks for
