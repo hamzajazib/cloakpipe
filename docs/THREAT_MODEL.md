@@ -102,7 +102,12 @@ server's credentials should exist only in the gate's child process.
 **A malicious or compromised tool server.** Results are passed back to
 the agent unchanged (apart from the opt-in PII transform), so a tool can
 inject instructions into the model. Tool descriptions in `tools/list` are
-also passed through unchanged; pinning and diffing them is planned.
+passed through, but not unchecked (unreleased, next release). A tool whose
+definition changes during a session is hidden and refused (`tool_drift`).
+With a tools lock (`cloakpipe tools pin`, `mcp-proxy --tools-lock`), so is
+any tool that does not match the definition you reviewed. Pinning catches a
+description that changes. It does not judge whether the description you
+pinned was honest, and it does not touch results.
 
 **A wrong task context.** The gate trusts the orchestrator. If the
 orchestrator puts the attacker's address in the task context, the gate
@@ -143,9 +148,18 @@ is no revocation list.
 and heuristics (NER with the `ner` feature). They miss entities; measure
 them on your data.
 
-**The HTTP transports.** The gate speaks MCP over stdio only. An agent
-that reaches an MCP server over HTTP/SSE, or calls tools through an LLM
-provider's native tool calling without MCP, is not gated (both planned).
+**The HTTP transports.** The gate speaks MCP over stdio and Streamable
+HTTP (unreleased, next release v0.13.0): `--listen` serves agents over
+HTTP, `--upstream-url` fronts an HTTP MCP server. Only traffic sent through
+the gate is gated: an agent that can reach the MCP server directly goes
+around it, so put the server where only the gate can reach it. The
+listener checks `Origin` (against DNS rebinding) and, with
+`--listen-token-file`, a bearer token on every `/mcp` request; without a
+token, anyone who can reach the listener can use the gate's tools, so a
+non-loopback bind without one draws a warning (and the Docker entrypoint
+refuses it). The token is a shared secret, not a per-agent identity, and
+TLS is left to a reverse proxy in front. Tools called through an LLM
+provider's native tool calling without MCP are not gated (planned).
 
 ## Reporting
 

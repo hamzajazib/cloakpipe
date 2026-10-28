@@ -13,7 +13,7 @@ use crate::release::EXIT_OK;
 use clap::{Args, Subcommand};
 use cloakpipe_anchor::anchor::rekor::{RekorClient, DEFAULT_REKOR_URL};
 use cloakpipe_anchor::anchor::rfc3161::{TsaClient, DEFAULT_TSA_URL};
-use cloakpipe_ledger::anchoring::{AnchorLoop, AnchorPolicy, Anchorer};
+use cloakpipe_ledger::anchoring::{AnchorEvent, AnchorLoop, AnchorPolicy, Anchorer};
 use cloakpipe_ledger::audit_pack::{export_pack, ExportError, PackRange};
 use cloakpipe_ledger::gate_key::KeyError;
 use cloakpipe_ledger::{GateKey, LedgerStore};
@@ -218,12 +218,17 @@ impl AnchoringArgs {
 }
 
 /// Start anchoring the ledger in the background (after the decision log is
-/// open, so the ledger and key exist).
-pub fn start_anchoring(ledger: &LedgerArgs, anchoring: Option<(Anchorer, AnchorPolicy)>) -> Res<Option<AnchorLoop>> {
+/// open, so the ledger and key exist). `on_event` gets every anchoring
+/// event on the loop's thread.
+pub fn start_anchoring(
+    ledger: &LedgerArgs,
+    anchoring: Option<(Anchorer, AnchorPolicy)>,
+    on_event: impl Fn(&AnchorEvent) + Send + 'static,
+) -> Res<Option<AnchorLoop>> {
     let Some((anchorer, policy)) = anchoring else { return Ok(None) };
     let path = ledger.ledger_path()?.expect("anchoring is refused with --no-ledger");
     let key = ledger.signing_key()?;
-    AnchorLoop::spawn(&path.to_string_lossy(), key, anchorer, policy)
+    AnchorLoop::spawn_with(&path.to_string_lossy(), key, anchorer, policy, on_event)
         .map(Some)
         .map_err(|e| usage(format_args!("decision ledger {}: {e}", path.display())))
 }

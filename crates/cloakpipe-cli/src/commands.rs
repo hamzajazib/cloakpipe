@@ -447,7 +447,27 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Ok(gate) => gate,
         Err(code) => std::process::exit(code),
     };
+    // Event sinks (--events-log, --webhook, --otel-endpoint): checked and
+    // opened before anything runs; delivery is on their own threads.
+    let sinks = match args.events.sinks() {
+        Ok(sinks) => sinks,
+        Err(code) => std::process::exit(code),
+    };
     let pii = args.pii();
+    // The upstream servers and the tools lock, checked before anything runs.
+    let mut upstreams = match crate::gate::upstreams_from_args(&args) {
+        Ok(u) => u,
+        Err(code) => std::process::exit(code),
+    };
+    let tools_lock = match &args.tools_lock {
+        Some(path) => match crate::tools::load_lock("--tools-lock", path) {
+            Ok(lock) => Some(lock),
+            Err(code) => std::process::exit(code),
+        },
+        None => None,
+    };
+    // Several servers, or a lock: the gate is the client of each server.
+    let routed = !args.servers.is_empty() || tools_lock.is_some();
     // The decision ledger and its key, before anything runs: a gate that
     // cannot record does not start.
     // Anchoring flags are checked (and their trust inputs read) before
@@ -465,7 +485,24 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     };
     // Epochs are sealed and anchored on their own thread, off the request
     // path; on exit the tail is sealed and anchored once more.
-    let anchor_loop = match crate::evidence::start_anchoring(&args.ledger, anchoring) {
+    // A failed anchor is an `anchor.failed` event.
+    let on_anchor = {
+        let sinks = sinks.clone();
+        let release = gate.as_ref().map(|g| crate::events::ReleaseInfo {
+            name: g.release_name().to_string(),
+            digest: g.release().to_string(),
+            policy_digest: g.policy_digest(),
+        });
+        move |e: &cloakpipe_ledger::anchoring::AnchorEvent| {
+            if let (cloakpipe_ledger::anchoring::AnchorEvent::Failed { last_seq, kind, .. }, Some(release)) = (e, &release) {
+                let event = crate::events::anchor_failed(release, kind, *last_seq);
+                for sink in &sinks {
+                    sink.emit(&event);
+                }
+            }
+        }
+    };
+    let anchor_loop = match crate::evidence::start_anchoring(&args.ledger, anchoring, on_anchor) {
         Ok(l) => l,
         Err(code) => std::process::exit(code),
     };
@@ -480,11 +517,10 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     } else {
         args.ledger.ledger_db.clone().map(|p| p.to_string_lossy().into_owned()).or_else(|| std::env::var("CLOAKPIPE_LEDGER_DB").ok())
     };
-    let upstream = args.upstream;
-
-    let parts = shell_words::split(&upstream)
-        .map_err(|e| anyhow::anyhow!("failed to parse --upstream command ({upstream:?}): {e}"))?;
-    anyhow::ensure!(!parts.is_empty(), "--upstream command is empty");
+    let listen = match crate::gate::listen_from_args(&args) {
+        Ok(l) => l,
+        Err(code) => std::process::exit(code),
+    };
 
     // The vault and detector exist only for the opt-in PII transform.
     let pii = if pii {
@@ -519,25 +555,77 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         );
     }
 
-    tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
+    for u in &upstreams {
+        match &u.transport {
+            cloakpipe_mcp::UpstreamTransport::Stdio { command } => tracing::info!("CloakPipe MCP interceptor → upstream {} {command:?}", u.name),
+            // The URL only up to its host: a path or query may carry a credential.
+            cloakpipe_mcp::UpstreamTransport::Http { url, .. } => {
+                let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                tracing::info!("CloakPipe MCP interceptor → upstream {} over HTTP at {host}", u.name)
+            }
+        }
+    }
+    if let Some(lock) = &tools_lock {
+        tracing::info!(tools_lock = %lock.digest(), "upstream tools pinned ({} tools)", lock.tool_count());
+    }
+    let ctx = cloakpipe_mcp::ProxyContext {
+        pii,
+        ledger_db,
+        release,
+        gate,
+        decisions,
+        events: sinks.clone(),
+    };
+    let listening = listen.is_some();
+    let result = match listen {
+        // The agent over HTTP; stops on Ctrl-C / SIGTERM.
+        Some(config) if routed => cloakpipe_mcp::http::serve_servers(config, upstreams, ctx, tools_lock, shutdown_signal()).await,
+        Some(config) => cloakpipe_mcp::http::serve(config, upstreams.remove(0), ctx, shutdown_signal()).await,
+        None => tokio::task::spawn_blocking(move || {
+            if routed {
+                cloakpipe_mcp::run_servers(upstreams, ctx, tools_lock)
+            } else {
+                cloakpipe_mcp::run_upstream_io(upstreams.remove(0), ctx, std::io::stdin(), std::io::stdout())
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
+    };
+    // Queued events (the HTTP listener has no flush of its own; the stdio
+    // runners flushed already), then the last epoch's anchoring, which may
+    // raise events too.
+    let flush = sinks.clone();
     tokio::task::spawn_blocking(move || {
-        let result = cloakpipe_mcp::run_proxy(
-            parts,
-            cloakpipe_mcp::ProxyContext {
-                pii,
-                ledger_db,
-                release,
-                gate,
-                decisions,
-            },
-        );
+        if listening {
+            cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
+        }
         if let Some(l) = anchor_loop {
             l.finish();
+            cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
         }
-        result
     })
     .await
-    .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?
+    .map_err(|e| anyhow::anyhow!("anchoring task panicked: {e}"))?;
+    result
+}
+
+/// Ctrl-C, or SIGTERM (a service manager or `docker stop`).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => return std::future::pending().await,
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// CloakTree commands — vectorless document retrieval.

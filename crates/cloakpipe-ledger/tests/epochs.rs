@@ -244,3 +244,35 @@ fn the_background_loop_anchors_off_the_request_path() {
         assert_eq!(w[1].head.prev_epoch, w[0].head.epoch_hash);
     }
 }
+
+#[test]
+fn the_background_loop_hands_every_anchor_event_to_its_hook() {
+    use cloakpipe_ledger::anchoring::AnchorLoop;
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.db");
+    let (mut writer, k) = (store(&dir), key());
+    // A TSA nothing listens on: its anchor fails.
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/tsr", dead.local_addr().unwrap());
+    drop(dead);
+    let tsa = TsaClient::new(&url, TrustedRoots::from_pem(&MockTsa::start().root_pem()).unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook = seen.clone();
+    let lp = AnchorLoop::spawn_with(
+        path.to_str().unwrap(),
+        key(),
+        Anchorer::new(Some(tsa), None),
+        AnchorPolicy { every: Some(100), interval: None, retry: Duration::from_secs(60) },
+        move |e: &AnchorEvent| hook.lock().unwrap().push(e.clone()),
+    )
+    .unwrap();
+    append(&mut writer, &k, 2);
+    lp.finish();
+    let seen = seen.lock().unwrap();
+    assert!(matches!(seen[0], AnchorEvent::Sealed { epoch: 0, first_seq: 0, last_seq: 1 }), "{seen:?}");
+    assert!(
+        seen.iter().any(|e| matches!(e, AnchorEvent::Failed { epoch: 0, last_seq: 1, kind: "rfc3161", .. })),
+        "{seen:?}"
+    );
+}

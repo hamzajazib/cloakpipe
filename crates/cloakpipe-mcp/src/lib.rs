@@ -4,15 +4,33 @@
 //! Transport: stdio (for Claude Code, Cursor, etc.)
 //!
 //! Also exposes the transparent MCP interceptor ([`proxy`]) — a process that
-//! sits between an agent and an upstream MCP server, gating tool calls and,
-//! with the opt-in PII transform, masking PII in them and rehydrating results.
+//! sits between an agent and one or more upstream MCP servers ([`servers`]),
+//! gating tool calls, pinning the servers' tool definitions ([`tools_lock`])
+//! and, with the opt-in PII transform, masking PII in calls and rehydrating
+//! results.
 
+mod catalog;
+pub mod events;
 pub mod gate;
+pub mod http;
 pub mod operations;
 pub mod proxy;
+pub mod servers;
+pub mod tools_lock;
+pub use events::{
+    DecisionRecord, EventKind, EventSink, GateEvent, JsonlSink, NoopSink, OtelConfig, OtelSink, WebhookConfig, WebhookFormat, WebhookSink,
+    EVENT_SCHEMA,
+};
 pub use gate::{ApprovalRequest, ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
 pub use cloakpipe_policy::{Counters, PolicyEngine};
-pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, DecisionLog, PiiTransform, ProxyContext};
+pub use proxy::{
+    flush_events, reconcile_operation, run_proxy, run_proxy_io, run_servers, run_servers_io, run_upstream_io, stable_ids, Action, DecisionLog,
+    Interceptor, PiiTransform, ProxyContext, Upstream, UpstreamTransport, DEFAULT_SERVER, EVENT_FLUSH, RECONCILE_REQUIRED, TOOL_REFUSED,
+    UPSTREAM_UNAVAILABLE,
+};
+pub use http::ListenConfig;
+pub use servers::ServerTools;
+pub use tools_lock::ToolsLock;
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},

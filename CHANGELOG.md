@@ -11,11 +11,115 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- MCP over HTTP (Streamable HTTP, spec rev 2025-06-18) on both sides of
+  the gate, with the same decisions, refusals and ledger entries as stdio:
+  - `mcp-proxy --listen ADDR` serves agents on `POST /mcp` (JSON
+    responses; `Mcp-Session-Id` issued on `initialize` and required after
+    it; `DELETE` ends a session; `GET /mcp` is 405), `GET /health` with
+    the release name and digest, `Origin` checks, and an optional
+    `--listen-token-file` bearer token (scheme case-insensitive). An
+    agent's `notifications/cancelled` reaches the upstream under the
+    gate's id for that session's own request, and never cancels another
+    session's. The bound address is printed on stderr; SIGTERM stops it
+    cleanly.
+  - `mcp-proxy --upstream-url URL [--upstream-header 'Name: value'|'Name: env:VAR']`
+    fronts an HTTP MCP server (JSON or SSE replies, session id and
+    protocol version carried). It is mutually exclusive with `--upstream`,
+    `--server` and `--tools-lock`; `--upstream-header` without it is a
+    usage error.
+  - Upstream transport errors fail closed: `upstream_unavailable`
+    (JSON-RPC `-32003`), or `unknown` (recorded) for a side-effecting
+    call that was sent. Library: `Interceptor::on_upstream_error`,
+    `UpstreamTransport::Http`, `Upstream::http`, `cloakpipe_mcp::http::serve`.
+  - `--listen` also fronts several stdio servers and a tools lock
+    (`--server`, `--tools-lock`; library `cloakpipe_mcp::http::serve_servers`).
+  - Not yet: SSE response streams and a `GET` stream to HTTP agents
+    (upstream notifications are not relayed to them), and HTTP servers
+    behind `--server`/`--tools-lock`.
+- Gate events (`cloakpipe_mcp::events`, library API): the MCP gate hands
+  each decision worth attention to `ProxyContext::events` sinks after its
+  ledger entry is written: `decision.deny`, `approval.requested`,
+  `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
+  `side_effect.unknown`, `tool.drift` and `anchor.failed`.
+  Each event names its ledger entry (`ledger_seq`, `entry_hash`), carries a
+  deterministic fingerprint (`sha256(kind|reason|tool|path|policy_version)`)
+  and never an argument value; `GateEvent::to_json` is the stable
+  `cloakpipe.event/v1` form, delivered by the flags below.
+- The MCP interceptor is now a transport-agnostic `Interceptor` (agent and
+  upstream messages in, `Action`s out) with named upstreams (`Upstream`;
+  the single `--upstream` is server `default`). `run_proxy` /
+  `run_proxy_io` are unchanged; decisions are unchanged.
+  **Breaking (library)**: `ProxyContext` has a new `events` field, so a
+  struct literal needs `events: Vec::new()`.
+- Event delivery (docs/EVENTS.md). New `mcp-proxy` flags:
+  - `--events-log PATH` appends each event to a JSONL file.
+  - `--webhook URL` (repeatable) POSTs each event, signed with
+    `--webhook-secret-file` as `CloakPipe-Signature:
+    t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>.<body>"))`, together with
+    `CloakPipe-Event` and `CloakPipe-Fingerprint` headers.
+    `--webhook-format generic|slack|discord` picks raw JSON, a Slack Block
+    Kit message or a Discord embed.
+  - `--otel-endpoint URL` (or `--otel` with `OTEL_EXPORTER_OTLP_ENDPOINT`)
+    exports one `cloakpipe.decision` span per tool-call decision, allows
+    included, over OTLP/HTTP JSON.
+
+  Delivery runs on background threads with bounded queues: three tries,
+  5 s timeout, drops counted on stderr, and a flush of up to 5 s on exit.
+  It never delays or changes a decision.
+
+  Also new:
+  - `cloakpipe events test` sends a sample event, and `cloakpipe events
+    verify-signature` checks a signature the way a receiver should.
+  - A failed scheduled anchor is now an `anchor.failed` event.
+  - Library: `JsonlSink`, `WebhookSink`, `OtelSink`, `DecisionRecord`,
+    `AnchorLoop::spawn_with`. `EventSink` gains default `decision` and
+    `flush` methods.
+
+- `mcp-proxy --server NAME=COMMAND` (repeatable): one gate in front of
+  several stdio MCP servers. The gate initializes and lists every server at
+  start-up, answers `initialize`/`ping` itself, merges `tools/list` (all
+  pages), routes each `tools/call` to the server that serves the tool under
+  its own request ids, and sends other requests to the server named
+  `default` (`--upstream`) or the only one, else refuses them (`-32601`).
+  A tool name two servers share refuses to start unless the manifest
+  declares it per server as `<server>__<tool>`. Library:
+  `Interceptor::with_servers`, `run_servers[_io]`, `servers`, `ServerTools`.
+  A server that exits fails its open requests closed at once
+  (`upstream_unavailable`; a side-effecting call is recorded `unknown`)
+  while the other servers serve on.
+- Tool pinning: `cloakpipe tools pin` writes `cloakpipe.tools.lock` (per
+  server, per tool, sha256 over the JCS of `name`, `description`,
+  `inputSchema`, `annotations`, under a lock digest); `cloakpipe tools diff`
+  shows added/removed/changed tools (exit 1 on changes); `mcp-proxy
+  --tools-lock` hides a tool that does not match its pin (or has none) from
+  `tools/list` and refuses calls to it as `tool_drift`, recorded in the
+  ledger and emitted as `tool.drift`. Without a lock, a tool whose
+  definition changes during the session is refused until restart (also
+  with a plain `--upstream`). Decision entries carry the lock digest
+  (`tools_lock`) when there is one; entries without it hash as before, so
+  older ledgers still verify. **Breaking (library)**: `Denial` has new
+  variants (`ToolDrift`, `ToolUnavailable`), and `GateEvent` (`server`) and
+  `DecisionDraft`/`DecisionEntry` (`tools_lock`) have new fields.
+- `docker/compose.example.yaml` (the gate in front of an example MCP
+  server over HTTP) and `examples/support-agent/mock_http_upstream.py`
+  (the example's tools over Streamable HTTP).
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
   publishes an existing tag to crates.io without rebuilding the image.
   Re-runs skip crate versions already on crates.io, and crates.io's
   new-crate rate limit (HTTP 429) is waited out and retried.
+
+### Changed
+
+- **Breaking (Docker)**: the image runs the MCP gate over HTTP by default.
+  Its entrypoint (`docker/gate-entrypoint.sh`) builds `cloakpipe mcp-proxy
+  --listen 0.0.0.0:8900 --manifest /app/cloakpipe.manifest.yaml
+  --upstream-url $CLOAKPIPE_UPSTREAM_URL ...` from `CLOAKPIPE_*`
+  variables, and refuses to start without an upstream, a mounted manifest,
+  or (on a non-loopback address) `CLOAKPIPE_LISTEN_TOKEN_FILE`. The
+  ledger, gate key and operations store are on the `/data` volume
+  (`CLOAKPIPE_HOME=/data`). The PII proxy is `docker run IMAGE start`; the
+  root `docker-compose.yml` now runs it that way.
 
 ## [0.12.0] - 2026-10-27
 

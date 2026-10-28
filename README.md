@@ -10,7 +10,7 @@ A self-hosted policy-enforcement gate for AI agent tool calls.
 [![License: MIT](https://img.shields.io/github/license/rohansx/cloakpipe)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-cloakpipe.co-0f6)](https://cloakpipe.co/docs)
 
-[Quickstart](#60-second-quickstart) · [Declare](#declare) · [Enforce](#enforce) · [Prove](#prove) · [Claude Code, Cursor, Codex](#use-it-with-claude-code-cursor-and-codex) · [Roadmap](#roadmap)
+[Quickstart](#60-second-quickstart) · [Declare](#declare) · [Enforce](#enforce) · [Alert](#alert) · [Prove](#prove) · [Claude Code, Cursor, Codex](#use-it-with-claude-code-cursor-and-codex) · [Roadmap](#roadmap)
 
 </div>
 
@@ -31,8 +31,9 @@ has three jobs:
    hash-chained ledger entry, anchored externally, that an auditor checks
    offline with one command.
 
-It is one Rust binary that wraps any stdio MCP server, keeps its state in
-local SQLite files and needs no account or network service.
+It is one Rust binary that wraps any MCP server (stdio or Streamable HTTP,
+one or several behind one gate), keeps its state in local SQLite files and
+needs no account or network service.
 
 ## 60-second quickstart
 
@@ -204,6 +205,135 @@ proxy (`cloakpipe start`); see [Other commands](#other-commands).
 
 Details: [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md).
 
+### MCP over HTTP (unreleased, next release v0.13.0)
+
+Either side of the gate can speak MCP's Streamable HTTP transport (spec
+rev 2025-06-18) instead of stdio. Every `tools/call` gets the same
+decision, refusal and ledger entry as over stdio.
+
+**Agents connect over HTTP** with `--listen`:
+
+```bash
+cloakpipe mcp-proxy --listen 127.0.0.1:8900 \
+  --manifest examples/support-agent/cloakpipe.manifest.yaml \
+  --task-context examples/support-agent/task-context.json \
+  --operations-db ops.db \
+  --upstream "python3 examples/support-agent/mock_upstream.py"
+# stderr: cloakpipe: MCP over HTTP listening on http://127.0.0.1:8900/mcp
+claude mcp add --transport http support-tools http://127.0.0.1:8900/mcp
+```
+
+- `POST /mcp` takes one JSON-RPC message and answers a request with one
+  `application/json` response (a notification gets `202`). There are no
+  SSE response streams and no `GET /mcp` stream (`405`), so server-sent
+  notifications such as progress or `tools/list_changed` are not relayed
+  to HTTP agents.
+- `initialize` issues an `Mcp-Session-Id`, which every later request must
+  carry (`400` without one, `404` for an unknown one). `DELETE /mcp` ends
+  the session. All sessions share the one upstream; each request is
+  forwarded under a gate-unique id, so sessions never mix up replies, and
+  a `notifications/cancelled` only cancels a request of its own session.
+- `GET /health` returns `{"status":"ok","release":...,"release_digest":...}`
+  and needs no token.
+- A browser `Origin` must be a loopback origin or the gate's own
+  (DNS rebinding). `--listen-token-file FILE` requires
+  `Authorization: Bearer <token>` on every `/mcp` request
+  (`claude mcp add --transport http ... --header "Authorization: Bearer <token>"`).
+  The gate warns when it binds a non-loopback address; do that only with
+  a token.
+- Ctrl-C or SIGTERM stops it; side-effecting calls still in flight are
+  recorded as `unknown`, as over stdio.
+
+**The upstream is an HTTP MCP server** with `--upstream-url` (instead of
+`--upstream`):
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --upstream-url https://tools.example.com/mcp \
+  --upstream-header "Authorization: env:TOOLS_AUTH"
+```
+
+The gate POSTs each message with the given headers (an `env:VAR` value is
+read from the environment at start-up; values are never logged), accepts
+JSON or SSE replies, and carries the server's `Mcp-Session-Id` and the
+negotiated `MCP-Protocol-Version`. Upstream transport errors fail closed: a
+connection error, an HTTP error status, or a reply that never comes answers
+the agent with `upstream_unavailable` (JSON-RPC `-32003`), and a
+side-effecting call that was sent becomes `unknown` in the operations store
+and the ledger until reconciled. `--listen` and `--upstream-url` combine.
+`--upstream-url` fronts one HTTP server; `--server` and `--tools-lock`
+(below) take stdio servers, also behind `--listen`. HTTP servers behind
+`--server` are on the roadmap.
+
+### Several servers and pinned tools (unreleased, next release v0.13.0)
+
+One gate can front several MCP servers. Give each one as
+`--server NAME=COMMAND`; `--upstream` is the server named `default`. The
+gate starts and lists every server, answers the agent with one merged
+`tools/list`, and routes each `tools/call` to the server that serves the
+tool. A tool name two servers share stops the gate at start-up, unless the
+manifest declares it per server as `<server>__<tool>`.
+
+Pin the tool definitions you reviewed, and the gate hides and refuses
+(`tool_drift`) any tool whose name, description, input schema or
+annotations change afterwards:
+
+```bash
+cloakpipe tools pin --server 'mail=npx -y @acme/mail-mcp' --server 'files=...'
+cloakpipe tools diff --lock cloakpipe.tools.lock --server 'mail=...' --server 'files=...'
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml \
+  --server 'mail=...' --server 'files=...' --tools-lock cloakpipe.tools.lock
+```
+
+Even without a lock, a tool whose definition changes during a session is
+hidden and refused. All of this works the same for an agent over HTTP:
+
+```bash
+cloakpipe mcp-proxy --listen 127.0.0.1:8900 --listen-token-file listen.token \
+  --manifest cloakpipe.manifest.yaml \
+  --server 'mail=...' --server 'files=...' --tools-lock cloakpipe.tools.lock \
+  --webhook "$SLACK_WEBHOOK_URL" --webhook-format slack
+```
+
+A server that exits leaves the others serving: its open requests fail
+closed (`upstream_unavailable`; a side-effecting call becomes `unknown`).
+Details:
+[docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#several-servers-and-tool-pinning).
+
+## Alert
+
+Unreleased (next release v0.13.0). Each decision that needs attention
+raises a gate event: `decision.deny`, `approval.requested`,
+`approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
+`side_effect.unknown`, `tool.drift` or `anchor.failed`. An event carries the tool, the
+reason, the contract path, the release, the ledger entry and a
+deterministic fingerprint (the same failure always gets the same
+fingerprint). It never carries an argument value.
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml --upstream "python3 server.py" \
+  --events-log ~/.cloakpipe/events.jsonl \
+  --webhook "$SLACK_WEBHOOK_URL" --webhook-format slack \
+  --otel-endpoint http://localhost:4318
+```
+
+- `--webhook URL` (repeatable) POSTs each event as JSON. Use
+  `--webhook-format slack` or `discord` for a chat message. With
+  `--webhook-secret-file`, each request is signed with
+  `CloakPipe-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>.<body>"))`.
+- `--otel-endpoint` exports one OpenTelemetry span per tool-call decision,
+  allows included, over OTLP/HTTP.
+- `--events-log` appends every event as a line of JSON.
+- `cloakpipe events test --webhook URL --webhook-format slack` sends a
+  sample event. `cloakpipe events verify-signature` checks a signature the
+  way a receiver should.
+
+Delivery runs on background threads with bounded queues: three tries, 5 s
+timeout, and drops are counted. A dead endpoint never delays a decision or
+changes it.
+
+Details: [docs/EVENTS.md](docs/EVENTS.md).
+
 ## Prove
 
 - **Decision ledger.** Each decision is one `cloakpipe.decision/v1` entry
@@ -249,6 +379,17 @@ claude mcp add project-files --scope project -- cloakpipe mcp-proxy \
   --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"
 ```
 
+Or run the gate as an HTTP server and point Claude Code at its URL (the
+gate can then serve several agents, and needs no per-host command):
+
+```bash
+cloakpipe mcp-proxy --listen 127.0.0.1:8900 --listen-token-file ~/.cloakpipe/listen.token \
+  --manifest /path/to/cloakpipe/examples/filesystem/cloakpipe.manifest.yaml \
+  --upstream "npx -y @modelcontextprotocol/server-filesystem /path/to/project"
+claude mcp add --transport http project-files http://127.0.0.1:8900/mcp \
+  --header "Authorization: Bearer $(cat ~/.cloakpipe/listen.token)"
+```
+
 or write `.mcp.json` yourself (Cursor reads the same shape from
 `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json`):
 
@@ -277,9 +418,11 @@ args = ["mcp-proxy", "--manifest", "/path/to/cloakpipe/examples/filesystem/cloak
 
 What to know:
 
-- The host still lists every tool the server offers (`tools/list` is passed
-  through unchanged); undeclared ones are refused when called. The agent sees
-  the refusal as a tool error with its reason.
+- The host still lists every tool the server offers; undeclared ones are
+  refused when called. The agent sees the refusal as a tool error with its
+  reason. The exception is a tool whose definition changed during the
+  session (or that does not match `--tools-lock`): it is left out of the
+  list and refused as `tool_drift`.
 - An interactive coding agent has no orchestrator writing a task context,
   so use manifests without `one_of_context` there, or pass
   `--task-context <file>`.
@@ -295,8 +438,9 @@ What to know:
   consequences, the tool call, against rules written in advance. An
   injection that stays inside the contract (a polite email to the right
   customer) gets through; keep contracts tight.
-- **Not observability.** There are no traces, dashboards or token metrics.
-  The ledger records decisions as evidence, not telemetry.
+- **Not observability.** There are no dashboards or token metrics. The
+  ledger records decisions as evidence. The optional OpenTelemetry spans
+  describe the gate's own decisions, not the agent's work.
 - **Not an identity provider or a secrets broker.** It does not issue
   credentials or hold the tool server's tokens.
 - **Not a sandbox.** It does not isolate the agent or the tool process. An
@@ -323,15 +467,34 @@ change before 1.0)
 - [x] Opt-in PII transform for tool arguments; regex PII HTTP proxy for
   OpenAI- and Anthropic-compatible APIs
 
+**Unreleased (next release v0.13.0)**, on `main` and not yet in a tagged
+release:
+
+- [x] Events: typed gate events with deterministic fingerprints, delivered
+  as HMAC-signed webhooks (generic, Slack, Discord), OpenTelemetry spans per
+  decision and a JSONL log ([Alert](#alert), [docs/EVENTS.md](docs/EVENTS.md))
+- [x] MCP over HTTP: `mcp-proxy --listen` serves agents over Streamable HTTP
+  and `--upstream-url` fronts an HTTP MCP server
+  ([MCP over HTTP](#mcp-over-http-unreleased-next-release-v0130))
+- [x] One gate in front of several stdio MCP servers (`--server
+  NAME=COMMAND`, merged `tools/list`, per-tool routing), `tools/list`
+  pinning (`cloakpipe tools pin|diff`, `--tools-lock`) and drift detection
+  (`tool_drift`, `tool.drift` events)
+  ([Several servers](#several-servers-and-pinned-tools-unreleased-next-release-v0130))
+- [x] The Docker image runs the gate over HTTP by default
+  ([Docker](#docker-unreleased-next-release-v0130))
+
 **Next**
 
 - [ ] Published crates and tagged binaries, and a one-command install for
   Claude Code, Cursor and Codex
-- [ ] One gate in front of several MCP servers, with `tools/list` pinning
-  and drift detection
-- [ ] Events: signed webhooks and OpenTelemetry spans per decision, with
-  stable fingerprints
-- [ ] An HTTP/SSE MCP transport (today the gate speaks stdio only)
+- [ ] A separate secret and format for each webhook
+- [ ] SSE response streams and a server-to-client `GET /mcp` stream for
+  HTTP agents
+- [ ] HTTP upstreams behind `--server` and `--tools-lock` (today these take
+  stdio servers; `--upstream-url` fronts one HTTP server)
+- [ ] A hosted plane (grouped alerts, routing, approval cards, digests) on
+  top of the events; nothing is sent to a hosted service today
 
 **Later, not started**
 
@@ -377,6 +540,45 @@ default:
 ```bash
 cargo install --path crates/cloakpipe-cli --locked --features ner
 ```
+
+### Docker (unreleased, next release v0.13.0)
+
+The image runs the gate over HTTP by default. Its entrypoint
+([docker/gate-entrypoint.sh](docker/gate-entrypoint.sh)) builds the
+`mcp-proxy` flags from `CLOAKPIPE_*` variables:
+
+```bash
+docker build -t cloakpipe-gate .
+openssl rand -hex 32 > listen.token
+docker run --rm -p 127.0.0.1:8900:8900 \
+  -v "$PWD/cloakpipe.manifest.yaml:/app/cloakpipe.manifest.yaml:ro" \
+  -v "$PWD/listen.token:/run/secrets/listen.token:ro" \
+  -v cloakpipe-data:/data \
+  -e CLOAKPIPE_UPSTREAM_URL=https://tools.example.com/mcp \
+  -e CLOAKPIPE_LISTEN_TOKEN_FILE=/run/secrets/listen.token \
+  cloakpipe-gate
+```
+
+| Variable | Becomes |
+|---|---|
+| `CLOAKPIPE_UPSTREAM_URL` or `CLOAKPIPE_UPSTREAM` (one is required) | `--upstream-url` (an HTTP MCP server) or `--upstream` (a command inside the container) |
+| `CLOAKPIPE_UPSTREAM_HEADER` | one `--upstream-header` (`Name: value`, the value may be `env:VAR`) |
+| `CLOAKPIPE_MANIFEST` (default `/app/cloakpipe.manifest.yaml`) | `--manifest`; mount yours there |
+| `CLOAKPIPE_LISTEN` (default `0.0.0.0:8900`) | `--listen` |
+| `CLOAKPIPE_LISTEN_TOKEN_FILE` | `--listen-token-file`; required on a non-loopback address unless `CLOAKPIPE_INSECURE_NO_TOKEN=1` |
+| `CLOAKPIPE_TOOLS_LOCK` | `--tools-lock` (with `CLOAKPIPE_UPSTREAM`) |
+| `CLOAKPIPE_WEBHOOK_URL`, `CLOAKPIPE_WEBHOOK_SECRET_FILE`, `CLOAKPIPE_WEBHOOK_FORMAT` | `--webhook`, `--webhook-secret-file`, `--webhook-format` |
+| `CLOAKPIPE_OTEL_ENDPOINT`, `CLOAKPIPE_EVENTS_LOG` | `--otel-endpoint`, `--events-log` |
+
+Arguments after `gate` are added to the flags (`docker run ... cloakpipe-gate
+gate --mode shadow`). The decision ledger, the gate key and the operations
+store live on the `/data` volume (`CLOAKPIPE_HOME=/data`); the health check
+asks `GET /health`. [docker/compose.example.yaml](docker/compose.example.yaml)
+runs the gate in front of the support-agent example's tools over HTTP.
+
+Any other command runs `cloakpipe` itself: `docker run -p 8900:8900 -e
+OPENAI_API_KEY=... cloakpipe-gate start` is the PII proxy with the bundled
+config, as the root `docker-compose.yml` does.
 
 ### Other commands
 

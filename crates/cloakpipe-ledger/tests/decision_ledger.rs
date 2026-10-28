@@ -212,3 +212,26 @@ fn a_key_file_that_is_not_a_signing_key_is_refused() {
     std::fs::write(&path, "not json").unwrap();
     assert!(GateKey::load(&path).is_err());
 }
+
+#[test]
+fn the_tools_lock_digest_is_recorded_only_when_there_is_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = store(&dir);
+    let key = GateKey::from_seed([3; 32]);
+    let lock = format!("sha256:{}", "ef".repeat(32));
+    let plain = s.append_decision(deny("send_email", "scope_mismatch"), &key).unwrap();
+    let pinned = s.append_decision(DecisionDraft { tools_lock: Some(lock.clone()), ..deny("send_email", "tool_drift") }, &key).unwrap();
+
+    // Without a lock the member is absent, so an entry reads (and hashes)
+    // exactly as one written before the field existed.
+    let line: serde_json::Value = serde_json::from_str(&plain.to_json_line()).unwrap();
+    assert!(line.get("tools_lock").is_none(), "{line}");
+    assert_eq!(pinned.tools_lock.as_deref(), Some(lock.as_str()));
+    let line: serde_json::Value = serde_json::from_str(&pinned.to_json_line()).unwrap();
+    assert_eq!(line["tools_lock"], lock.as_str());
+    // The digest is covered by the entry hash.
+    let mut edited = pinned.clone();
+    edited.tools_lock = Some(format!("sha256:{}", "00".repeat(32)));
+    assert_ne!(edited.compute_hash(), pinned.entry_hash);
+    assert_eq!(s.decisions().unwrap(), [plain, pinned]);
+}

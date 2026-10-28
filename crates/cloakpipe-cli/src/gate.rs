@@ -39,8 +39,44 @@ use std::path::{Path, PathBuf};
 pub struct McpProxyArgs {
     /// Upstream MCP server command + args, e.g.
     /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-    #[arg(long, required = true)]
-    pub upstream: String,
+    /// (the server named `default`)
+    #[arg(long, required_unless_present_any = ["upstream_url", "servers"], conflicts_with = "upstream_url")]
+    pub upstream: Option<String>,
+    /// Another upstream MCP server, as NAME=COMMAND (repeatable): the gate
+    /// starts each, merges their tools/list and routes each tools/call to the
+    /// server that serves the tool. A tool name two servers share refuses to
+    /// start unless the manifest declares it per server as <server>__<tool>.
+    /// Requests other than tools go to the server named `default`
+    /// (--upstream), or the only one; else they are refused.
+    #[arg(long = "server", value_name = "NAME=COMMAND")]
+    pub servers: Vec<String>,
+    /// Tools lock (from `cloakpipe tools pin`): a tool whose definition does
+    /// not match its pin, or that has none, is hidden from tools/list and
+    /// refused (tool_drift). Without it, a tool whose definition changes
+    /// during the session is.
+    #[arg(long = "tools-lock")]
+    pub tools_lock: Option<PathBuf>,
+    /// Upstream MCP server over Streamable HTTP, e.g.
+    /// --upstream-url https://tools.example.com/mcp (instead of --upstream;
+    /// not with --server or --tools-lock yet).
+    #[arg(long = "upstream-url", value_name = "URL", conflicts_with_all = ["servers", "tools_lock"])]
+    pub upstream_url: Option<String>,
+    /// Header sent on every request to --upstream-url (repeatable), as
+    /// 'Name: value'; a value `env:VAR` is read from that environment
+    /// variable, e.g. 'Authorization: env:TOOLS_AUTH'. Values are never
+    /// logged.
+    #[arg(long = "upstream-header", value_name = "NAME: VALUE", requires = "upstream_url")]
+    pub upstream_headers: Vec<String>,
+    /// Serve MCP over HTTP (Streamable HTTP, POST /mcp) on this address
+    /// instead of stdio, e.g. 127.0.0.1:8900 (port 0 picks one; the bound
+    /// address is printed on stderr). GET /health reports the release.
+    /// Bind a non-loopback address only with --listen-token-file.
+    #[arg(long, value_name = "ADDR")]
+    pub listen: Option<String>,
+    /// File holding a bearer token every /mcp request must carry
+    /// (Authorization: Bearer <token>).
+    #[arg(long = "listen-token-file", value_name = "FILE", requires = "listen")]
+    pub listen_token_file: Option<PathBuf>,
     /// Manifest the agent runs under (cloakpipe.manifest.yaml; a legacy
     /// Agent Release is deprecated). Enables the tool gate: tools/call must
     /// name a tool the manifest declares, with arguments it allows.
@@ -86,6 +122,9 @@ pub struct McpProxyArgs {
     /// Scheduled anchoring of the decision ledger (epochs, RFC 3161, Rekor).
     #[command(flatten)]
     pub anchoring: crate::evidence::AnchoringArgs,
+    /// Where gate events go: a JSONL log, webhooks, OpenTelemetry.
+    #[command(flatten)]
+    pub events: crate::events::EventArgs,
     /// Legacy Agent Release only (deprecated; a v1 manifest declares its
     /// contracts inline). Tool contract (repeatable): argument-level rules
     /// for the tools it covers. Each must be bound by the release (`spec.policies` entry
@@ -158,6 +197,7 @@ impl McpProxyArgs {
             || self.mode.is_some()
             || self.ledger.signing_key.is_some()
             || self.anchoring.any()
+            || self.events.any()
             || !self.tool_contracts.is_empty()
             || self.task_context.is_some()
             || self.approvals.is_some()
@@ -362,6 +402,63 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
     b.create(dir)
+}
+
+/// The upstreams `mcp-proxy` fronts: `--upstream` (a stdio command, the
+/// server named `default`) and `--server NAME=COMMAND`s, or `--upstream-url`
+/// with its `--upstream-header`s (`env:VAR` values read now, so a missing
+/// variable fails before anything starts).
+pub(crate) fn upstreams_from_args(a: &McpProxyArgs) -> Res<Vec<cloakpipe_mcp::Upstream>> {
+    let name = cloakpipe_mcp::DEFAULT_SERVER;
+    let Some(url) = &a.upstream_url else {
+        // Checked here too (clap's `requires` let it through): a credential
+        // meant for an HTTP upstream is never silently dropped.
+        if !a.upstream_headers.is_empty() {
+            return Err(usage("--upstream-header needs --upstream-url (the HTTP upstream it is sent to)"));
+        }
+        return crate::tools::upstreams(a.upstream.as_deref(), &a.servers);
+    };
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(usage("--upstream-url must be an http:// or https:// URL"));
+    }
+    let mut headers = Vec::new();
+    for h in &a.upstream_headers {
+        let Some((name, value)) = h.split_once(':') else {
+            return Err(usage(format_args!("--upstream-header {h:?}: expected 'Name: value'")));
+        };
+        let name = name.trim();
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return Err(usage(format_args!("--upstream-header: {name:?} is not a header name")));
+        }
+        let value = value.trim();
+        let value = match value.strip_prefix("env:") {
+            Some(var) => std::env::var(var)
+                .map_err(|_| usage(format_args!("--upstream-header {name}: environment variable {var} is not set")))?,
+            None => value.to_string(),
+        };
+        headers.push((name.to_string(), value));
+    }
+    Ok(vec![cloakpipe_mcp::Upstream::http(name, url.clone(), headers)])
+}
+
+/// `--listen` with its token: `Ok(None)` without `--listen`.
+pub(crate) fn listen_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::ListenConfig>> {
+    let Some(listen) = &a.listen else { return Ok(None) };
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(listen.as_str())
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .ok_or_else(|| usage(format_args!("--listen {listen:?}: expected HOST:PORT, e.g. 127.0.0.1:8900")))?;
+    let token = match &a.listen_token_file {
+        Some(path) => {
+            let token = read(path)?.trim().to_string();
+            if token.is_empty() {
+                return Err(usage(format_args!("--listen-token-file {}: the file is empty", path.display())));
+            }
+            Some(token)
+        }
+        None => None,
+    };
+    Ok(Some(cloakpipe_mcp::ListenConfig { addr, token }))
 }
 
 /// The trusted task context: `--task-context`, else `$CLOAKPIPE_TASK_CONTEXT`.

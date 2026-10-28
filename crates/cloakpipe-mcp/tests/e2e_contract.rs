@@ -130,6 +130,7 @@ fn run_with(gate: ToolGate, lines: &[String], pii: Option<PiiTransform>) -> Run 
         release: Some(gate.release_bytes()),
         gate: Some(gate),
         decisions: Some(DecisionLog::open(ledger_db.to_str().unwrap(), GateKey::from_seed([1; 32])).unwrap()),
+        events: Vec::new(),
     };
     let out = Capture::default();
     let input = Cursor::new(lines.iter().map(|l| format!("{l}\n")).collect::<String>().into_bytes());

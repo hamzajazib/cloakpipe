@@ -1,0 +1,52 @@
+# The CloakPipe gate in front of an example MCP server, over HTTP:
+#
+#   openssl rand -hex 32 > docker/listen.token
+#   docker compose -f docker/compose.example.yaml up --build
+#
+# Then point an agent at http://localhost:8900/mcp with the token, e.g.
+#
+#   claude mcp add --transport http support-tools http://localhost:8900/mcp \
+#     --header "Authorization: Bearer $(cat docker/listen.token)"
+#
+# The example upstream is examples/support-agent/mock_http_upstream.py; the
+# gate enforces examples/support-agent/cloakpipe.manifest.yaml (Example 2:
+# a mail to anyone but the ticket's customer is refused as scope_mismatch).
+# Replace both with your MCP server and your manifest.
+
+services:
+  gate:
+    build: ..
+    image: cloakpipe:latest
+    depends_on:
+      - tools
+    ports:
+      # Loopback only: put a reverse proxy with TLS in front for remote agents.
+      - "127.0.0.1:8900:8900"
+    volumes:
+      - ../examples/support-agent/cloakpipe.manifest.yaml:/app/cloakpipe.manifest.yaml:ro
+      - ../examples/support-agent/policies:/app/policies:ro
+      - ../examples/support-agent/task-context.json:/app/task-context.json:ro
+      - ./listen.token:/run/secrets/listen.token:ro
+      # Decision ledger, gate signing key and operations store.
+      - cloakpipe-data:/data
+    environment:
+      - CLOAKPIPE_UPSTREAM_URL=http://tools:3000/mcp
+      - CLOAKPIPE_LISTEN_TOKEN_FILE=/run/secrets/listen.token
+      - CLOAKPIPE_TASK_CONTEXT=/app/task-context.json
+      # Optional event delivery:
+      # - CLOAKPIPE_WEBHOOK_URL=https://hooks.slack.com/services/...
+      # - CLOAKPIPE_WEBHOOK_FORMAT=slack
+      # - CLOAKPIPE_OTEL_ENDPOINT=http://otel-collector:4318
+      - RUST_LOG=${RUST_LOG:-cloakpipe=info}
+    restart: unless-stopped
+
+  tools:
+    image: python:3.12-slim
+    command: ["python3", "/srv/mock_http_upstream.py"]
+    volumes:
+      - ../examples/support-agent/mock_http_upstream.py:/srv/mock_http_upstream.py:ro
+    expose:
+      - "3000"
+
+volumes:
+  cloakpipe-data:

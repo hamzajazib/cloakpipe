@@ -747,6 +747,7 @@ name = "cloakpipe-mcp"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.23.1",
  "chrono",
  "cloakpipe-cert",
@@ -758,7 +759,9 @@ dependencies = [
  "cloakpipe-verify",
  "ed25519-dalek",
  "hex",
+ "hmac",
  "rand 0.8.6",
+ "reqwest",
  "rmcp",
  "rusqlite",
  "serde",
