@@ -33,3 +33,6 @@ models/
 .reflect/
 .fastembed_cache/
 .illuminate/
+
+# docker/compose.example.yaml reads the listen token from here.
+docker/listen.token

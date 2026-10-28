@@ -21,13 +21,17 @@ may contain breaking changes; these are marked **Breaking**.
     stderr; SIGTERM stops it cleanly.
   - `mcp-proxy --upstream-url URL [--upstream-header 'Name: value'|'Name: env:VAR']`
     fronts an HTTP MCP server (JSON or SSE replies, session id and
-    protocol version carried). It is mutually exclusive with `--upstream`.
+    protocol version carried). It is mutually exclusive with `--upstream`,
+    `--server` and `--tools-lock`.
   - Upstream transport errors fail closed: `upstream_unavailable`
     (JSON-RPC `-32003`), or `unknown` (recorded) for a side-effecting
     call that was sent. Library: `Interceptor::on_upstream_error`,
     `UpstreamTransport::Http`, `Upstream::http`, `cloakpipe_mcp::http::serve`.
+  - `--listen` also fronts several stdio servers and a tools lock
+    (`--server`, `--tools-lock`; library `cloakpipe_mcp::http::serve_servers`).
   - Not yet: SSE response streams and a `GET` stream to HTTP agents
-    (upstream notifications are not relayed to them), several upstreams.
+    (upstream notifications are not relayed to them), and HTTP servers
+    behind `--server`/`--tools-lock`.
 - Gate events (`cloakpipe_mcp::events`, library API): the MCP gate hands
   each decision worth attention to `ProxyContext::events` sinks after its
   ledger entry is written: `decision.deny`, `approval.requested`,
@@ -36,7 +40,7 @@ may contain breaking changes; these are marked **Breaking**.
   Each event names its ledger entry (`ledger_seq`, `entry_hash`), carries a
   deterministic fingerprint (`sha256(kind|reason|tool|path|policy_version)`)
   and never an argument value; `GateEvent::to_json` is the stable
-  `cloakpipe.event/v1` form. No CLI delivery yet (webhooks and OTel next).
+  `cloakpipe.event/v1` form, delivered by the flags below.
 - The MCP interceptor is now a transport-agnostic `Interceptor` (agent and
   upstream messages in, `Action`s out) with named upstreams (`Upstream`;
   the single `--upstream` is server `default`). `run_proxy` /
@@ -76,6 +80,9 @@ may contain breaking changes; these are marked **Breaking**.
   A tool name two servers share refuses to start unless the manifest
   declares it per server as `<server>__<tool>`. Library:
   `Interceptor::with_servers`, `run_servers[_io]`, `servers`, `ServerTools`.
+  A server that exits fails its open requests closed at once
+  (`upstream_unavailable`; a side-effecting call is recorded `unknown`)
+  while the other servers serve on.
 - Tool pinning: `cloakpipe tools pin` writes `cloakpipe.tools.lock` (per
   server, per tool, sha256 over the JCS of `name`, `description`,
   `inputSchema`, `annotations`, under a lock digest); `cloakpipe tools diff`
@@ -89,11 +96,26 @@ may contain breaking changes; these are marked **Breaking**.
   older ledgers still verify. **Breaking (library)**: `Denial` has new
   variants (`ToolDrift`, `ToolUnavailable`), and `GateEvent` (`server`) and
   `DecisionDraft`/`DecisionEntry` (`tools_lock`) have new fields.
+- `docker/compose.example.yaml` (the gate in front of an example MCP
+  server over HTTP) and `examples/support-agent/mock_http_upstream.py`
+  (the example's tools over Streamable HTTP).
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
   publishes an existing tag to crates.io without rebuilding the image.
   Re-runs skip crate versions already on crates.io, and crates.io's
   new-crate rate limit (HTTP 429) is waited out and retried.
+
+### Changed
+
+- **Breaking (Docker)**: the image runs the MCP gate over HTTP by default.
+  Its entrypoint (`docker/gate-entrypoint.sh`) builds `cloakpipe mcp-proxy
+  --listen 0.0.0.0:8900 --manifest /app/cloakpipe.manifest.yaml
+  --upstream-url $CLOAKPIPE_UPSTREAM_URL ...` from `CLOAKPIPE_*`
+  variables, and refuses to start without an upstream, a mounted manifest,
+  or (on a non-loopback address) `CLOAKPIPE_LISTEN_TOKEN_FILE`. The
+  ledger, gate key and operations store are on the `/data` volume
+  (`CLOAKPIPE_HOME=/data`). The PII proxy is `docker run IMAGE start`; the
+  root `docker-compose.yml` now runs it that way.
 
 ## [0.12.0] - 2026-10-27
 
