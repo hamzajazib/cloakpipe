@@ -14,6 +14,8 @@ may contain breaking changes; these are marked **Breaking**.
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
   publishes an existing tag to crates.io without rebuilding the image.
+  Re-runs skip crate versions already on crates.io, and crates.io's
+  new-crate rate limit (HTTP 429) is waited out and retried.
 
 ## [0.12.0] - 2026-10-27
 

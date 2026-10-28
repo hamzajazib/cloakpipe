@@ -45,7 +45,7 @@ fn every_release_is_published_to_crates_io() {
         "the token comes from the repo secret, never the workflow file"
     );
     let run = run_steps(crates);
-    assert!(run.contains("cargo publish --workspace"), "publishes every publishable crate");
+    assert!(run.contains("scripts/publish-crates.sh"), "publishes every publishable crate");
     assert!(run.contains("CARGO_REGISTRY_TOKEN secret is not set"), "fails with a clear message without the secret");
     assert!(run.contains("Cargo.toml"), "checks the tag against the workspace version");
 }
