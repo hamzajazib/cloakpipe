@@ -453,7 +453,7 @@ The ledger never holds arguments, results or raw fingerprints.
 
 ## Several servers and tool pinning
 
-Unreleased (next release).
+Since v0.13.0.
 
 ### One gate in front of several servers
 

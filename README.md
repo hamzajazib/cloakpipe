@@ -42,11 +42,12 @@ makes the model email the customer list to `attacker@evil.example` and call
 an `export_customers` tool it was never given. The gate refuses both, lets
 the legitimate email through, and holds a 350 refund for approval.
 
-Build the binary (Rust stable; the gate is not on crates.io yet):
+Install the binary from crates.io (Rust stable), and clone the repository
+for the example:
 
 ```bash
-git clone https://github.com/rohansx/cloakpipe && cd cloakpipe
-cargo install --path crates/cloakpipe-cli --locked     # installs `cloakpipe`
+cargo install --locked cloakpipe-cli@0.13.0     # installs `cloakpipe`
+git clone --branch v0.13.0 https://github.com/rohansx/cloakpipe && cd cloakpipe
 ```
 
 Run the example in [`examples/support-agent`](examples/support-agent). The
@@ -205,7 +206,7 @@ proxy (`cloakpipe start`); see [Other commands](#other-commands).
 
 Details: [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md).
 
-### MCP over HTTP (unreleased, next release v0.13.0)
+### MCP over HTTP (v0.13.0)
 
 Either side of the gate can speak MCP's Streamable HTTP transport (spec
 rev 2025-06-18) instead of stdio. Every `tools/call` gets the same
@@ -265,7 +266,7 @@ and the ledger until reconciled. `--listen` and `--upstream-url` combine.
 (below) take stdio servers, also behind `--listen`. HTTP servers behind
 `--server` are on the roadmap.
 
-### Several servers and pinned tools (unreleased, next release v0.13.0)
+### Several servers and pinned tools (v0.13.0)
 
 One gate can front several MCP servers. Give each one as
 `--server NAME=COMMAND`; `--upstream` is the server named `default`. The
@@ -302,7 +303,7 @@ Details:
 
 ## Alert
 
-Unreleased (next release v0.13.0). Each decision that needs attention
+Since v0.13.0. Each decision that needs attention
 raises a gate event: `decision.deny`, `approval.requested`,
 `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
 `side_effect.unknown`, `tool.drift` or `anchor.failed`. An event carries the tool, the
@@ -467,26 +468,25 @@ change before 1.0)
 - [x] Opt-in PII transform for tool arguments; regex PII HTTP proxy for
   OpenAI- and Anthropic-compatible APIs
 
-**Unreleased (next release v0.13.0)**, on `main` and not yet in a tagged
-release:
+**v0.13.0** (28 October 2026):
 
 - [x] Events: typed gate events with deterministic fingerprints, delivered
   as HMAC-signed webhooks (generic, Slack, Discord), OpenTelemetry spans per
   decision and a JSONL log ([Alert](#alert), [docs/EVENTS.md](docs/EVENTS.md))
 - [x] MCP over HTTP: `mcp-proxy --listen` serves agents over Streamable HTTP
   and `--upstream-url` fronts an HTTP MCP server
-  ([MCP over HTTP](#mcp-over-http-unreleased-next-release-v0130))
+  ([MCP over HTTP](#mcp-over-http-v0130))
 - [x] One gate in front of several stdio MCP servers (`--server
   NAME=COMMAND`, merged `tools/list`, per-tool routing), `tools/list`
   pinning (`cloakpipe tools pin|diff`, `--tools-lock`) and drift detection
   (`tool_drift`, `tool.drift` events)
-  ([Several servers](#several-servers-and-pinned-tools-unreleased-next-release-v0130))
+  ([Several servers](#several-servers-and-pinned-tools-v0130))
 - [x] The Docker image runs the gate over HTTP by default
-  ([Docker](#docker-unreleased-next-release-v0130))
+  ([Docker](#docker-v0130))
 
 **Next**
 
-- [ ] Published crates and tagged binaries, and a one-command install for
+- [ ] Prebuilt binaries, and a one-command install for
   Claude Code, Cursor and Codex
 - [ ] A separate secret and format for each webhook
 - [ ] SSE response streams and a server-to-client `GET /mcp` stream for
@@ -522,9 +522,10 @@ release:
 
 ## Install and build options
 
-From a checkout, `cargo install --path crates/cloakpipe-cli --locked`
-installs `cloakpipe`, and `cargo install --path crates/cloakpipe-verify
---locked` installs the standalone verifier.
+`cargo install --locked cloakpipe-cli@0.13.0` installs `cloakpipe` from
+crates.io, and `cargo install --locked cloakpipe-verify@0.13.0` the
+standalone verifier. From a checkout, use `--path crates/cloakpipe-cli`
+(or `crates/cloakpipe-verify`) instead.
 
 The default binary is the lean gate: `mcp-proxy` and its evidence tooling,
 plus regex PII detection. Everything else is a cargo feature, off by
@@ -541,7 +542,7 @@ default:
 cargo install --path crates/cloakpipe-cli --locked --features ner
 ```
 
-### Docker (unreleased, next release v0.13.0)
+### Docker (v0.13.0)
 
 The image runs the gate over HTTP by default. Its entrypoint
 ([docker/gate-entrypoint.sh](docker/gate-entrypoint.sh)) builds the
