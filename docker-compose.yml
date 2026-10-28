@@ -6,11 +6,15 @@
 #
 # The image bundles docker/cloakpipe.docker.toml (binds 0.0.0.0:8900, NER off so
 # no model download). Point your OpenAI SDK at http://localhost:8900/v1.
+#
+# The image's default command is the MCP tool-call gate; this file runs the
+# PII proxy (`start`). For the gate, see docker/compose.example.yaml.
 
 services:
   cloakpipe:
     build: .
     image: cloakpipe:latest
+    command: ["start"]
     ports:
       - "8900:8900"
     volumes:
