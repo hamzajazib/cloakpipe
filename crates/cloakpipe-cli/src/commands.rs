@@ -448,6 +448,20 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Err(code) => std::process::exit(code),
     };
     let pii = args.pii();
+    // The upstream servers and the tools lock, checked before anything runs.
+    let upstreams = match crate::tools::upstreams(args.upstream.as_deref(), &args.servers) {
+        Ok(u) => u,
+        Err(code) => std::process::exit(code),
+    };
+    let tools_lock = match &args.tools_lock {
+        Some(path) => match crate::tools::load_lock("--tools-lock", path) {
+            Ok(lock) => Some(lock),
+            Err(code) => std::process::exit(code),
+        },
+        None => None,
+    };
+    // Several servers, or a lock: the gate is the client of each server.
+    let routed = !args.servers.is_empty() || tools_lock.is_some();
     // The decision ledger and its key, before anything runs: a gate that
     // cannot record does not start.
     // Anchoring flags are checked (and their trust inputs read) before
@@ -480,11 +494,6 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     } else {
         args.ledger.ledger_db.clone().map(|p| p.to_string_lossy().into_owned()).or_else(|| std::env::var("CLOAKPIPE_LEDGER_DB").ok())
     };
-    let upstream = args.upstream;
-
-    let parts = shell_words::split(&upstream)
-        .map_err(|e| anyhow::anyhow!("failed to parse --upstream command ({upstream:?}): {e}"))?;
-    anyhow::ensure!(!parts.is_empty(), "--upstream command is empty");
 
     // The vault and detector exist only for the opt-in PII transform.
     let pii = if pii {
@@ -519,19 +528,29 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         );
     }
 
-    tracing::info!("CloakPipe MCP interceptor → upstream {parts:?}");
+    for u in &upstreams {
+        let cloakpipe_mcp::UpstreamTransport::Stdio { command } = &u.transport;
+        tracing::info!("CloakPipe MCP interceptor → upstream {} {command:?}", u.name);
+    }
+    if let Some(lock) = &tools_lock {
+        tracing::info!(tools_lock = %lock.digest(), "upstream tools pinned ({} tools)", lock.tool_count());
+    }
     tokio::task::spawn_blocking(move || {
-        let result = cloakpipe_mcp::run_proxy(
-            parts,
-            cloakpipe_mcp::ProxyContext {
-                pii,
-                ledger_db,
-                release,
-                gate,
-                decisions,
-                events: Vec::new(),
-            },
-        );
+        let ctx = cloakpipe_mcp::ProxyContext {
+            pii,
+            ledger_db,
+            release,
+            gate,
+            decisions,
+            events: Vec::new(),
+        };
+        let result = if routed {
+            cloakpipe_mcp::run_servers(upstreams, ctx, tools_lock)
+        } else {
+            let mut upstreams = upstreams;
+            let cloakpipe_mcp::UpstreamTransport::Stdio { command } = upstreams.remove(0).transport;
+            cloakpipe_mcp::run_proxy(command, ctx)
+        };
         if let Some(l) = anchor_loop {
             l.finish();
         }

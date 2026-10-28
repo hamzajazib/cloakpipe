@@ -39,8 +39,23 @@ use std::path::{Path, PathBuf};
 pub struct McpProxyArgs {
     /// Upstream MCP server command + args, e.g.
     /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
-    #[arg(long, required = true)]
-    pub upstream: String,
+    /// (the server named `default`)
+    #[arg(long, required_unless_present = "servers")]
+    pub upstream: Option<String>,
+    /// Another upstream MCP server, as NAME=COMMAND (repeatable): the gate
+    /// starts each, merges their tools/list and routes each tools/call to the
+    /// server that serves the tool. A tool name two servers share refuses to
+    /// start unless the manifest declares it per server as <server>__<tool>.
+    /// Requests other than tools go to the server named `default`
+    /// (--upstream), or the only one; else they are refused.
+    #[arg(long = "server", value_name = "NAME=COMMAND")]
+    pub servers: Vec<String>,
+    /// Tools lock (from `cloakpipe tools pin`): a tool whose definition does
+    /// not match its pin, or that has none, is hidden from tools/list and
+    /// refused (tool_drift). Without it, a tool whose definition changes
+    /// during the session is.
+    #[arg(long = "tools-lock")]
+    pub tools_lock: Option<PathBuf>,
     /// Manifest the agent runs under (cloakpipe.manifest.yaml; a legacy
     /// Agent Release is deprecated). Enables the tool gate: tools/call must
     /// name a tool the manifest declares, with arguments it allows.
