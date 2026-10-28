@@ -12,6 +12,10 @@
 //! release, the policy digest, the decision and mode, the operation id and
 //! fingerprints, never an argument value, a tool result or a credential.
 //!
+//! A refusal the gate could not record (`fail_closed`) is still a
+//! `decision.deny`, with no `ledger_seq`. A side-effect event's `reason` is
+//! its own: `already_committed` (replayed) or `operation_unknown`.
+//!
 //! Sinks are called on the decision path: [`EventSink::emit`] must return
 //! at once (queue the event and deliver it elsewhere). A sink never changes
 //! a decision.
@@ -35,6 +39,7 @@ pub enum EventKind {
     ApprovalRequested,
     /// A call came with an approval receipt that does not cover it: bound to
     /// other arguments, another release or tool, or not validly signed.
+    /// (An expired receipt is a `decision.deny` with `approval_expired`.)
     #[serde(rename = "approval.mismatch")]
     ApprovalMismatch,
     /// A forwarded side-effecting call has no settled outcome: an operator

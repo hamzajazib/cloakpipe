@@ -48,7 +48,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::events::EventSink;
+use crate::events::{EventKind, EventSink, GateEvent};
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
@@ -223,6 +223,7 @@ pub struct Interceptor {
     tenant: uuid::Uuid,
     agent: uuid::Uuid,
     release: Option<[u8; 32]>,
+    events: Vec<Arc<dyn EventSink>>,
 }
 
 impl Interceptor {
@@ -253,8 +254,10 @@ impl Interceptor {
                     tool: row.as_ref().map(|r| r.tool.clone()).unwrap_or_default(),
                     fingerprint: row.as_ref().map(|r| r.call_digest).unwrap_or_default(),
                 };
-                record_outcome(&decisions, base, &in_flight, Outcome::Unknown)
+                let draft = base.outcome(&in_flight, Outcome::Unknown);
+                let entry = record_decision(&decisions, draft.clone(), Some(&in_flight.fingerprint))
                     .map_err(|e| anyhow::anyhow!("the decision ledger cannot be written ({e}); refusing to start"))?;
+                emit(&ctx.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
             }
         }
 
@@ -270,6 +273,7 @@ impl Interceptor {
             tenant,
             agent,
             release: ctx.release,
+            events: ctx.events,
         })
     }
 
@@ -297,10 +301,11 @@ impl Interceptor {
         if let (Some(gate), Some(base)) = (gate, &self.base) {
             if let Err((reason, code)) = screen(line) {
                 let draft = DecisionDraft { decision: Decision::Deny, reason: reason.to_string(), ..base.call(None) };
-                let reason = match record_decision(decisions, draft, None) {
-                    Ok(()) => reason,
-                    Err(_) => FAIL_CLOSED,
+                let (reason, entry) = match record_decision(decisions, draft.clone(), None) {
+                    Ok(entry) => (reason, entry),
+                    Err(_) => (FAIL_CLOSED, None),
                 };
+                emit(&self.events, base, EventKind::DecisionDeny, reason, &draft, entry.as_ref());
                 let refusal = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": Value::Null,
@@ -326,10 +331,11 @@ impl Interceptor {
                     if in_use {
                         let code = Denial::RequestIdInUse.code();
                         let draft = DecisionDraft { decision: Decision::Deny, reason: code.clone(), ..base.call(None) };
-                        let code = match record_decision(decisions, draft, None) {
-                            Ok(()) => code,
-                            Err(_) => FAIL_CLOSED.to_string(),
+                        let (code, entry) = match record_decision(decisions, draft.clone(), None) {
+                            Ok(entry) => (code, entry),
+                            Err(_) => (FAIL_CLOSED.to_string(), None),
                         };
+                        emit(&self.events, base, EventKind::DecisionDeny, &code, &draft, entry.as_ref());
                         let refusal = serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": msg.get("id"),
@@ -440,7 +446,27 @@ impl Interceptor {
                         } else {
                             draft.forwarded = !enforced;
                         }
-                        if record_decision(decisions, draft, raw_fingerprint.as_ref()).is_err() {
+                        let recorded = record_decision(decisions, draft.clone(), raw_fingerprint.as_ref());
+                        // What deserves an event: anything but a plain allow.
+                        let kind = match (&refusal, &replay, &recorded) {
+                            (_, _, Err(_)) => Some(EventKind::DecisionDeny),
+                            (_, Some(_), _) => Some(EventKind::SideEffectReplayed),
+                            (Some(_), _, _) if !enforced => Some(EventKind::ShadowFinding),
+                            (Some((Denial::ApprovalRequired, _)), _, _) => Some(EventKind::ApprovalRequested),
+                            (Some((Denial::ApprovalInvalid, _)), _, _) => Some(EventKind::ApprovalMismatch),
+                            (Some(_), _, _) => Some(EventKind::DecisionDeny),
+                            (None, None, Ok(_)) => None,
+                        };
+                        if let Some(kind) = kind {
+                            let reason = match (&recorded, kind) {
+                                (Err(_), _) => FAIL_CLOSED,
+                                (Ok(_), EventKind::SideEffectReplayed) => REPLAYED,
+                                (Ok(_), _) => draft.reason.as_str(),
+                            };
+                            let entry = recorded.as_ref().ok().and_then(Option::as_ref);
+                            emit(&self.events, base, kind, reason, &draft, entry);
+                        }
+                        if recorded.is_err() {
                             // No record, no call: undo the operation's start
                             // (it was never sent) and refuse.
                             if let Some(id) = counted.take() {
@@ -611,9 +637,12 @@ impl Interceptor {
                 }
                 Ok(None) => {
                     if let Some(base) = &self.base {
-                        if let Err(e) = record_outcome(&self.decisions, base, &in_flight, Outcome::Unknown) {
+                        let draft = base.outcome(&in_flight, Outcome::Unknown);
+                        let entry = record_decision(&self.decisions, draft.clone(), Some(&in_flight.fingerprint)).unwrap_or_else(|e| {
                             tracing::warn!("decision ledger: unknown outcome of {operation_id} not recorded: {e}");
-                        }
+                            None
+                        });
+                        emit(&self.events, base, EventKind::SideEffectUnknown, UNKNOWN, &draft, entry.as_ref());
                     }
                     if self.pii.is_some() {
                         let meta = operation_meta(OperationState::Unknown, &operation_id);
@@ -995,6 +1024,8 @@ const FAIL_CLOSED: &str = "fail_closed";
 #[derive(Clone)]
 struct EntryBase {
     release: String,
+    /// The release name (events carry it next to the digest).
+    release_name: String,
     /// The digest of the manifest's Cedar policy file, when it has one.
     policy_digest: Option<String>,
     mode: Mode,
@@ -1009,6 +1040,7 @@ impl EntryBase {
         };
         Self {
             release: gate.release().to_string(),
+            release_name: gate.release_name().to_string(),
             policy_digest: gate.policy_digest(),
             mode,
             task_id: gate.task_id().map(str::to_string),
@@ -1026,13 +1058,55 @@ impl EntryBase {
             ..DecisionDraft::call()
         }
     }
+
+    /// The outcome entry of a forwarded side-effecting call.
+    fn outcome(&self, op: &InFlight, outcome: Outcome) -> DecisionDraft {
+        DecisionDraft {
+            release: Some(self.release.clone()),
+            tool: Some(op.tool.clone()).filter(|t| !t.is_empty()),
+            policy_digest: self.policy_digest.clone(),
+            mode: Some(self.mode),
+            task_id: self.task_id.clone(),
+            operation_id: Some(op.operation_id.clone()),
+            outcome: Some(outcome),
+            forwarded: true,
+            ..DecisionDraft::outcome()
+        }
+    }
 }
 
-/// Append a decision entry. `Ok` without a decision log (`--no-ledger`).
-fn record_decision(decisions: &SharedDecisions, draft: DecisionDraft, raw_fingerprint: Option<&[u8; 32]>) -> Result<(), String> {
-    let Some(log) = decisions else { return Ok(()) };
+/// The event reason of a retry answered from the operations store.
+const REPLAYED: &str = "already_committed";
+/// The event reason of a side effect whose outcome is unknown.
+const UNKNOWN: &str = "operation_unknown";
+
+/// Hand an event to every sink: `draft` is the decision as recorded (as
+/// `entry`, when it was written), `reason` the event's reason code.
+fn emit(sinks: &[Arc<dyn EventSink>], base: &EntryBase, kind: EventKind, reason: &str, draft: &DecisionDraft, entry: Option<&DecisionEntry>) {
+    if sinks.is_empty() {
+        return;
+    }
+    let mut event = GateEvent::new(kind, reason, draft.tool.as_deref(), draft.path.as_deref(), base.policy_digest.as_deref());
+    event.release = Some(base.release_name.clone());
+    event.release_digest = Some(base.release.clone());
+    event.decision = Some(draft.decision);
+    event.mode = draft.mode;
+    event.operation_id = draft.operation_id.clone();
+    if let Some(entry) = entry {
+        event.ts = entry.ts.clone();
+        event.ledger_seq = Some(entry.seq);
+        event.entry_hash = Some(entry.entry_hash.clone());
+    }
+    for sink in sinks {
+        sink.emit(&event);
+    }
+}
+
+/// Append a decision entry. `Ok(None)` without a decision log (`--no-ledger`).
+fn record_decision(decisions: &SharedDecisions, draft: DecisionDraft, raw_fingerprint: Option<&[u8; 32]>) -> Result<Option<DecisionEntry>, String> {
+    let Some(log) = decisions else { return Ok(None) };
     let mut log = log.lock().map_err(|_| "decision ledger lock poisoned".to_string())?;
-    log.append(draft, raw_fingerprint).map(|_| ()).map_err(|e| {
+    log.append(draft, raw_fingerprint).map(Some).map_err(|e| {
         // The reason only, never message content.
         tracing::warn!("decision ledger: entry not recorded: {e:#}");
         format!("{e:#}")
@@ -1041,18 +1115,7 @@ fn record_decision(decisions: &SharedDecisions, draft: DecisionDraft, raw_finger
 
 /// Append the outcome of a forwarded side-effecting call.
 fn record_outcome(decisions: &SharedDecisions, base: &EntryBase, op: &InFlight, outcome: Outcome) -> Result<(), String> {
-    let draft = DecisionDraft {
-        release: Some(base.release.clone()),
-        tool: Some(op.tool.clone()).filter(|t| !t.is_empty()),
-        policy_digest: base.policy_digest.clone(),
-        mode: Some(base.mode),
-        task_id: base.task_id.clone(),
-        operation_id: Some(op.operation_id.clone()),
-        outcome: Some(outcome),
-        forwarded: true,
-        ..DecisionDraft::outcome()
-    };
-    record_decision(decisions, draft, Some(&op.fingerprint))
+    record_decision(decisions, base.outcome(op, outcome), Some(&op.fingerprint)).map(|_| ())
 }
 
 /// The raw fingerprint of a call (as approval receipts and the operations

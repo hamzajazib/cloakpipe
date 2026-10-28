@@ -330,7 +330,12 @@ change before 1.0)
 - [ ] One gate in front of several MCP servers, with `tools/list` pinning
   and drift detection
 - [ ] Events: signed webhooks and OpenTelemetry spans per decision, with
-  stable fingerprints
+  stable fingerprints. In progress (unreleased): the gate already raises
+  typed events (`decision.deny`, `approval.requested`,
+  `approval.mismatch`, `shadow.finding`, `side_effect.replayed`,
+  `side_effect.unknown`) with deterministic fingerprints to in-process
+  sinks (`cloakpipe_mcp::events`, schema `cloakpipe.event/v1`); webhook,
+  OpenTelemetry and log delivery, and their `mcp-proxy` flags, are next
 - [ ] An HTTP/SSE MCP transport (today the gate speaks stdio only)
 
 **Later, not started**

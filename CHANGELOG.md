@@ -11,6 +11,22 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- Gate events (`cloakpipe_mcp::events`, library API): the MCP gate hands
+  each decision worth attention to `ProxyContext::events` sinks after its
+  ledger entry is written: `decision.deny`, `approval.requested`,
+  `approval.mismatch`, `shadow.finding`, `side_effect.replayed` and
+  `side_effect.unknown` (`tool.drift` and `anchor.failed` are reserved).
+  Each event names its ledger entry (`ledger_seq`, `entry_hash`), carries a
+  deterministic fingerprint (`sha256(kind|reason|tool|path|policy_version)`)
+  and never an argument value; `GateEvent::to_json` is the stable
+  `cloakpipe.event/v1` form. No CLI delivery yet (webhooks and OTel next).
+- The MCP interceptor is now a transport-agnostic `Interceptor` (agent and
+  upstream messages in, `Action`s out) with named upstreams (`Upstream`;
+  the single `--upstream` is server `default`). `run_proxy` /
+  `run_proxy_io` are unchanged; decisions are unchanged.
+  **Breaking (library)**: `ProxyContext` has a new `events` field, so a
+  struct literal needs `events: Vec::new()`.
+
 - Every `v*` tag is now published to crates.io by the release workflow
   (`CARGO_REGISTRY_TOKEN` repo secret). A manual run with a `tag` input
   publishes an existing tag to crates.io without rebuilding the image.
