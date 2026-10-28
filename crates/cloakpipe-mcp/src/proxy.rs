@@ -43,6 +43,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use crate::events::EventSink;
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
@@ -72,6 +73,9 @@ pub struct ProxyContext {
     /// Where the gate's decisions are recorded, signed. `None`: they are
     /// not recorded (`mcp-proxy --no-ledger`).
     pub decisions: Option<DecisionLog>,
+    /// Where gate events go ([`crate::events`]): each sink gets every
+    /// event, after its ledger entry is written. Empty: none are emitted.
+    pub events: Vec<Arc<dyn EventSink>>,
 }
 
 /// The gate's decision ledger: the ledger database the entries are

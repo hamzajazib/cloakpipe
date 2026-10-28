@@ -529,6 +529,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
                 release,
                 gate,
                 decisions,
+                events: Vec::new(),
             },
         );
         if let Some(l) = anchor_loop {

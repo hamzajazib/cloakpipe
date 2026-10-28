@@ -7,9 +7,11 @@
 //! sits between an agent and an upstream MCP server, gating tool calls and,
 //! with the opt-in PII transform, masking PII in them and rehydrating results.
 
+pub mod events;
 pub mod gate;
 pub mod operations;
 pub mod proxy;
+pub use events::{EventKind, EventSink, GateEvent, NoopSink, EVENT_SCHEMA};
 pub use gate::{ApprovalRequest, ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
 pub use cloakpipe_policy::{Counters, PolicyEngine};
 pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, DecisionLog, PiiTransform, ProxyContext};
