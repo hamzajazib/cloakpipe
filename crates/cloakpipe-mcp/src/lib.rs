@@ -11,12 +11,15 @@ pub mod events;
 pub mod gate;
 pub mod operations;
 pub mod proxy;
-pub use events::{EventKind, EventSink, GateEvent, NoopSink, EVENT_SCHEMA};
+pub use events::{
+    DecisionRecord, EventKind, EventSink, GateEvent, JsonlSink, NoopSink, OtelConfig, OtelSink, WebhookConfig, WebhookFormat, WebhookSink,
+    EVENT_SCHEMA,
+};
 pub use gate::{ApprovalRequest, ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
 pub use cloakpipe_policy::{Counters, PolicyEngine};
 pub use proxy::{
-    reconcile_operation, run_proxy, run_proxy_io, run_upstream_io, stable_ids, Action, DecisionLog, Interceptor, PiiTransform, ProxyContext,
-    Upstream, UpstreamTransport, DEFAULT_SERVER,
+    flush_events, reconcile_operation, run_proxy, run_proxy_io, run_upstream_io, stable_ids, Action, DecisionLog, Interceptor, PiiTransform,
+    ProxyContext, Upstream, UpstreamTransport, DEFAULT_SERVER, EVENT_FLUSH,
 };
 
 use cloakpipe_core::{

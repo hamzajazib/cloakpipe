@@ -28,8 +28,11 @@ anyhow.workspace = true
 tracing.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 sha2 = "0.10"
+hmac = "0.12"
 rusqlite = { workspace = true }
 rand = { workspace = true }
+# Event delivery (webhooks, OTLP/HTTP), on the sinks' own threads.
+reqwest = { workspace = true, features = ["blocking"] }
 
 [features]
 # Legacy (source only, off by default): the gate also refuses every call
@@ -43,5 +46,6 @@ tempfile = "3"
 ed25519-dalek = "2"
 sha2 = "0.10"
 hex = "0.4"
+hmac = "0.12"
 chrono = { workspace = true }
 cloakpipe-verify = { path = "../cloakpipe-verify" }
