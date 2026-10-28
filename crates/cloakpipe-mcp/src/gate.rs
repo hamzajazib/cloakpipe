@@ -148,6 +148,14 @@ pub enum Denial {
     /// A gate stage could not decide (a Cedar evaluation error, the counter
     /// store failing, a policy not loaded): the call is refused.
     FailClosed,
+    /// The tool's definition on `server` no longer matches its pin in the
+    /// tools lock (or has none), or changed during the session: hidden from
+    /// the agent and refused until the gate restarts. Refused in shadow mode
+    /// too.
+    ToolDrift { server: String },
+    /// No upstream server serves this tool (several servers): refused in
+    /// shadow mode too, as there is nowhere to send it.
+    ToolUnavailable,
 }
 
 impl Denial {
@@ -176,7 +184,24 @@ impl Denial {
             Denial::RequestIdInUse => "request_id_in_use".into(),
             Denial::PolicyDenied { .. } => "policy_denied".into(),
             Denial::FailClosed => "fail_closed".into(),
+            Denial::ToolDrift { .. } => "tool_drift".into(),
+            Denial::ToolUnavailable => "tool_unavailable".into(),
         }
+    }
+
+    /// The upstream server a `tool_drift` is about.
+    pub fn server(&self) -> Option<&str> {
+        match self {
+            Denial::ToolDrift { server } => Some(server),
+            _ => None,
+        }
+    }
+
+    /// Whether the refusal is about the upstream servers' tools rather than
+    /// the release (`tool_drift`, `tool_unavailable`): it holds in shadow
+    /// mode too.
+    pub fn is_upstream(&self) -> bool {
+        matches!(self, Denial::ToolDrift { .. } | Denial::ToolUnavailable)
     }
 
     /// The operation an operations-store denial is about.
