@@ -517,6 +517,8 @@ pub struct ListenConfig {
 
 /// An agent request waiting for its reply.
 struct Waiter {
+    /// The session that sent it.
+    session: String,
     /// The id the agent gave it.
     original: Value,
     reply: tokio::sync::oneshot::Sender<String>,
@@ -576,6 +578,12 @@ impl Dispatch {
                 None => tracing::debug!("upstream message answers no waiting request; dropped"),
             }
         }
+    }
+
+    /// The id a session's request in flight was forwarded under.
+    fn forwarded_as(&self, session: &str, original: &Value) -> Option<u64> {
+        let waiters = self.waiters.lock().ok()?;
+        waiters.iter().find(|(_, w)| w.session == session && &w.original == original).map(|(n, _)| *n)
     }
 
     /// No reply will come any more: every waiting request fails closed.
@@ -774,8 +782,10 @@ impl Hub {
             let given = headers
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(str::trim);
+                .and_then(|v| v.split_once(' '))
+                // The scheme is case-insensitive (RFC 9110 11.1).
+                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                .map(|(_, token)| token.trim());
             if !given.is_some_and(|g| constant_time_eq(g.as_bytes(), token.as_bytes())) {
                 let mut resp = rpc_error(StatusCode::UNAUTHORIZED, "Unauthorized: a bearer token is required");
                 resp.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
@@ -852,14 +862,33 @@ async fn post_mcp(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) 
     if let Err(resp) = hub.admit(&headers) {
         return *resp;
     }
-    let text = String::from_utf8_lossy(&body).into_owned();
-    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    let mut parsed: Option<Value> = serde_json::from_str(&text).ok();
     let method = parsed.as_ref().and_then(|v| v.get("method")).and_then(Value::as_str).map(str::to_string);
     let initialize = method.as_deref() == Some("initialize");
-    if !initialize {
-        if let Err(resp) = hub.session(&headers) {
-            return *resp;
+    let session = if initialize {
+        None
+    } else {
+        match hub.session(&headers) {
+            Ok(session) => Some(session),
+            Err(resp) => return *resp,
         }
+    };
+    // A cancellation names the agent's id for its request: the upstream
+    // knows it by the gate's. One naming no request of this session in
+    // flight goes nowhere, so a session can never cancel another's.
+    if method.as_deref() == Some("notifications/cancelled") {
+        let Some(msg) = parsed.as_mut() else { return StatusCode::ACCEPTED.into_response() };
+        let forwarded = match (session.as_deref(), msg.pointer("/params/requestId")) {
+            (Some(session), Some(original)) => hub.dispatch.forwarded_as(session, original),
+            _ => None,
+        };
+        let Some(n) = forwarded else {
+            tracing::debug!("a cancellation names no request of this session in flight; dropped");
+            return StatusCode::ACCEPTED.into_response();
+        };
+        msg["params"]["requestId"] = Value::from(n);
+        text = msg.to_string();
     }
     // A request is forwarded under an id unique to this gate, so its reply
     // finds this POST whichever session sent it. Only a message that parsed
@@ -871,7 +900,7 @@ async fn post_mcp(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) 
             msg["id"] = Value::from(n);
             let (tx, rx) = tokio::sync::oneshot::channel();
             if let Ok(mut w) = hub.dispatch.waiters.lock() {
-                w.insert(n, Waiter { original: original.clone(), reply: tx });
+                w.insert(n, Waiter { session: session.clone().unwrap_or_default(), original: original.clone(), reply: tx });
             }
             (msg.to_string(), Some((n, original, rx)))
         }
@@ -924,7 +953,7 @@ async fn post_mcp(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) 
             .to_string(),
         },
     };
-    let session = if initialize && serde_json::from_str::<Value>(&reply).is_ok_and(|r| r.get("result").is_some()) {
+    let issued = if initialize && serde_json::from_str::<Value>(&reply).is_ok_and(|r| r.get("result").is_some()) {
         let session = uuid::Uuid::new_v4().simple().to_string();
         if let Ok(mut s) = hub.sessions.lock() {
             s.insert(session.clone());
@@ -933,7 +962,7 @@ async fn post_mcp(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) 
     } else {
         None
     };
-    json_response(reply, session.as_deref())
+    json_response(reply, issued.as_deref())
 }
 
 #[cfg(test)]

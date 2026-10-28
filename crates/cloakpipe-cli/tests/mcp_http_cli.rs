@@ -101,12 +101,16 @@ struct Listener {
 impl Listener {
     /// Start the HTTP gate in front of the example's mock upstream.
     fn start(dir: &Path, extra: &[String]) -> Self {
+        Self::start_with(dir, &format!("python3 {}", example("mock_upstream.py")), extra)
+    }
+
+    /// Start the HTTP gate in front of the stdio server `upstream`.
+    fn start_with(dir: &Path, upstream: &str, extra: &[String]) -> Self {
         let log = dir.join("upstream.jsonl");
         let _ = std::fs::remove_file(&log);
-        let upstream = format!("python3 {}", example("mock_upstream.py"));
         let mut child = bin()
             .current_dir(dir)
-            .args(["mcp-proxy", "--listen", "127.0.0.1:0", "--upstream", &upstream])
+            .args(["mcp-proxy", "--listen", "127.0.0.1:0", "--upstream", upstream])
             .args(extra)
             .env("MOCK_UPSTREAM_LOG", &log)
             .env("CLOAKPIPE_HOME", dir.join("home"))
@@ -351,6 +355,133 @@ fn the_ledger_of_http_calls_verifies() {
     let (code, out, err) = run(&["verify", "p.tar"]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("denials: 1,"), "the refusal is in the verified pack: {out}");
+}
+
+/// A stdio MCP server that answers each tools/call after `delay_ms`, unless
+/// the call was cancelled first (`notifications/cancelled`), as the spec
+/// lets a server do; it logs every line it receives to `slow.log`.
+fn slow_upstream(dir: &Path, delay_ms: u64) -> String {
+    let script = dir.join("slow.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"import json, sys, threading, time
+log = open({log:?}, "a")
+lock = threading.Lock()
+cancelled = set()
+def send(m):
+    with lock:
+        sys.stdout.write(json.dumps(m) + "\n")
+        sys.stdout.flush()
+def later(i, name):
+    time.sleep({delay})
+    if json.dumps(i) not in cancelled:
+        send({{"jsonrpc": "2.0", "id": i, "result": {{"content": [{{"type": "text", "text": name + ": done"}}]}}}})
+for line in sys.stdin:
+    log.write(line)
+    log.flush()
+    m = json.loads(line)
+    if m.get("method") == "notifications/cancelled":
+        cancelled.add(json.dumps(m["params"]["requestId"]))
+    elif "id" not in m:
+        pass
+    elif m["method"] == "initialize":
+        send({{"jsonrpc": "2.0", "id": m["id"], "result": {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "mock-support-tools", "version": "0"}}}}}})
+    elif m["method"] == "tools/call":
+        threading.Thread(target=later, args=(m["id"], m["params"]["name"])).start()
+    else:
+        send({{"jsonrpc": "2.0", "id": m["id"], "result": {{}}}})
+"#,
+            log = dir.join("slow.log").to_string_lossy(),
+            delay = delay_ms as f64 / 1000.0,
+        ),
+    )
+    .unwrap();
+    format!("python3 {}", script.display())
+}
+
+/// The messages the slow upstream received.
+fn slow_log(dir: &Path) -> Vec<Value> {
+    std::fs::read_to_string(dir.join("slow.log")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+/// Wait until the slow upstream has received a tools/call for `tool`: the
+/// id the gate forwarded it under.
+fn forwarded_id(dir: &Path, tool: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(m) = slow_log(dir).into_iter().find(|m| m["method"] == "tools/call" && m["params"]["name"] == tool) {
+            return m["id"].clone();
+        }
+        assert!(Instant::now() < deadline, "the upstream never received the {tool} call");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_cancellation_reaches_only_the_sessions_own_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let l = Arc::new(Listener::start_with(d, &slow_upstream(d, 1500), &example_gate(d)));
+    let attacker = session(&l, &[]);
+    let victim = session(&l, &[]);
+
+    // The victim's call is in flight under an id the gate chose.
+    let pending = {
+        let (l, victim) = (l.clone(), victim.clone());
+        std::thread::spawn(move || post(&l, Some(&victim), &[], &tool_call(json!("v-1"), "read_ticket", json!({"ticket_id": "T-1042"}))))
+    };
+    let upstream_id = forwarded_id(d, "read_ticket");
+    // Another session names that id (and the victim's own) in a cancel.
+    for request in [upstream_id.clone(), json!("v-1")] {
+        let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request, "reason": "x"}});
+        assert_eq!(post(&l, Some(&attacker), &[], &cancel).0, 202);
+    }
+    let (status, _, answer) = pending.join().unwrap();
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["id"], "v-1", "{answer}");
+    assert_eq!(answer["result"]["content"][0]["text"], "read_ticket: done", "another session cannot cancel it: {answer}");
+
+    // A session cancelling its own request cancels it under the gate's id.
+    {
+        let (l, victim) = (l.clone(), victim.clone());
+        std::thread::spawn(move || {
+            let _ = post(&l, Some(&victim), &[], &tool_call(json!(7), "read_ticket", json!({"ticket_id": "T-1042"})));
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let own = loop {
+        let calls: Vec<Value> = slow_log(d).into_iter().filter(|m| m["method"] == "tools/call").collect();
+        if calls.len() == 2 {
+            break calls[1]["id"].clone();
+        }
+        assert!(Instant::now() < deadline, "the second call never arrived");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7}});
+    assert_eq!(post(&l, Some(&victim), &[], &cancel).0, 202);
+    std::thread::sleep(Duration::from_millis(300));
+    let cancels: Vec<Value> =
+        slow_log(d).into_iter().filter(|m| m["method"] == "notifications/cancelled").map(|m| m["params"]["requestId"].clone()).collect();
+    assert_eq!(cancels, [own], "only the session's own cancel reached the upstream, under the gate's id");
+}
+
+#[test]
+fn the_bearer_scheme_is_case_insensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "s3cret-token\n").unwrap();
+    let mut flags = example_gate(dir.path());
+    flags.extend(["--listen-token-file".to_string(), token.to_string_lossy().into_owned()]);
+    let l = Listener::start(dir.path(), &flags);
+    // RFC 9110 11.1: the auth scheme is case-insensitive.
+    for scheme in ["bearer", "BEARER"] {
+        let auth = format!("{scheme} s3cret-token");
+        let (status, _, body) = post(&l, None, &[("Authorization", &auth)], &initialize(json!(0)));
+        assert_eq!(status, 200, "{scheme}: {body}");
+    }
+    let (status, _, _) = post(&l, None, &[("Authorization", "Basic s3cret-token")], &initialize(json!(0)));
+    assert_eq!(status, 401, "another scheme is not a bearer token");
 }
 
 // ── the upstream side: `mcp-proxy --upstream-url` ───────────────────────
@@ -640,4 +771,19 @@ fn upstream_and_upstream_url_are_mutually_exclusive() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn an_upstream_header_needs_an_upstream_url() {
+    // Without --upstream-url the header would go nowhere: refuse, rather
+    // than run without the credential the operator meant to send.
+    let dir = tempfile::tempdir().unwrap();
+    let out = bin()
+        .current_dir(dir.path())
+        .args(["mcp-proxy", "--upstream", "cat", "--upstream-header", "Authorization: env:TOOLS_AUTH"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--upstream-url"), "{}", String::from_utf8_lossy(&out.stderr));
 }

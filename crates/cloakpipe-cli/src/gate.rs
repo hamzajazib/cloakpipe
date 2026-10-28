@@ -410,7 +410,14 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// variable fails before anything starts).
 pub(crate) fn upstreams_from_args(a: &McpProxyArgs) -> Res<Vec<cloakpipe_mcp::Upstream>> {
     let name = cloakpipe_mcp::DEFAULT_SERVER;
-    let Some(url) = &a.upstream_url else { return crate::tools::upstreams(a.upstream.as_deref(), &a.servers) };
+    let Some(url) = &a.upstream_url else {
+        // Checked here too (clap's `requires` let it through): a credential
+        // meant for an HTTP upstream is never silently dropped.
+        if !a.upstream_headers.is_empty() {
+            return Err(usage("--upstream-header needs --upstream-url (the HTTP upstream it is sent to)"));
+        }
+        return crate::tools::upstreams(a.upstream.as_deref(), &a.servers);
+    };
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(usage("--upstream-url must be an http:// or https:// URL"));
     }
