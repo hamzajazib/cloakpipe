@@ -86,6 +86,9 @@ pub struct McpProxyArgs {
     /// Scheduled anchoring of the decision ledger (epochs, RFC 3161, Rekor).
     #[command(flatten)]
     pub anchoring: crate::evidence::AnchoringArgs,
+    /// Where gate events go: a JSONL log, webhooks, OpenTelemetry.
+    #[command(flatten)]
+    pub events: crate::events::EventArgs,
     /// Legacy Agent Release only (deprecated; a v1 manifest declares its
     /// contracts inline). Tool contract (repeatable): argument-level rules
     /// for the tools it covers. Each must be bound by the release (`spec.policies` entry
@@ -158,6 +161,7 @@ impl McpProxyArgs {
             || self.mode.is_some()
             || self.ledger.signing_key.is_some()
             || self.anchoring.any()
+            || self.events.any()
             || !self.tool_contracts.is_empty()
             || self.task_context.is_some()
             || self.approvals.is_some()
