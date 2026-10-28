@@ -234,6 +234,18 @@ pub struct AnchorLoop {
 impl AnchorLoop {
     /// Open the ledger at `path` (a connection of its own) and start.
     pub fn spawn(path: &str, key: GateKey, anchorer: Anchorer, policy: AnchorPolicy) -> Result<Self, StoreError> {
+        Self::spawn_with(path, key, anchorer, policy, |_| {})
+    }
+
+    /// [`Self::spawn`], also handing every [`AnchorEvent`] to `on_event`
+    /// (on the loop's thread; e.g. to raise an `anchor.failed` gate event).
+    pub fn spawn_with(
+        path: &str,
+        key: GateKey,
+        anchorer: Anchorer,
+        policy: AnchorPolicy,
+        on_event: impl Fn(&AnchorEvent) + Send + 'static,
+    ) -> Result<Self, StoreError> {
         let store = LedgerStore::open(path)?;
         let mut sched = AnchorScheduler::new(store, key, anchorer, policy, Instant::now());
         let (stop, stopped) = mpsc::channel::<()>();
@@ -242,6 +254,7 @@ impl AnchorLoop {
                 Ok(events) => {
                     for e in events {
                         eprintln!("cloakpipe: {e}");
+                        on_event(&e);
                     }
                 }
                 Err(e) => eprintln!("cloakpipe: anchor.failed error=ledger: {e}"),

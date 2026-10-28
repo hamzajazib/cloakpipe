@@ -19,6 +19,23 @@
 //! Sinks are called on the decision path: [`EventSink::emit`] must return
 //! at once (queue the event and deliver it elsewhere). A sink never changes
 //! a decision.
+//!
+//! Every tool-call decision, allows included, also reaches
+//! [`EventSink::decision`] as a [`DecisionRecord`] (for tracing; most sinks
+//! ignore it).
+//!
+//! Delivery ([`jsonl`], [`webhook`], [`otel`]): each sink queues on a bounded
+//! queue drained by its own thread, drops (and counts) when the queue is
+//! full, and is flushed, for a bounded time, when the proxy stops.
+
+pub(crate) mod delivery;
+pub mod jsonl;
+pub mod otel;
+pub mod webhook;
+
+pub use jsonl::JsonlSink;
+pub use otel::{OtelConfig, OtelSink};
+pub use webhook::{verify_signature, SignatureError, WebhookConfig, WebhookFormat, WebhookSink};
 
 use cloakpipe_ledger::decision::{Decision, Mode};
 use serde::Serialize;
@@ -170,10 +187,49 @@ pub fn fingerprint(kind: EventKind, reason: &str, tool: Option<&str>, path: Opti
     format!("sha256:{digest}")
 }
 
-/// Where gate events go. [`emit`](Self::emit) runs on the decision path:
-/// it must not block (queue and deliver asynchronously) and must not panic.
+/// One tool-call decision (an allow too), for tracing: what the ledger
+/// entry says, the entry it is, its timing and the event it raised, if any.
+/// Like an event, it holds no argument value or tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRecord {
+    /// When the decision was recorded (RFC 3339, UTC).
+    pub ts: String,
+    /// When the gate got the message and when it had decided (unix ns).
+    pub start_unix_nanos: u64,
+    pub end_unix_nanos: u64,
+    pub tool: Option<String>,
+    pub decision: Decision,
+    /// The reason code: `ok` for an allow.
+    pub reason: String,
+    pub path: Option<String>,
+    pub mode: Option<Mode>,
+    pub release: Option<String>,
+    pub release_digest: Option<String>,
+    pub policy_version: Option<String>,
+    pub operation_id: Option<String>,
+    /// Whether the call went on to the tool (an allow, or shadow mode).
+    pub forwarded: bool,
+    pub ledger_seq: Option<u64>,
+    pub entry_hash: Option<String>,
+    /// The event this decision raised, and its fingerprint.
+    pub event: Option<EventKind>,
+    pub fingerprint: Option<String>,
+}
+
+/// Where gate events go. [`emit`](Self::emit) and [`decision`](Self::decision)
+/// run on the decision path: they must not block (queue and deliver
+/// asynchronously) and must not panic.
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: &GateEvent);
+
+    /// Every tool-call decision, allows included. Default: ignored.
+    fn decision(&self, _record: &DecisionRecord) {}
+
+    /// Deliver what is queued, waiting at most `timeout`; `true` when
+    /// nothing is left. Called when the proxy stops. Default: nothing queued.
+    fn flush(&self, _timeout: std::time::Duration) -> bool {
+        true
+    }
 }
 
 /// A sink that drops every event.

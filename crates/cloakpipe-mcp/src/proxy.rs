@@ -47,8 +47,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::events::{EventKind, EventSink, GateEvent};
+use crate::events::{DecisionRecord, EventKind, EventSink, GateEvent};
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
@@ -301,6 +302,7 @@ impl Interceptor {
     /// (as re-serialized here, or verbatim when it is not JSON and there is
     /// no gate), answer it, or refuse it.
     pub fn on_agent_line(&self, line: &str) -> Vec<Action> {
+        let received = unix_nanos();
         // One agent message at a time: request ids are only registered here,
         // and `coordinate` relies on no other agent message racing it.
         let guard = match self.gate.lock() {
@@ -319,7 +321,8 @@ impl Interceptor {
                     Ok(entry) => (reason, entry),
                     Err(_) => (FAIL_CLOSED, None),
                 };
-                emit(&self.events, base, EventKind::DecisionDeny, reason, &draft, entry.as_ref());
+                let event = emit(&self.events, base, EventKind::DecisionDeny, reason, &draft, entry.as_ref());
+                report(&self.events, base, received, &draft, reason, entry.as_ref(), event.as_ref());
                 let refusal = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": Value::Null,
@@ -349,7 +352,8 @@ impl Interceptor {
                             Ok(entry) => (code, entry),
                             Err(_) => (FAIL_CLOSED.to_string(), None),
                         };
-                        emit(&self.events, base, EventKind::DecisionDeny, &code, &draft, entry.as_ref());
+                        let event = emit(&self.events, base, EventKind::DecisionDeny, &code, &draft, entry.as_ref());
+                        report(&self.events, base, received, &draft, &code, entry.as_ref(), event.as_ref());
                         let refusal = serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": msg.get("id"),
@@ -471,14 +475,23 @@ impl Interceptor {
                             (Some(_), _, _) => Some(EventKind::DecisionDeny),
                             (None, None, Ok(_)) => None,
                         };
-                        if let Some(kind) = kind {
+                        let entry = recorded.as_ref().ok().and_then(Option::as_ref);
+                        let event = kind.and_then(|kind| {
                             let reason = match (&recorded, kind) {
                                 (Err(_), _) => FAIL_CLOSED,
                                 (Ok(_), EventKind::SideEffectReplayed) => REPLAYED,
                                 (Ok(_), _) => draft.reason.as_str(),
                             };
-                            let entry = recorded.as_ref().ok().and_then(Option::as_ref);
-                            emit(&self.events, base, kind, reason, &draft, entry);
+                            emit(&self.events, base, kind, reason, &draft, entry)
+                        });
+                        // Every tools/call decision, allows included (for
+                        // tracing). Unrecorded, it was refused.
+                        match &recorded {
+                            Ok(_) => report(&self.events, base, received, &draft, &draft.reason, entry, event.as_ref()),
+                            Err(_) => {
+                                let refused = DecisionDraft { decision: Decision::Deny, forwarded: false, ..draft.clone() };
+                                report(&self.events, base, received, &refused, FAIL_CLOSED, None, event.as_ref());
+                            }
                         }
                         if recorded.is_err() {
                             // No record, no call: undo the operation's start
@@ -768,6 +781,7 @@ where
         UpstreamTransport::Http { .. } => return crate::http::run_stdio_agent(&upstream, ctx, agent_in, agent_out),
     };
     anyhow::ensure!(!command.is_empty(), "upstream MCP command is empty");
+    let sinks = ctx.events.clone();
     let interceptor = Arc::new(Interceptor::new(ctx)?);
 
     let mut child = Command::new(&command[0])
@@ -841,7 +855,27 @@ where
             let _ = write_line(&agent_out, &notice);
         }
     }
+    flush_events(&sinks, EVENT_FLUSH);
     Ok(())
+}
+
+/// How long a stopping proxy waits for its events to be delivered.
+pub const EVENT_FLUSH: Duration = Duration::from_secs(5);
+
+/// Give every sink until `timeout` (in all) to deliver what it holds; one
+/// that cannot is reported on stderr and left behind.
+pub fn flush_events(sinks: &[Arc<dyn EventSink>], timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut left = 0;
+    for sink in sinks {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if !sink.flush(remaining) {
+            left += 1;
+        }
+    }
+    if left > 0 {
+        eprintln!("warning: cloakpipe: {left} event sink(s) still delivering after {}s; undelivered events are dropped", timeout.as_secs());
+    }
 }
 
 /// Without the PII transform, refuse to run on an operations database that
@@ -1147,10 +1181,18 @@ const REPLAYED: &str = "already_committed";
 const UNKNOWN: &str = "operation_unknown";
 
 /// Hand an event to every sink: `draft` is the decision as recorded (as
-/// `entry`, when it was written), `reason` the event's reason code.
-fn emit(sinks: &[Arc<dyn EventSink>], base: &EntryBase, kind: EventKind, reason: &str, draft: &DecisionDraft, entry: Option<&DecisionEntry>) {
+/// `entry`, when it was written), `reason` the event's reason code. The
+/// event, unless there are no sinks.
+fn emit(
+    sinks: &[Arc<dyn EventSink>],
+    base: &EntryBase,
+    kind: EventKind,
+    reason: &str,
+    draft: &DecisionDraft,
+    entry: Option<&DecisionEntry>,
+) -> Option<GateEvent> {
     if sinks.is_empty() {
-        return;
+        return None;
     }
     let mut event = GateEvent::new(kind, reason, draft.tool.as_deref(), draft.path.as_deref(), base.policy_digest.as_deref());
     event.release = Some(base.release_name.clone());
@@ -1166,6 +1208,49 @@ fn emit(sinks: &[Arc<dyn EventSink>], base: &EntryBase, kind: EventKind, reason:
     for sink in sinks {
         sink.emit(&event);
     }
+    Some(event)
+}
+
+/// Hand a decision on an agent message (started at `started`, unix ns) to
+/// every sink's [`EventSink::decision`], with the event it raised.
+fn report(
+    sinks: &[Arc<dyn EventSink>],
+    base: &EntryBase,
+    started: u64,
+    draft: &DecisionDraft,
+    reason: &str,
+    entry: Option<&DecisionEntry>,
+    event: Option<&GateEvent>,
+) {
+    if sinks.is_empty() {
+        return;
+    }
+    let record = DecisionRecord {
+        ts: entry.map(|e| e.ts.clone()).unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        start_unix_nanos: started,
+        end_unix_nanos: unix_nanos(),
+        tool: draft.tool.clone(),
+        decision: draft.decision,
+        reason: reason.to_string(),
+        path: draft.path.clone(),
+        mode: draft.mode,
+        release: Some(base.release_name.clone()),
+        release_digest: Some(base.release.clone()),
+        policy_version: base.policy_digest.clone(),
+        operation_id: draft.operation_id.clone(),
+        forwarded: draft.forwarded,
+        ledger_seq: entry.map(|e| e.seq),
+        entry_hash: entry.map(|e| e.entry_hash.clone()),
+        event: event.map(|e| e.kind),
+        fingerprint: event.map(|e| e.fingerprint.clone()),
+    };
+    for sink in sinks {
+        sink.decision(&record);
+    }
+}
+
+fn unix_nanos() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
 }
 
 /// Append a decision entry. `Ok(None)` without a decision log (`--no-ledger`).

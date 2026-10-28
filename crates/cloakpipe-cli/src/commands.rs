@@ -447,6 +447,12 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Ok(gate) => gate,
         Err(code) => std::process::exit(code),
     };
+    // Event sinks (--events-log, --webhook, --otel-endpoint): checked and
+    // opened before anything runs; delivery is on their own threads.
+    let sinks = match args.events.sinks() {
+        Ok(sinks) => sinks,
+        Err(code) => std::process::exit(code),
+    };
     let pii = args.pii();
     // The decision ledger and its key, before anything runs: a gate that
     // cannot record does not start.
@@ -465,7 +471,24 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     };
     // Epochs are sealed and anchored on their own thread, off the request
     // path; on exit the tail is sealed and anchored once more.
-    let anchor_loop = match crate::evidence::start_anchoring(&args.ledger, anchoring) {
+    // A failed anchor is an `anchor.failed` event.
+    let on_anchor = {
+        let sinks = sinks.clone();
+        let release = gate.as_ref().map(|g| crate::events::ReleaseInfo {
+            name: g.release_name().to_string(),
+            digest: g.release().to_string(),
+            policy_digest: g.policy_digest(),
+        });
+        move |e: &cloakpipe_ledger::anchoring::AnchorEvent| {
+            if let (cloakpipe_ledger::anchoring::AnchorEvent::Failed { last_seq, kind, .. }, Some(release)) = (e, &release) {
+                let event = crate::events::anchor_failed(release, kind, *last_seq);
+                for sink in &sinks {
+                    sink.emit(&event);
+                }
+            }
+        }
+    };
+    let anchor_loop = match crate::evidence::start_anchoring(&args.ledger, anchoring, on_anchor) {
         Ok(l) => l,
         Err(code) => std::process::exit(code),
     };
@@ -536,7 +559,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         release,
         gate,
         decisions,
-        events: Vec::new(),
+        events: sinks.clone(),
     };
     let result = match listen {
         // The agent over HTTP; stops on Ctrl-C / SIGTERM.
@@ -545,9 +568,18 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
             .await
             .map_err(|e| anyhow::anyhow!("MCP interceptor task panicked: {e}"))?,
     };
-    if let Some(l) = anchor_loop {
-        tokio::task::spawn_blocking(move || l.finish()).await.map_err(|e| anyhow::anyhow!("anchoring task panicked: {e}"))?;
-    }
+    // Queued events (the HTTP listener has no flush of its own), then the
+    // last epoch's anchoring, which may raise events too.
+    let flush = sinks.clone();
+    tokio::task::spawn_blocking(move || {
+        cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
+        if let Some(l) = anchor_loop {
+            l.finish();
+            cloakpipe_mcp::flush_events(&flush, cloakpipe_mcp::EVENT_FLUSH);
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("anchoring task panicked: {e}"))?;
     result
 }
 
