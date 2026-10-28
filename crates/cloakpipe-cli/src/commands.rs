@@ -578,7 +578,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
     };
     let result = match listen {
         // The agent over HTTP; stops on Ctrl-C / SIGTERM.
-        Some(_) if routed => Err(anyhow::anyhow!("--listen with --server or --tools-lock is not supported yet")),
+        Some(config) if routed => cloakpipe_mcp::http::serve_servers(config, upstreams, ctx, tools_lock, shutdown_signal()).await,
         Some(config) => cloakpipe_mcp::http::serve(config, upstreams.remove(0), ctx, shutdown_signal()).await,
         None => tokio::task::spawn_blocking(move || {
             if routed {

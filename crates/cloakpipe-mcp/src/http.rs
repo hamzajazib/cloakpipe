@@ -51,6 +51,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::proxy::{write_line, Action, Interceptor, ProxyContext, Upstream, UpstreamTransport, UPSTREAM_UNAVAILABLE};
+use crate::servers::{StdioServer, DISCOVERY_TIMEOUT};
+use crate::tools_lock::ToolsLock;
 
 /// The session header (both sides).
 const SESSION: &str = "mcp-session-id";
@@ -383,13 +385,18 @@ struct StdioLink {
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Child>,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Its output and what runs when it ends, until [`Self::begin`].
+    output: Mutex<Option<(Lines, Closed)>>,
     deliver: Deliver,
 }
 
+type Lines = Box<dyn Iterator<Item = String> + Send>;
+type Closed = Box<dyn FnOnce() + Send>;
+
 impl StdioLink {
-    /// Spawn `command`; its lines go to `deliver`, and `closed` runs once
-    /// its output ends (it exited).
-    fn start(command: &[String], deliver: Deliver, closed: Box<dyn FnOnce() + Send>) -> Result<Self> {
+    /// Spawn `command`; once begun, its lines go to `deliver`, and `closed`
+    /// runs once its output ends (it exited).
+    fn start(command: &[String], deliver: Deliver, closed: Closed) -> Result<Self> {
         anyhow::ensure!(!command.is_empty(), "upstream MCP command is empty");
         let mut child = Command::new(&command[0])
             .args(&command[1..])
@@ -400,17 +407,35 @@ impl StdioLink {
             .with_context(|| format!("failed to spawn upstream MCP server: {command:?}"))?;
         let stdin = child.stdin.take().context("upstream has no stdin")?;
         let stdout = child.stdout.take().context("upstream has no stdout")?;
-        let reader = {
-            let deliver = deliver.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    deliver(Incoming::Message(line));
-                }
-                closed();
-            })
-        };
-        Ok(Self { stdin: Mutex::new(Some(stdin)), child: Mutex::new(child), reader: Mutex::new(Some(reader)), deliver })
+        let lines: Lines = Box::new(BufReader::new(stdout).lines().map_while(std::io::Result::ok));
+        Ok(Self::attach(child, stdin, lines, deliver, closed))
+    }
+
+    /// A server already running (spawned and initialized by the gate).
+    fn attach(child: Child, stdin: ChildStdin, lines: Lines, deliver: Deliver, closed: Closed) -> Self {
+        Self {
+            stdin: Mutex::new(Some(stdin)),
+            child: Mutex::new(child),
+            reader: Mutex::new(None),
+            output: Mutex::new(Some((lines, closed))),
+            deliver,
+        }
+    }
+
+    /// Start relaying its output (once every link exists, so what it sends
+    /// can be routed).
+    fn begin(&self) {
+        let Some((lines, closed)) = self.output.lock().ok().and_then(|mut o| o.take()) else { return };
+        let deliver = self.deliver.clone();
+        let reader = std::thread::spawn(move || {
+            for line in lines {
+                deliver(Incoming::Message(line));
+            }
+            closed();
+        });
+        if let Ok(mut r) = self.reader.lock() {
+            *r = Some(reader);
+        }
     }
 
     fn send(&self, message: String) {
@@ -452,6 +477,12 @@ enum Link {
 }
 
 impl Link {
+    fn begin(&self) {
+        if let Link::Stdio(link) = self {
+            link.begin();
+        }
+    }
+
     fn send(&self, message: String) {
         match self {
             Link::Stdio(link) => link.send(message),
@@ -491,10 +522,13 @@ struct Waiter {
     reply: tokio::sync::oneshot::Sender<String>,
 }
 
-/// Routes upstream messages back to the POSTs waiting for them.
+/// Routes upstream messages back to the POSTs waiting for them, and the
+/// interceptor's messages to the upstreams.
 struct Dispatch {
     interceptor: Interceptor,
     waiters: Mutex<HashMap<u64, Waiter>>,
+    /// Each upstream by name, set once at start-up.
+    links: std::sync::OnceLock<HashMap<String, Link>>,
 }
 
 impl Dispatch {
@@ -506,10 +540,26 @@ impl Dispatch {
         self.route(actions);
     }
 
-    /// Hand each message for the agent to the request it answers.
+    /// Send `message` to upstream `server`.
+    fn send(&self, server: &str, message: String) {
+        match self.links.get().and_then(|links| links.get(server)) {
+            Some(link) => link.send(message),
+            None => tracing::warn!(server, "no such upstream; message dropped"),
+        }
+    }
+
+    /// Hand each message for the agent to the request it answers; send
+    /// each message for an upstream (several servers: listing pages, refused
+    /// server requests).
     fn route(&self, actions: Vec<Action>) {
         for action in actions {
-            let Action::ToAgent(line) = action else { continue };
+            let line = match action {
+                Action::ToAgent(line) => line,
+                Action::ToUpstream { server, message } => {
+                    self.send(&server, message);
+                    continue;
+                }
+            };
             let Ok(mut msg) = serde_json::from_str::<Value>(&line) else { continue };
             let reply = msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some());
             let waiter = msg
@@ -538,7 +588,6 @@ impl Dispatch {
 
 struct Hub {
     dispatch: Arc<Dispatch>,
-    link: Link,
     next_id: AtomicU64,
     sessions: Mutex<HashSet<String>>,
     token: Option<String>,
@@ -552,37 +601,112 @@ pub async fn serve<F>(config: ListenConfig, upstream: Upstream, ctx: ProxyContex
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    serve_with(config, Upstreams::One(upstream), ctx, shutdown).await
+}
+
+/// [`serve`] in front of several stdio servers, or one with a tools lock
+/// (`mcp-proxy --listen … --server … --tools-lock …`): the gate starts,
+/// initializes and lists each server first, then an
+/// [`Interceptor::with_servers`] routes each `tools/call` to the server that
+/// serves the tool, hiding and refusing drifted tools. A server that exits
+/// leaves the others serving; when the last one has, the listener stops
+/// with an error.
+pub async fn serve_servers<F>(config: ListenConfig, upstreams: Vec<Upstream>, ctx: ProxyContext, lock: Option<ToolsLock>, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve_with(config, Upstreams::Routed(upstreams, lock), ctx, shutdown).await
+}
+
+enum Upstreams {
+    One(Upstream),
+    Routed(Vec<Upstream>, Option<ToolsLock>),
+}
+
+async fn serve_with<F>(config: ListenConfig, upstreams: Upstreams, ctx: ProxyContext, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let health = match &ctx.gate {
         Some(gate) => serde_json::json!({ "status": "ok", "release": gate.release_name(), "release_digest": gate.release() }),
         None => serde_json::json!({ "status": "ok", "release": Value::Null, "release_digest": Value::Null }),
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await.with_context(|| format!("--listen {}: cannot bind", config.addr))?;
     let local = listener.local_addr()?;
-    let dispatch = Arc::new(Dispatch { interceptor: Interceptor::new(ctx)?, waiters: Mutex::new(HashMap::new()) });
-    let server = upstream.name.clone();
-    let deliver: Deliver = {
-        let dispatch = dispatch.clone();
-        let server = server.clone();
-        Arc::new(move |incoming| dispatch.deliver(&server, incoming))
-    };
     let upstream_gone = Arc::new(tokio::sync::Notify::new());
-    let link = match &upstream.transport {
-        UpstreamTransport::Stdio { command } => {
-            let dispatch = dispatch.clone();
-            let gone = upstream_gone.clone();
-            let closed = Box::new(move || {
-                // Calls still in flight never get their reply.
-                dispatch.route(dispatch.interceptor.finish());
-                dispatch.drop_waiters();
-                gone.notify_one();
-            });
-            Link::Stdio(StdioLink::start(command, deliver, closed)?)
+    let dispatch = match upstreams {
+        Upstreams::One(upstream) => {
+            let dispatch = Arc::new(Dispatch { interceptor: Interceptor::new(ctx)?, waiters: Mutex::new(HashMap::new()), links: Default::default() });
+            let server = upstream.name.clone();
+            let deliver: Deliver = {
+                let dispatch = dispatch.clone();
+                let server = server.clone();
+                Arc::new(move |incoming| dispatch.deliver(&server, incoming))
+            };
+            let link = match &upstream.transport {
+                UpstreamTransport::Stdio { command } => {
+                    let dispatch = dispatch.clone();
+                    let gone = upstream_gone.clone();
+                    let closed = Box::new(move || {
+                        // Calls still in flight never get their reply.
+                        dispatch.route(dispatch.interceptor.finish());
+                        dispatch.drop_waiters();
+                        gone.notify_one();
+                    });
+                    Link::Stdio(StdioLink::start(command, deliver, closed)?)
+                }
+                UpstreamTransport::Http { url, headers } => Link::Http(Mutex::new(Some(HttpClient::start(url, headers, deliver)?))),
+            };
+            let _ = dispatch.links.set(HashMap::from([(server, link)]));
+            dispatch
         }
-        UpstreamTransport::Http { url, headers } => Link::Http(Mutex::new(Some(HttpClient::start(url, headers, deliver)?))),
+        Upstreams::Routed(upstreams, lock) => {
+            // Start, initialize and list every server (blocking I/O).
+            let (interceptor, parts) = tokio::task::spawn_blocking(move || -> Result<_> {
+                anyhow::ensure!(!upstreams.is_empty(), "no upstream MCP server");
+                let mut servers = upstreams.iter().map(StdioServer::spawn).collect::<Result<Vec<_>>>()?;
+                let mut listing = Vec::new();
+                for server in &mut servers {
+                    listing.push(server.discover(DISCOVERY_TIMEOUT)?);
+                }
+                let interceptor = Interceptor::with_servers(ctx, listing, lock)?;
+                let parts: Vec<_> = servers.into_iter().map(|s| (s.name.clone(), s.into_parts())).collect();
+                Ok((interceptor, parts))
+            })
+            .await
+            .context("starting the upstream servers")??;
+            let dispatch = Arc::new(Dispatch { interceptor, waiters: Mutex::new(HashMap::new()), links: Default::default() });
+            let live = Arc::new(AtomicUsize::new(parts.len()));
+            let mut links = HashMap::new();
+            for (name, (child, stdin, lines)) in parts {
+                let deliver: Deliver = {
+                    let dispatch = dispatch.clone();
+                    let name = name.clone();
+                    Arc::new(move |incoming| dispatch.deliver(&name, incoming))
+                };
+                let closed: Closed = {
+                    let (dispatch, gone, live, name) = (dispatch.clone(), upstream_gone.clone(), live.clone(), name.clone());
+                    Box::new(move || {
+                        // Its requests fail closed; the other servers serve on.
+                        dispatch.route(dispatch.interceptor.server_gone(&name));
+                        if live.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            dispatch.route(dispatch.interceptor.finish());
+                            dispatch.drop_waiters();
+                            gone.notify_one();
+                        }
+                    })
+                };
+                links.insert(name, Link::Stdio(StdioLink::attach(child, stdin, Box::new(lines.into_iter()), deliver, closed)));
+            }
+            let _ = dispatch.links.set(links);
+            dispatch
+        }
     };
+    for link in dispatch.links.get().into_iter().flat_map(HashMap::values) {
+        link.begin();
+    }
     let hub = Arc::new(Hub {
         dispatch: dispatch.clone(),
-        link,
         next_id: AtomicU64::new(1),
         sessions: Mutex::new(HashSet::new()),
         token: config.token,
@@ -615,7 +739,9 @@ where
     // No agent request is in flight any more: stop the upstream, then sweep.
     let hub2 = hub.clone();
     tokio::task::spawn_blocking(move || {
-        hub2.link.close();
+        for link in hub2.dispatch.links.get().into_iter().flat_map(HashMap::values) {
+            link.close();
+        }
         hub2.dispatch.route(hub2.dispatch.interceptor.finish());
         hub2.dispatch.drop_waiters();
     })
@@ -765,7 +891,7 @@ async fn post_mcp(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) 
         match action {
             Action::ToAgent(reply) if direct.is_none() => direct = Some(reply),
             Action::ToAgent(_) => tracing::debug!("a second direct answer; dropped"),
-            Action::ToUpstream { message, .. } => hub.link.send(message),
+            Action::ToUpstream { server, message } => hub.dispatch.send(&server, message),
         }
     }
     let reply = match (direct, waiting) {
