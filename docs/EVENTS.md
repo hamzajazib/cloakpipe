@@ -1,6 +1,6 @@
 # Events: webhooks, OpenTelemetry and the events log
 
-> Unreleased: in `main` after v0.12.0, next release v0.13.0.
+> Since v0.13.0.
 
 The gate's second job, after stopping an out-of-contract call, is telling
 a human about it. `cloakpipe mcp-proxy` raises a **gate event** for every

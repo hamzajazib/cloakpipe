@@ -169,3 +169,47 @@ fn the_changelog_documents_the_workspace_version() {
     assert!(changelog.lines().any(|l| l.starts_with(&heading)), "CHANGELOG.md needs a `{heading}YYYY-MM-DD` section");
     assert_eq!(env!("CARGO_PKG_VERSION"), version);
 }
+
+/// At a release, no shipped doc still calls a feature unreleased: the
+/// README and docs/ describe the version the workspace is at.
+#[test]
+fn released_docs_do_not_call_features_unreleased() {
+    let mut docs = vec![root().join("README.md")];
+    for entry in std::fs::read_dir(root().join("docs")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "md") {
+            docs.push(path);
+        }
+    }
+    let ws = workspace();
+    let version = ws["workspace"]["package"]["version"].as_str().unwrap();
+    let changelog = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
+    // Between releases, docs may describe what is on main; the
+    // [Unreleased] section then has entries.
+    let unreleased = changelog.split("## [Unreleased]").nth(1).unwrap().split("\n## [").next().unwrap();
+    if !unreleased.trim().is_empty() {
+        return;
+    }
+    for doc in docs {
+        let text = std::fs::read_to_string(&doc).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            assert!(
+                !line.to_lowercase().contains("unreleased"),
+                "{}:{}: still says unreleased at v{version}: {line}",
+                doc.display(),
+                n + 1
+            );
+        }
+    }
+}
+
+/// The CLI is on crates.io: the README installs it from there, pinned to
+/// the workspace version.
+#[test]
+fn the_readme_installs_the_cli_from_crates_io() {
+    let ws = workspace();
+    let version = ws["workspace"]["package"]["version"].as_str().unwrap();
+    let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(!readme.contains("not on crates.io"), "README still says the gate is not on crates.io");
+    assert!(readme.contains(&format!("cargo install --locked cloakpipe-cli@{version}")), "README installs cloakpipe-cli@{version}");
+}

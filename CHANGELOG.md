@@ -9,6 +9,13 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-28
+
+The gate now runs over MCP's HTTP transport on both sides, fronts several
+MCP servers with pinned tool definitions, and delivers its events to signed
+webhooks (Slack, Discord or generic), OpenTelemetry and a JSONL log. The
+Docker image runs the gate by default.
+
 ### Added
 
 - MCP over HTTP (Streamable HTTP, spec rev 2025-06-18) on both sides of
@@ -678,7 +685,8 @@ the lean gate. Licence: MIT only.
 
 - First release: privacy middleware for LLM and RAG pipelines.
 
-[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/rohansx/cloakpipe/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/rohansx/cloakpipe/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rohansx/cloakpipe/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rohansx/cloakpipe/compare/v0.9.0...v0.10.0

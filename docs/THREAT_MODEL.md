@@ -102,7 +102,7 @@ server's credentials should exist only in the gate's child process.
 **A malicious or compromised tool server.** Results are passed back to
 the agent unchanged (apart from the opt-in PII transform), so a tool can
 inject instructions into the model. Tool descriptions in `tools/list` are
-passed through, but not unchecked (unreleased, next release). A tool whose
+passed through, but not unchecked (since v0.13.0). A tool whose
 definition changes during a session is hidden and refused (`tool_drift`).
 With a tools lock (`cloakpipe tools pin`, `mcp-proxy --tools-lock`), so is
 any tool that does not match the definition you reviewed. Pinning catches a
@@ -149,7 +149,7 @@ and heuristics (NER with the `ner` feature). They miss entities; measure
 them on your data.
 
 **The HTTP transports.** The gate speaks MCP over stdio and Streamable
-HTTP (unreleased, next release v0.13.0): `--listen` serves agents over
+HTTP (since v0.13.0): `--listen` serves agents over
 HTTP, `--upstream-url` fronts an HTTP MCP server. Only traffic sent through
 the gate is gated: an agent that can reach the MCP server directly goes
 around it, so put the server where only the gate can reach it. The
