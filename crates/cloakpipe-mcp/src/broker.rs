@@ -61,6 +61,8 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// A request's lifetime, and a receipt's longest validity, when the tool
 /// sets no `approval.ttl`.
 pub const DEFAULT_REQUEST_TTL_SECS: u64 = 900;
+/// The longest a request stays open, or a denial holds: a year.
+const MAX_REQUEST_SECS: u64 = 366 * 86_400;
 /// The largest poll response read.
 const MAX_POLL_BYTES: usize = 8 << 20;
 /// Requests queued before new ones are dropped (and filed on a later retry).
@@ -333,7 +335,8 @@ impl ApprovalBroker {
             return if open.accepted { RequestStatus::Pending } else { RequestStatus::Requested };
         }
         let meta = &self.inner.meta;
-        let expires = now + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX / 2).min(i64::MAX / 2));
+        // A request lapses after the ttl (capped, so any manifest ttl is a valid time).
+        let expires = now + chrono::Duration::seconds(i64::try_from(ttl.min(MAX_REQUEST_SECS)).unwrap_or(0));
         let body = json!({
             "schema": REQUEST_SCHEMA,
             "fingerprint": req.fingerprint.to_string(),
@@ -533,8 +536,9 @@ fn handle(inner: &Inner, record: &Value, now: chrono::DateTime<chrono::Utc>) {
             let ttl = s.open.remove(hex).map(|o| o.ttl_secs).unwrap_or(DEFAULT_REQUEST_TTL_SECS);
             let until = match record["not_after"].as_str().and_then(parse_rfc3339) {
                 Some(t) => t.timestamp(),
-                None => unix.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
-            };
+                None => unix.saturating_add(i64::try_from(ttl.min(MAX_REQUEST_SECS)).unwrap_or(0)),
+            }
+            .min(unix.saturating_add(i64::try_from(MAX_REQUEST_SECS).unwrap_or(0)));
             if until <= unix {
                 return;
             }

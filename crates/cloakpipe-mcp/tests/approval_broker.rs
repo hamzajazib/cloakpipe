@@ -480,3 +480,29 @@ fn the_background_poller_fetches_receipts_on_its_own() {
     assert_eq!(g.check("issue_refund", Some(&refund(350)), &now), Ok(()));
     b.stop();
 }
+
+#[test]
+fn a_huge_ttl_or_a_far_denial_is_capped_not_a_panic() {
+    let stub = StubBroker::start(SECRET);
+    let dir = tempfile::tempdir().unwrap();
+    let src = MANIFEST.replace("ttl: 15m", "ttl: 9999999999d");
+    let m = Manifest::parse_str(&src, Path::new(".")).unwrap();
+    let g = ToolGate::from_manifest(GateMode::Enforce, &m)
+        .with_task_context(Some(json!({"taskId": "t-981", "ticket": {"id": "T-1042"}})))
+        .unwrap()
+        .with_approvals(dir.path(), trusted());
+    let b = ApprovalBroker::manual(config(&stub.url()), &g, vec![]).unwrap();
+    let g = g.with_broker(b.clone());
+    assert_eq!(g.request_approval("issue_refund", Some(&refund(350)), None), Some(RequestStatus::Requested));
+    assert_eq!(stub.wait_for_posts(1, WAIT).len(), 1);
+    let fp = g.approval_request("issue_refund", Some(&refund(350))).unwrap().fingerprint;
+    // A denial "until the year 9999" holds for at most a year.
+    stub.deny(&fp, Some("9999-12-31T23:59:59Z"));
+    b.poll_once().unwrap();
+    let marker: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join(format!("{}.denied.json", fp.trim_start_matches("sha256:")))).unwrap()).unwrap();
+    let until = chrono::DateTime::parse_from_rfc3339(marker["notAfter"].as_str().unwrap()).unwrap();
+    assert!(until < chrono::Utc::now() + chrono::Duration::days(367), "{until}");
+    let now = rfc3339(chrono::Utc::now());
+    assert_eq!(g.check("issue_refund", Some(&refund(350)), &now), Err(Denial::ApprovalDenied));
+}
