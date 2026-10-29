@@ -436,15 +436,31 @@ fn file(http: &reqwest::blocking::Client, cfg: &BrokerConfig, body: &[u8]) -> Re
 }
 
 fn poll(inner: &Inner, http: &reqwest::blocking::Client) -> Result<usize, String> {
-    let mut url = reqwest::Url::parse(&format!("{}/approvals", inner.cfg.url)).map_err(|e| e.to_string())?;
-    if let Some(cursor) = lock(&inner.state).cursor.clone() {
-        url.query_pairs_mut().append_pair("since", &cursor);
+    let cursor = lock(&inner.state).cursor.clone();
+    let body = signed_get(http, &inner.cfg, "approvals", cursor.as_deref().map(|c| ("since", c)))?;
+    let records = body["approvals"].as_array().ok_or("response has no approvals array")?;
+    let now = chrono::Utc::now();
+    for record in records {
+        handle(inner, record, now);
+    }
+    if let Some(cursor) = body["cursor"].as_str() {
+        lock(&inner.state).cursor = Some(cursor.to_string());
+    }
+    Ok(records.len())
+}
+
+/// `GET <url>/<what>[?<name>=<value>]`, signed over `GET <target>`: the
+/// JSON body of a 2xx.
+fn signed_get(http: &reqwest::blocking::Client, cfg: &BrokerConfig, what: &str, query: Option<(&str, &str)>) -> Result<Value, String> {
+    let mut url = reqwest::Url::parse(&format!("{}/{what}", cfg.url)).map_err(|e| e.to_string())?;
+    if let Some((name, value)) = query {
+        url.query_pairs_mut().append_pair(name, value);
     }
     let target = match url.query() {
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_string(),
     };
-    let signature = sign(&inner.cfg.secret, chrono::Utc::now().timestamp(), format!("GET {target}").as_bytes());
+    let signature = sign(&cfg.secret, chrono::Utc::now().timestamp(), format!("GET {target}").as_bytes());
     let resp = http.get(url).header(SIGNATURE_HEADER, signature).send().map_err(|e| {
         // The error's kind only: it may name the URL.
         if e.is_timeout() { "timed out".to_string() } else { "request failed".to_string() }
@@ -456,16 +472,22 @@ fn poll(inner: &Inner, http: &reqwest::blocking::Client) -> Result<usize, String
     if bytes.len() > MAX_POLL_BYTES {
         return Err("response too large".into());
     }
-    let body: Value = serde_json::from_slice(&bytes).map_err(|_| "response is not JSON".to_string())?;
-    let records = body["approvals"].as_array().ok_or("response has no approvals array")?;
-    let now = chrono::Utc::now();
-    for record in records {
-        handle(inner, record, now);
-    }
-    if let Some(cursor) = body["cursor"].as_str() {
-        lock(&inner.state).cursor = Some(cursor.to_string());
-    }
-    Ok(records.len())
+    serde_json::from_slice(&bytes).map_err(|_| "response is not JSON".to_string())
+}
+
+/// The broker's approver public keys (`GET <url>/approver-keys`, signed):
+/// each `(keyid, publicKey hex)` as listed, unchecked. Pin them with
+/// `--approver-key` (`cloakpipe approvals keys` writes the files).
+pub fn fetch_approver_keys(cfg: &BrokerConfig) -> Result<Vec<(String, String)>, String> {
+    let http = client(cfg.timeout).ok_or("cannot build the HTTP client")?;
+    let body = signed_get(&http, cfg, "approver-keys", None)?;
+    let keys = body["keys"].as_array().ok_or("response has no keys array")?;
+    keys.iter()
+        .map(|k| match (k["keyid"].as_str(), k["publicKey"].as_str()) {
+            (Some(id), Some(public)) => Ok((id.to_string(), public.to_string())),
+            _ => Err("a key without a keyid and publicKey".to_string()),
+        })
+        .collect()
 }
 
 /// One finished request.

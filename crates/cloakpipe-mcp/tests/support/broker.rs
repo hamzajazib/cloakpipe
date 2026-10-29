@@ -47,6 +47,8 @@ struct State {
     finished: Vec<Value>,
     /// Answer every request with this status instead (an outage).
     fail_with: Option<u16>,
+    /// `GET .../approver-keys` returns these.
+    keys: Vec<Value>,
 }
 
 pub struct StubBroker {
@@ -108,6 +110,11 @@ impl StubBroker {
     /// The request filed for `fingerprint` (`sha256:<hex>`).
     pub fn request(&self, fingerprint: &str) -> Option<Value> {
         self.state.lock().unwrap().requests.get(fingerprint).cloned()
+    }
+
+    /// What `GET <url>/approver-keys` lists (`{keyid, publicKey}` objects).
+    pub fn set_keys(&self, keys: Vec<Value>) {
+        self.state.lock().unwrap().keys = keys;
     }
 
     /// Answer everything with `status` (`None`: back to normal).
@@ -240,6 +247,9 @@ fn handle(state: &Mutex<State>, method: &str, target: &str, body: &[u8], signed:
     }
     let base = format!("/v1/gates/{gate_id}/approvals");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if method == "GET" && path == format!("/v1/gates/{gate_id}/approver-keys") {
+        return (200, json!({ "keys": s.keys }));
+    }
     if path != base {
         return (404, json!({"error": "not found"}));
     }

@@ -453,6 +453,11 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Ok(sinks) => sinks,
         Err(code) => std::process::exit(code),
     };
+    // An approval broker (--approvals-url): checked, then its poller starts.
+    let gate = match crate::approvals::attach(&args.broker, gate, &sinks) {
+        Ok(gate) => gate,
+        Err(code) => std::process::exit(code),
+    };
     let pii = args.pii();
     // The upstream servers and the tools lock, checked before anything runs.
     let mut upstreams = match crate::gate::upstreams_from_args(&args) {
