@@ -206,7 +206,7 @@ approval:
 | `when` | Approval is needed only when this holds. Without `when`, every call needs approval. |
 | `approvers` | Free-form routing strings. The gate does not contact anyone; it puts them in the `approval_required` refusal with the call `fingerprint`, so your approval flow knows where to send the request. |
 | `ttl` | The longest validity a receipt may have (`notAfter - approvedAt`): `30s`, `15m`, `1h30m`, `1d`. A receipt valid for longer is `approval_invalid`. |
-| `show` | Top-level arguments (declared under `args`) whose values an approval broker may see in a request, so the approver can decide: `[amount, ticket_id]`. Default: none, and no other value is ever sent. Keep it short: see [APPROVALS.md](APPROVALS.md#what-the-broker-sees). |
+| `show` | Top-level arguments (declared under `args`) whose values an approval broker may see in a request, so the approver can decide: `[amount, ticket_id]`. Scalar values only: an argument declared `type: object` or `type: array` is refused, and an object or array value of an untyped argument is left out. Default: none, and no other value is ever sent. Keep it short: see [APPROVALS.md](APPROVALS.md#what-the-broker-sees). |
 
 The `when` language is deliberately small. Comparisons `path OP literal`,
 with `OP` one of `>`, `>=`, `<`, `<=`, `==`, `!=` and a literal that is a

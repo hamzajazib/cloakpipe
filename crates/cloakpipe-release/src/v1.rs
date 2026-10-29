@@ -262,9 +262,14 @@ impl RawTool {
                 };
                 let mut shown = std::collections::BTreeSet::new();
                 for name in &a.show {
-                    if !arguments.contains_key(name) {
+                    let Some(arg) = arguments.get(name) else {
                         return Err(format!(
                             "{tool}: approval.show names {name:?}, which is not a declared argument (top-level argument names only)"
+                        ));
+                    };
+                    if matches!(arg.ty, Some(JsonType::Object | JsonType::Array)) {
+                        return Err(format!(
+                            "{tool}: approval.show names {name:?}, an object or array: only scalar arguments (string, number, boolean) can be shown"
                         ));
                     }
                     if !shown.insert(name) {

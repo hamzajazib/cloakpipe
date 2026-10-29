@@ -47,12 +47,14 @@ pub struct ApprovalRule {
 impl ApprovalRule {
     /// The values of a call's [`Self::show`] arguments that it carries
     /// (top level only; nothing for a call whose arguments are not an
-    /// object). No other value is ever in it.
+    /// object). Scalar values only (string, number, boolean, null): an
+    /// object or array value of an untyped argument is left out. No other
+    /// value is ever in it.
     pub fn shown(&self, arguments: Option<&Value>) -> serde_json::Map<String, Value> {
         let mut out = serde_json::Map::new();
         let Some(args) = arguments.and_then(Value::as_object) else { return out };
         for name in &self.show {
-            if let Some(v) = args.get(name) {
+            if let Some(v) = args.get(name).filter(|v| !v.is_object() && !v.is_array()) {
                 out.insert(name.clone(), v.clone());
             }
         }
