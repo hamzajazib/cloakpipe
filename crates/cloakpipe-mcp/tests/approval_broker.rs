@@ -506,3 +506,63 @@ fn a_huge_ttl_or_a_far_denial_is_capped_not_a_panic() {
     let now = rfc3339(chrono::Utc::now());
     assert_eq!(g.check("issue_refund", Some(&refund(350)), &now), Err(Denial::ApprovalDenied));
 }
+
+// ── a gate shared by several processes (adversarial verification) ───────
+
+/// A receipt signed for `task_id`, as a broker reports it for that task's
+/// request of the call `fingerprint`.
+fn record_for_task(s: &Setup, fingerprint: &str, task_id: &str, status: &str) -> Value {
+    use cloakpipe_receipt::approval::{sign_approval, Approval};
+    use cloakpipe_release::action::ToolCallFingerprint;
+    let mut raw = [0u8; 32];
+    hex::decode_to_slice(fingerprint.trim_start_matches("sha256:"), &mut raw).unwrap();
+    let now = chrono::Utc::now();
+    let mut record = json!({
+        "request_id": format!("r-{task_id}"),
+        "fingerprint": fingerprint,
+        "task_id": task_id,
+        "status": status,
+        "decided_at": rfc3339(now),
+    });
+    if status == "approved" {
+        let a = Approval {
+            release: s.release.clone(),
+            tool: "issue_refund".into(),
+            task_id: task_id.into(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            approver: KEYID.into(),
+            approved_at: rfc3339(now),
+            not_after: rfc3339(now + chrono::Duration::seconds(600)),
+        };
+        record["envelope"] = serde_json::to_value(sign_approval(&ToolCallFingerprint(raw), &a, &approver(), KEYID)).unwrap();
+    } else {
+        record["not_after"] = json!(rfc3339(now + chrono::Duration::seconds(600)));
+    }
+    record
+}
+
+/// Gate processes with different task contexts may share one gate at the
+/// broker, and a poll returns the gate's finished requests whatever task
+/// they were for. Another task's records are not about this process's
+/// calls: its receipt (signed for the other task) is not a mismatch, and
+/// its denial does not refuse this task's call.
+#[test]
+fn records_for_another_task_sharing_the_gate_are_skipped_quietly() {
+    let s = setup();
+    let fp = requested(&s, 1, 350);
+    s.stub.finish(record_for_task(&s, &fp, "t-other", "approved"));
+    s.stub.finish(record_for_task(&s, &fp, "t-other", "denied"));
+    assert_eq!(s.broker.poll_once().unwrap(), 2);
+    assert!(!receipt_path(&s.approvals, &fp).exists(), "another task's receipt is not written");
+    assert!(files(&s.approvals).is_empty(), "nor a denial marker: {:?}", files(&s.approvals));
+    let events = s.events.0.lock().unwrap().clone();
+    assert!(!events.iter().any(|e| e.kind == EventKind::ApprovalMismatch), "not a mismatch: {events:#?}");
+    let d = data(&s.gate.on_agent_line(&call(2, refund(350))));
+    assert_eq!((d["reason"].as_str(), d["approval_request"].as_str()), (Some("approval_required"), Some("pending")), "{d}");
+
+    // This task's own approval still arrives.
+    s.stub.finish(record_for_task(&s, &fp, "t-981", "approved"));
+    s.broker.poll_once().unwrap();
+    assert!(receipt_path(&s.approvals, &fp).exists());
+    assert!(forwarded(&s.gate.on_agent_line(&call(3, refund(350)))));
+}

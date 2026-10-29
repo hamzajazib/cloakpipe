@@ -25,7 +25,8 @@ may contain breaking changes; these are marked **Breaking**.
     ttl, and only then writes it atomically to `--approvals`; one that does
     not verify is not written and raises `approval.mismatch`. Decisions
     never wait on the broker; if it is down, approvals do not arrive.
-    Needs `--approvals`, `--approver-key` and a task context with a
+    A polled record whose `task_id` names another task (another gate
+    process sharing the gate URL) is skipped quietly. Needs `--approvals`, `--approver-key` and a task context with a
     `taskId`, checked at start-up.
   - The refusal's `error.data` gains `approval_request` (`requested`,
     `pending` or `denied`) and a `hint` to retry after approval.
@@ -45,7 +46,8 @@ may contain breaking changes; these are marked **Breaking**.
     `Denial::ApprovalDenied`.
 - Manifest: `approval.show: [amount, ticket_id]`, the top-level arguments
   whose values an approval broker may see (default: none). Names must be
-  declared arguments. `ApprovalRule::shown`. A fingerprint of
+  declared arguments, not of type object or array; only scalar values are
+  sent. `ApprovalRule::shown`. A fingerprint of
   low-entropy arguments can be guessed by brute force; see
   [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 

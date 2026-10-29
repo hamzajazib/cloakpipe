@@ -79,6 +79,9 @@ approval:
 ```
 
 `show` lists top-level arguments the tool declares; the default is none.
+Only scalar values are shown (string, number, boolean, null): an argument
+declared as an object or array cannot be listed, and an object or array
+value of an untyped argument is left out of the request.
 Keep it short. A fingerprint is SHA-256 over the manifest digest, the tool
 and every argument, so a broker that knows the other arguments' likely
 values can test guesses against it: treat a fingerprint as revealing,
@@ -134,7 +137,10 @@ query). A broker should reject a `t` more than five minutes from its clock.
 `expires_at` is when the request lapses. `ledger_seq` names the decision
 ledger entry of the refusal (null without a ledger). A broker must store no
 argument value other than those in `shown`, and should be idempotent per
-`fingerprint`: filing an open request again returns it. Reply with any 2xx,
+`fingerprint` and `task_id`: filing an open request again returns it.
+The fingerprint does not name the task, and several gate processes with
+their own task contexts may share one gate URL, so the same call from
+another task is a request of its own (its receipt names that task). Reply with any 2xx,
 e.g. `{"request_id": "…", "status": "pending"}`; the gate retries a 429,
 a 5xx or a connection error, and files the request again on the agent's
 next retry if every try failed.
@@ -145,7 +151,7 @@ next retry if every try failed.
 {
   "cursor": "c-43",
   "approvals": [
-    { "request_id": "…", "fingerprint": "sha256:5e2b…", "status": "approved", "envelope": { "payloadType": "application/vnd.in-toto+json", "payload": "…", "signatures": [ … ] } },
+    { "request_id": "…", "fingerprint": "sha256:5e2b…", "task_id": "t-981", "status": "approved", "envelope": { "payloadType": "application/vnd.in-toto+json", "payload": "…", "signatures": [ … ] } },
     { "request_id": "…", "fingerprint": "sha256:9a1c…", "status": "denied", "decided_at": "2026-10-29T10:03:00Z", "not_after": "2026-10-29T10:15:00Z" },
     { "request_id": "…", "fingerprint": "sha256:77d0…", "status": "expired" }
   ]
@@ -155,7 +161,9 @@ next retry if every try failed.
 Requests that finished after `cursor`, in order, and the cursor to ask
 from next (opaque to the gate). Without `since`, the broker may return
 whatever it still holds; the gate skips what it already has. `not_after`
-on a denial is optional.
+on a denial is optional. `task_id` (optional) names the task the request
+was for: a gate skips the records of another task, which belong to
+another process sharing the gate URL.
 
 **The receipt** (`envelope`) is a DSSE envelope made with
 [`cloakpipe-receipt`](../crates/cloakpipe-receipt)'s `sign_approval`, the

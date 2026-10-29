@@ -28,6 +28,10 @@
 //!   - `expired`: nobody decided in time. The call stays `approval_required`
 //!     and the next retry files a new request.
 //!
+//!   A record whose `task_id` names another task is skipped: gate processes
+//!   with other task contexts may share the gate at the broker, and their
+//!   receipts and denials are not about this process's calls.
+//!
 //! The decision path never waits on the network: it only queues and reads
 //! local state. If the broker is down, nothing changes but that approvals
 //! do not arrive (a pending call stays refused, so it expires to deny).
@@ -504,6 +508,12 @@ fn handle(inner: &Inner, record: &Value, now: chrono::DateTime<chrono::Utc>) {
         *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap_or(0);
     }
     let fp = ToolCallFingerprint(raw);
+    // Gate processes with other task contexts may share this gate at the
+    // broker: a record for another task is about their call, not ours (its
+    // receipt is signed for that task, its denial is not this task's).
+    if record["task_id"].as_str().is_some_and(|t| t != inner.verifier.task_id) {
+        return;
+    }
     let unix = now.timestamp();
     match record["status"].as_str() {
         Some("approved") => {
