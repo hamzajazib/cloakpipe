@@ -74,6 +74,12 @@
           "type": "string",
           "pattern": "^(?:[0-9]+d)?(?:[0-9]+h)?(?:[0-9]+m)?(?:[0-9]+s)?$",
           "minLength": 2
+        },
+        "show": {
+          "description": "Top-level arguments (declared under args) whose values an approval broker may see in a request, e.g. [amount, ticket_id]. Default: none; no other value is ever sent. Use sparingly: a call fingerprint over low-entropy arguments can be guessed.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
         }
       }
     },

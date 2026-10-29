@@ -9,6 +9,7 @@
 //! and, with the opt-in PII transform, masking PII in calls and rehydrating
 //! results.
 
+pub mod broker;
 mod catalog;
 pub mod events;
 pub mod gate;

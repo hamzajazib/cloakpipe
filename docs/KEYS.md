@@ -144,6 +144,26 @@ upstream received: issue_refund {"amount": 350, "ticket_id": "T-1042"}
   `approval.ttl`), which limits what a stolen approver key can do to calls
   the contract and policy already allow, until it is removed.
 
+### Approver keys held by a broker
+
+With an approval broker (`mcp-proxy --approvals-url`,
+[APPROVALS.md](APPROVALS.md)), the broker holds one key per approver and
+signs the receipt when that person approves. The gate still trusts only
+the public keys you pin with `--approver-key`, and verifies every receipt
+before writing it and again on the call. `cloakpipe approvals keys` fetches
+the broker's public keys as `--approver-key` files (it refuses a key whose
+`keyid` is not `ed25519:` + the first 16 hex characters of SHA-256 over the
+key). Review the list before you pin it: whoever holds a pinned key can
+approve any call the contract and policy allow. When the broker rotates a
+key, pin the new one; the old one may stay until its receipts have
+expired.
+
+The request a broker gets carries the call fingerprint and only the
+arguments the manifest's `approval.show` lists. A fingerprint over
+low-entropy arguments (an amount, a ticket id) can be brute-forced by
+anyone who can guess the other arguments, so treat it as revealing them
+and use `show` sparingly.
+
 ## Anchoring roots
 
 Anchors are checked against trust inputs that are never read from the

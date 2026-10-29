@@ -8,6 +8,7 @@
 
 mod action;
 mod anchor;
+mod approvals;
 #[cfg(feature = "certification")]
 mod audit_pack;
 #[cfg(feature = "certification")]
@@ -99,6 +100,11 @@ enum Commands {
     },
     /// Sign an approval receipt for one exact tool call (for mcp-proxy --approvals)
     Approve(action::ApproveArgs),
+    /// Approvals through a broker: fetch its approver keys as --approver-key files
+    Approvals {
+        #[command(subcommand)]
+        action: approvals::ApprovalsCommands,
+    },
     /// Upstream MCP tool definitions: pin them in cloakpipe.tools.lock, diff against it
     Tools {
         #[command(subcommand)]
@@ -245,6 +251,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Anchor(args) => std::process::exit(anchor::run(args)),
         Commands::Action { action } => std::process::exit(action::run(action)),
         Commands::Approve(args) => std::process::exit(action::approve(args)),
+        Commands::Approvals { action } => std::process::exit(approvals::run(action)),
         Commands::Operations { action } => std::process::exit(operations::run(action)),
         Commands::Tools { action } => std::process::exit(tools::run(action)),
         Commands::Ledger { action } => std::process::exit(evidence::run(action)),
@@ -287,6 +294,7 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         | Commands::Anchor(_)
         | Commands::Action { .. }
         | Commands::Approve(_)
+        | Commands::Approvals { .. }
         | Commands::Operations { .. }
         | Commands::Tools { .. }
         | Commands::Ledger { .. }

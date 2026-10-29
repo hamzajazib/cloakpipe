@@ -22,7 +22,7 @@ changes it.
 |---|---|
 | `decision.deny` | a call was refused (enforce mode), including `fail_closed` |
 | `approval.requested` | a call needs an approval receipt and has none |
-| `approval.mismatch` | a receipt was presented that does not cover this exact call (other arguments, release or tool, or a bad signature) |
+| `approval.mismatch` | a receipt was presented that does not cover this exact call (other arguments, release or tool, or a bad signature); also a receipt from an approval broker that does not verify and was not written ([APPROVALS.md](APPROVALS.md), no ledger entry) |
 | `shadow.finding` | shadow mode forwarded a call that enforce mode would have refused |
 | `side_effect.replayed` | a retry of a completed side effect was answered from the operations store |
 | `side_effect.unknown` | a forwarded side effect never got its reply: reconcile it |
@@ -30,7 +30,8 @@ changes it.
 | `tool.drift` | an upstream tool no longer matches its pin in the tools lock, or changed during the session (`reason` is `tool_drift`): once when the gate finds it, then with each refused call |
 
 An expired approval receipt is a `decision.deny` with reason
-`approval_expired`.
+`approval_expired`, and a call an approver denied through a broker one
+with reason `approval_denied`.
 
 Each event is one JSON object with `"schema": "cloakpipe.event/v1"` and
 these members: `kind`, `fingerprint`, `ts`, `release`, `release_digest`,

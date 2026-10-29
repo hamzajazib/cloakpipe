@@ -148,6 +148,10 @@ pub struct McpProxyArgs {
     /// only): receipts must be signed by one of these keys.
     #[arg(long = "approver-key")]
     pub approver_keys: Vec<PathBuf>,
+    /// An approval broker the gate files requests with and fetches
+    /// verified receipts from (--approvals-url, docs/APPROVALS.md).
+    #[command(flatten)]
+    pub broker: crate::approvals::BrokerArgs,
     /// Operations database (SQLite) tracking side-effecting calls (tools with
     /// side_effect: true; legacy: sideEffect): required when there are any.
     /// Default: $CLOAKPIPE_OPERATIONS_DB. One proxy per database.
@@ -202,6 +206,7 @@ impl McpProxyArgs {
             || self.task_context.is_some()
             || self.approvals.is_some()
             || !self.approver_keys.is_empty()
+            || self.broker.any()
             || self.operations_db.is_some()
             || self.state_db.is_some()
     }

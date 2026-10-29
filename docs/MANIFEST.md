@@ -198,6 +198,7 @@ approval:
   when: "amount > 100 && currency == 'EUR'"
   approvers: ["slack:#support-leads", "pagerduty:refunds"]
   ttl: 15m
+  show: [amount]
 ```
 
 | Key | Meaning |
@@ -205,6 +206,7 @@ approval:
 | `when` | Approval is needed only when this holds. Without `when`, every call needs approval. |
 | `approvers` | Free-form routing strings. The gate does not contact anyone; it puts them in the `approval_required` refusal with the call `fingerprint`, so your approval flow knows where to send the request. |
 | `ttl` | The longest validity a receipt may have (`notAfter - approvedAt`): `30s`, `15m`, `1h30m`, `1d`. A receipt valid for longer is `approval_invalid`. |
+| `show` | Top-level arguments (declared under `args`) whose values an approval broker may see in a request, so the approver can decide: `[amount, ticket_id]`. Scalar values only: an argument declared `type: object` or `type: array` is refused, and an object or array value of an untyped argument is left out. Default: none, and no other value is ever sent. Keep it short: see [APPROVALS.md](APPROVALS.md#what-the-broker-sees). |
 
 The `when` language is deliberately small. Comparisons `path OP literal`,
 with `OP` one of `>`, `>=`, `<`, `<=`, `==`, `!=` and a literal that is a
@@ -222,7 +224,9 @@ Receipts are signed with `cloakpipe approve` and checked against the keys
 given with `--approver-key`. How receipts are bound to one exact call, and
 what makes one invalid or expired:
 [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md#approval-receipts). Approver keys:
-[KEYS.md](KEYS.md#approver-keys).
+[KEYS.md](KEYS.md#approver-keys). To have a broker route the request to a
+human and fetch the receipt back (`mcp-proxy --approvals-url`), see
+[APPROVALS.md](APPROVALS.md).
 
 ## Digests
 
@@ -245,6 +249,7 @@ what makes one invalid or expired:
 | `task_context_missing` | contract | A path the call needs is not in the task context (or there is no `taskId` where one is needed). |
 | `policy_denied` | Cedar | See [POLICY.md](POLICY.md). |
 | `approval_required`, `approval_invalid`, `approval_expired` | approval | No receipt; a receipt that fails a check; a receipt past `notAfter`. |
+| `approval_denied` | approval | An approver denied this exact call through an approval broker, and the denial still holds ([APPROVALS.md](APPROVALS.md#denied-and-expired)). |
 | `operation_conflict`, `reconcile_before_retry` | operations | See [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md#states). |
 | `fail_closed` | any | Something could not be evaluated or recorded; the call is refused. |
 

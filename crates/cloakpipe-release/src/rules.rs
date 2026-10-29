@@ -38,6 +38,28 @@ pub struct ApprovalRule {
     /// The longest validity window (`notAfter - approvedAt`) a receipt for
     /// this tool may carry, in seconds.
     pub ttl_secs: Option<u64>,
+    /// `show`: the top-level arguments whose values an approval broker may
+    /// see in a request, so a human can decide (default: none). Every
+    /// other value stays on the gate's host.
+    pub show: Vec<String>,
+}
+
+impl ApprovalRule {
+    /// The values of a call's [`Self::show`] arguments that it carries
+    /// (top level only; nothing for a call whose arguments are not an
+    /// object). Scalar values only (string, number, boolean, null): an
+    /// object or array value of an untyped argument is left out. No other
+    /// value is ever in it.
+    pub fn shown(&self, arguments: Option<&Value>) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        let Some(args) = arguments.and_then(Value::as_object) else { return out };
+        for name in &self.show {
+            if let Some(v) = args.get(name).filter(|v| !v.is_object() && !v.is_array()) {
+                out.insert(name.clone(), v.clone());
+            }
+        }
+        out
+    }
 }
 
 /// Parse a duration: one or more `<digits><unit>` groups, units `d`, `h`,

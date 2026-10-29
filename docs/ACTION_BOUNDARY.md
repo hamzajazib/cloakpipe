@@ -188,7 +188,10 @@ cloakpipe action fingerprint --manifest release.yaml --tool crm.patch --args cal
 
 The fingerprint is a plain hash of the arguments, so low-entropy values could
 be recovered from it by brute force. It names receipt files and stays with the
-operator; it is never written to the ledger.
+operator; it is never written to the ledger. With an approval broker
+(`mcp-proxy --approvals-url`), the broker gets it too, with the values the
+manifest's `approval.show` lists, and hands back receipts the gate verifies
+before writing them ([APPROVALS.md](APPROVALS.md)).
 
 ### Signing a receipt
 

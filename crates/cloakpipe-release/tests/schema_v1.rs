@@ -65,6 +65,9 @@ fn schema_rejects_what_the_loader_rejects() {
         ("approvers not strings", Box::new(|m| m["tools"]["issue_refund"]["approval"]["approvers"] = json!([1]))),
         ("unknown approval key", Box::new(|m| m["tools"]["issue_refund"]["approval"]["expires"] = json!("15m"))),
         ("malformed ttl", Box::new(|m| m["tools"]["issue_refund"]["approval"]["ttl"] = json!("15 minutes"))),
+        ("show not a list", Box::new(|m| m["tools"]["issue_refund"]["approval"]["show"] = json!("amount"))),
+        ("show not strings", Box::new(|m| m["tools"]["issue_refund"]["approval"]["show"] = json!([1]))),
+        ("show duplicates", Box::new(|m| m["tools"]["issue_refund"]["approval"]["show"] = json!(["amount", "amount"]))),
         ("args not a mapping", Box::new(|m| m["tools"]["read_ticket"]["args"] = json!(["ticket_id"]))),
         ("nested unknown key", Box::new(|m| {
             m["tools"]["read_ticket"]["args"]["filter"] = json!({"type": "object", "properties": {"a": {"type": "string", "bogus": 1}}});
@@ -78,4 +81,16 @@ fn schema_rejects_what_the_loader_rejects() {
         let base_dir = root().join("crates/cloakpipe-release/testdata/v1");
         assert!(cloakpipe_release::v1::Manifest::parse_str(&src, &base_dir).is_err(), "the loader accepts: {what}");
     }
+}
+
+#[test]
+fn schema_accepts_approval_show() {
+    let v = schema();
+    let mut doc = yaml("crates/cloakpipe-release/testdata/v1/support.manifest.yaml");
+    doc["tools"]["issue_refund"]["approval"]["show"] = json!(["amount", "ticket_id"]);
+    let errors: Vec<String> = v.iter_errors(&doc).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let src = serde_yaml::to_string(&doc).unwrap();
+    let m = cloakpipe_release::v1::Manifest::parse_str(&src, &root().join("crates/cloakpipe-release/testdata/v1")).unwrap();
+    assert_eq!(m.rule("issue_refund").unwrap().approval.as_ref().unwrap().show, ["amount", "ticket_id"]);
 }
