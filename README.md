@@ -46,8 +46,8 @@ Install the binary from crates.io (Rust stable), and clone the repository
 for the example:
 
 ```bash
-cargo install --locked cloakpipe-cli@0.13.0     # installs `cloakpipe`
-git clone --branch v0.13.0 https://github.com/rohansx/cloakpipe && cd cloakpipe
+cargo install --locked cloakpipe-cli@0.14.0     # installs `cloakpipe`
+git clone --branch v0.14.0 https://github.com/rohansx/cloakpipe && cd cloakpipe
 ```
 
 Run the example in [`examples/support-agent`](examples/support-agent). The
@@ -303,7 +303,7 @@ closed (`upstream_unavailable`; a side-effecting call becomes `unknown`).
 Details:
 [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#several-servers-and-tool-pinning).
 
-### Approvals through CloakPipe Cloud or any broker (unreleased)
+### Approvals through CloakPipe Cloud or any broker (v0.14.0)
 
 `cloakpipe approve` signs a receipt by hand. To have a person approve from
 Slack or a dashboard instead, point the gate at an approval broker:
@@ -509,6 +509,12 @@ change before 1.0)
 - [x] The Docker image runs the gate over HTTP by default
   ([Docker](#docker-v0130))
 
+**v0.14.0** (29 October 2026):
+
+- [x] Approvals through a broker (`--approvals-url`, `approval.show`,
+  `approval_denied`, `cloakpipe approvals keys`): an open protocol,
+  verified receipts only ([docs/APPROVALS.md](docs/APPROVALS.md))
+
 **Next**
 
 - [ ] Prebuilt binaries, and a one-command install for
@@ -518,9 +524,6 @@ change before 1.0)
   HTTP agents
 - [ ] HTTP upstreams behind `--server` and `--tools-lock` (today these take
   stdio servers; `--upstream-url` fronts one HTTP server)
-- [x] Approvals through a broker (`--approvals-url`, `approval.show`,
-  `approval_denied`): an open protocol, verified receipts only
-  ([docs/APPROVALS.md](docs/APPROVALS.md)); unreleased
 - [ ] A hosted plane (grouped alerts, routing, approval cards, digests) on
   top of the events; nothing is sent to a hosted service unless you
   configure a webhook or a broker
@@ -553,8 +556,8 @@ change before 1.0)
 
 ## Install and build options
 
-`cargo install --locked cloakpipe-cli@0.13.0` installs `cloakpipe` from
-crates.io, and `cargo install --locked cloakpipe-verify@0.13.0` the
+`cargo install --locked cloakpipe-cli@0.14.0` installs `cloakpipe` from
+crates.io, and `cargo install --locked cloakpipe-verify@0.14.0` the
 standalone verifier. From a checkout, use `--path crates/cloakpipe-cli`
 (or `crates/cloakpipe-verify`) instead.
 
