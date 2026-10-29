@@ -9,6 +9,14 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-29
+
+Approvals can now go through a broker, such as CloakPipe Cloud or your own:
+the gate files a signed approval request carrying only the arguments the
+manifest lists in `approval.show`, polls for signed receipts in the
+background, and verifies each receipt locally before writing it, so the
+decision path never waits on the network.
+
 ### Added
 
 - Approvals through a broker ([docs/APPROVALS.md](docs/APPROVALS.md)), an
@@ -732,7 +740,8 @@ the lean gate. Licence: MIT only.
 
 - First release: privacy middleware for LLM and RAG pipelines.
 
-[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/rohansx/cloakpipe/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/rohansx/cloakpipe/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/rohansx/cloakpipe/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rohansx/cloakpipe/compare/v0.10.0...v0.11.0
