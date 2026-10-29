@@ -64,6 +64,14 @@
 //! `approvers`). Without `policy:`, Cedar is skipped. The interceptor
 //! counts each call it forwards ([`ToolGate::record_forwarded`]) for the
 //! policy's `context.counters`.
+//!
+//! With an approval broker ([`Self::with_broker`], [`crate::broker`]), a
+//! call refused as `approval_required` is also filed with the broker
+//! ([`ToolGate::request_approval`]), off the decision path; the broker's
+//! poller writes verified receipts into the approvals directory. A call an
+//! approver denied is refused as `approval_denied` while the denial holds
+//! (the broker's memory, or a `<fingerprint hex>.denied.json` marker in the
+//! approvals directory, which is honoured with or without a broker).
 
 #[cfg(feature = "certification")]
 use cloakpipe_cert::statement::{verify, Status, VerifyContext};
@@ -81,6 +89,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::broker::{denial_in_force, ApprovalBroker, BrokerRequest, RequestStatus};
 use crate::operations::OperationStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +136,9 @@ pub enum Denial {
     ApprovalInvalid,
     /// The receipt for this call has passed its `notAfter`.
     ApprovalExpired,
+    /// An approver denied this exact call (an approval broker's decision,
+    /// or a denial marker), and the denial still holds.
+    ApprovalDenied,
     /// The release binds a tool contract the gate was not given.
     ContractMissing,
     /// The operation id names a different call (operations store).
@@ -176,6 +188,7 @@ impl Denial {
             Denial::ApprovalRequired => "approval_required".into(),
             Denial::ApprovalInvalid => "approval_invalid".into(),
             Denial::ApprovalExpired => "approval_expired".into(),
+            Denial::ApprovalDenied => "approval_denied".into(),
             Denial::ContractMissing => "contract_missing".into(),
             Denial::OperationConflict { .. } => "operation_conflict".into(),
             Denial::ReconcileBeforeRetry { .. } => "reconcile_before_retry".into(),
@@ -393,6 +406,8 @@ pub struct ToolGate {
     task: Option<Value>,
     /// Approval receipts; `None`: every approval-gated call is refused.
     approvals: Option<Approvals>,
+    /// Where approval requests are filed, if anywhere.
+    broker: Option<Arc<ApprovalBroker>>,
     /// The operations store for `sideEffect` tools.
     operations: Option<Arc<Mutex<OperationStore>>>,
     /// Operations the start-up sweep found left in flight (now `unknown`).
@@ -436,6 +451,7 @@ impl ToolGate {
             rules: BTreeMap::new(),
             task: None,
             approvals: None,
+            broker: None,
             operations: None,
             recovered: Vec::new(),
             operation_id_key: None,
@@ -462,6 +478,7 @@ impl ToolGate {
             rules: manifest.tools().clone(),
             task: None,
             approvals: None,
+            broker: None,
             operations: None,
             recovered: Vec::new(),
             operation_id_key: None,
@@ -631,6 +648,54 @@ impl ToolGate {
     pub fn with_approvals(mut self, dir: impl Into<PathBuf>, approvers: Vec<TrustedKey>) -> Self {
         self.approvals = Some(Approvals { dir: dir.into(), approvers });
         self
+    }
+
+    /// File approval requests with `broker` (built for this gate:
+    /// [`ApprovalBroker::start`]) and honour its denials.
+    pub fn with_broker(mut self, broker: Arc<ApprovalBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    /// Whether an approval broker is configured.
+    pub fn has_broker(&self) -> bool {
+        self.broker.is_some()
+    }
+
+    /// The approvals directory and the trusted approver keys, if set.
+    pub fn approvals_config(&self) -> Option<(&std::path::Path, &[TrustedKey])> {
+        self.approvals.as_ref().map(|a| (a.dir.as_path(), a.approvers.as_slice()))
+    }
+
+    /// Each declared tool with rules, and its `approval.ttl` in seconds
+    /// (`None`: no bound).
+    pub fn approval_ttls(&self) -> BTreeMap<String, Option<u64>> {
+        self.rules
+            .iter()
+            .filter(|(tool, _)| self.tools.contains(*tool))
+            .map(|(tool, rule)| (tool.clone(), rule.approval.as_ref().and_then(|a| a.ttl_secs)))
+            .collect()
+    }
+
+    /// File an approval request for a call refused as `approval_required`
+    /// with the broker, if there is one (it returns at once: the request is
+    /// sent in the background). The request carries only the tool's
+    /// `approval.show` values. `None` without a broker or when the call
+    /// needs no approval.
+    pub fn request_approval(&self, tool: &str, arguments: Option<&Value>, ledger_seq: Option<u64>) -> Option<RequestStatus> {
+        let broker = self.broker.as_ref()?;
+        let req = self.approval_request(tool, arguments)?;
+        let rule = self.rules.get(tool)?;
+        let release: ReleaseHash = self.release.parse().ok()?;
+        let approval = rule.approval.as_ref();
+        Some(broker.submit(BrokerRequest {
+            fingerprint: fingerprint(&release, tool, arguments.unwrap_or(&Value::Null)),
+            tool: tool.to_string(),
+            approvers: req.approvers,
+            ttl_secs: approval.and_then(|a| a.ttl_secs),
+            shown: approval.map(|a| a.shown(arguments)).unwrap_or_default(),
+            ledger_seq,
+        }))
     }
 
     /// Track `sideEffect` operations in `store`. The gate takes the database
@@ -844,6 +909,13 @@ impl ToolGate {
         let Some(approvals) = &self.approvals else { return Err(Denial::ApprovalRequired) };
         let release: ReleaseHash = self.release.parse().map_err(|_| Denial::ApprovalInvalid)?;
         let fp = fingerprint(&release, tool, arguments);
+        // A denial holds over any receipt.
+        if let Some(now_unix) = parse_rfc3339(now).map(|t| t.timestamp()) {
+            let hex = fp.hex();
+            if self.broker.as_ref().is_some_and(|b| b.is_denied(&hex, now_unix)) || denial_in_force(&approvals.dir, &hex, now_unix) {
+                return Err(Denial::ApprovalDenied);
+            }
+        }
         // The file name is hex: nothing from the call reaches the path.
         let path = approvals.dir.join(format!("{}.approval.json", fp.hex()));
         let bytes = match std::fs::read(&path) {

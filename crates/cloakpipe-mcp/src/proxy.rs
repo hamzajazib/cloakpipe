@@ -53,6 +53,7 @@ use crate::catalog::{Catalog, Drift};
 use crate::events::{DecisionRecord, EventKind, EventSink, GateEvent};
 use crate::servers::{ServerTools, StdioServer, DISCOVERY_TIMEOUT, GATE_NAME, PROTOCOL_VERSION};
 use crate::tools_lock::ToolsLock;
+use crate::broker::RequestStatus;
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
@@ -118,6 +119,13 @@ impl DecisionLog {
 
 /// JSON-RPC error code for a tool call the gate refused (server-defined range).
 pub const TOOL_REFUSED: i64 = -32001;
+
+/// `error.data.hint` of a call refused as `approval_required` whose
+/// approval was requested from the broker.
+pub const APPROVAL_REQUESTED_HINT: &str = "approval requested; retry the same call after approval";
+
+/// `error.data.hint` of a call an approver denied.
+pub const APPROVAL_DENIED_HINT: &str = "an approver denied this exact call; it will not be approved";
 
 /// JSON-RPC error code for a side-effecting call whose earlier attempt has
 /// no settled outcome (`reconcile_before_retry`, `operation_unknown`): an
@@ -632,6 +640,19 @@ impl Interceptor {
                                         data["approvers"] = serde_json::json!(req.approvers);
                                         data["fingerprint"] = Value::String(req.fingerprint);
                                     }
+                                    // With a broker: file the request (queued, never
+                                    // awaited) and tell the agent to retry later.
+                                    if let Some(status) = gate.request_approval(&tool, arguments, entry.map(|e| e.seq)) {
+                                        data["approval_request"] = Value::String(status.as_str().into());
+                                        data["hint"] = Value::String(match status {
+                                            RequestStatus::Denied => APPROVAL_DENIED_HINT.into(),
+                                            _ => APPROVAL_REQUESTED_HINT.into(),
+                                        });
+                                    }
+                                }
+                                if denial == Denial::ApprovalDenied {
+                                    data["approval_request"] = Value::String(RequestStatus::Denied.as_str().into());
+                                    data["hint"] = Value::String(APPROVAL_DENIED_HINT.into());
                                 }
                                 return vec![Action::ToAgent(reply.to_string())];
                             }
