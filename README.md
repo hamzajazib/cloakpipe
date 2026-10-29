@@ -148,7 +148,8 @@ tools:
   reply was lost is held as `unknown` until someone reconciles it.
 - **`approval`** holds a call until a signed receipt for its exact
   arguments exists; the refusal carries the routes and the call fingerprint
-  for whatever approval flow you run.
+  for whatever approval flow you run. `show` lists the arguments an
+  approver may see.
 
 The optional `policy:` file is [Cedar](https://www.cedarpolicy.com), for
 rules a per-argument contract cannot express: rate limits over persistent
@@ -183,7 +184,8 @@ the server as a child process and relays JSON-RPC both ways. Every
    forbid is `policy_denied`, naming the forbids that decided it.
 3. **Approval**: from the manifest's `approval.when` or a Cedar
    `@approval` permit, checked against receipts made with `cloakpipe
-   approve` and the keys given with `--approver-key`.
+   approve` (or fetched from an approval broker) and the keys given with
+   `--approver-key`.
 4. **Operations**: side-effecting calls are recorded before they run, so a
    retry cannot run them twice.
 
@@ -300,6 +302,28 @@ A server that exits leaves the others serving: its open requests fail
 closed (`upstream_unavailable`; a side-effecting call becomes `unknown`).
 Details:
 [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md#several-servers-and-tool-pinning).
+
+### Approvals through CloakPipe Cloud or any broker (unreleased)
+
+`cloakpipe approve` signs a receipt by hand. To have a person approve from
+Slack or a dashboard instead, point the gate at an approval broker:
+
+```bash
+cloakpipe mcp-proxy --manifest cloakpipe.manifest.yaml --upstream "python3 server.py" \
+  --task-context task-context.json --approvals approvals --approver-key approver.pub.json \
+  --approvals-url https://broker.example/v1/gates/$GATE_ID --approvals-secret-file gate.secret
+```
+
+A call refused as `approval_required` is filed with the broker in the
+background (signed, with only the arguments the manifest's
+`approval.show` lists), and the refusal tells the agent to retry after
+approval. A poller fetches finished approvals, verifies each receipt
+against `--approver-key` before writing it to `--approvals`, and the
+retry runs. A denial is `approval_denied`; if the broker is down,
+approvals simply do not arrive, and decisions never wait on it. The
+protocol is open (two signed HTTP calls); CloakPipe Cloud implements it,
+and so can your own service:
+[docs/APPROVALS.md](docs/APPROVALS.md).
 
 ## Alert
 
@@ -447,8 +471,9 @@ What to know:
 - **Not a sandbox.** It does not isolate the agent or the tool process. An
   agent with a shell, or another path to the same system, can go around a
   gate it is not forced through.
-- **Not a hosted service.** Everything here runs on your machine. A hosted
-  plane for alerts and approvals is an idea with a waitlist, not a product.
+- **Not a hosted service.** Everything here runs on your machine. The gate
+  can file approval requests with a broker you choose, but enforcement
+  never depends on one.
 - **Not an evaluation or certification tool** any more: that code is
   legacy, off by default ([docs/legacy/](docs/legacy/README.md)).
 
@@ -493,8 +518,13 @@ change before 1.0)
   HTTP agents
 - [ ] HTTP upstreams behind `--server` and `--tools-lock` (today these take
   stdio servers; `--upstream-url` fronts one HTTP server)
+- [x] Approvals through a broker (`--approvals-url`, `approval.show`,
+  `approval_denied`): an open protocol, verified receipts only
+  ([docs/APPROVALS.md](docs/APPROVALS.md)); unreleased
 - [ ] A hosted plane (grouped alerts, routing, approval cards, digests) on
-  top of the events; nothing is sent to a hosted service today
+  top of the events; nothing is sent to a hosted service unless you
+  configure a webhook or a broker
+- [ ] Approve with an edit (an approver changing an argument)
 
 **Later, not started**
 
@@ -513,6 +543,7 @@ change before 1.0)
 | Manifest format | [docs/MANIFEST.md](docs/MANIFEST.md), [JSON Schema](schemas/cloakpipe.manifest.schema.json) |
 | Cedar policies, entities, counters | [docs/POLICY.md](docs/POLICY.md) |
 | Contracts, approvals, operations, the decision ledger | [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md) |
+| Approvals through a broker: setup and the open protocol | [docs/APPROVALS.md](docs/APPROVALS.md) |
 | Anchoring and offline verification | [docs/ANCHORING.md](docs/ANCHORING.md) |
 | Keys: gate, approvers, anchoring roots, rotation | [docs/KEYS.md](docs/KEYS.md) |
 | Threat model | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) |
@@ -586,6 +617,7 @@ config, as the root `docker-compose.yml` does.
 | Command | Purpose |
 |---|---|
 | `cloakpipe approve` | Sign an approval receipt for one exact call |
+| `cloakpipe approvals keys` | Fetch an approval broker's approver public keys as `--approver-key` files |
 | `cloakpipe action fingerprint` | Print the fingerprint of a call |
 | `cloakpipe operations list` / `reconcile` | Inspect side-effecting calls; settle an `unknown` one |
 | `cloakpipe ledger entries` / `public-key` / `export` | Read the decision ledger, print the gate key, write an audit pack |

@@ -12,6 +12,7 @@ planned, it says so.
  agent (model) ──tools/call──> cloakpipe mcp-proxy ──allowed calls──> MCP tool server ──> real systems
                                │  manifest + Cedar policy (files)
                                │  approval receipts, approver public keys
+                               │  (optional) approval broker: requests out, verified receipts in
                                │  operations.db, state.db (SQLite)
                                └─> ledger.db ──epochs──> RFC 3161 TSA, Sigstore Rekor
                                         │
@@ -27,6 +28,7 @@ planned, it says so.
 | The orchestrator | write a correct task context (`--task-context`) | (the gate cannot check it) |
 | The manifest and policy authors | say what is allowed | (the gate enforces what they wrote, mistakes included) |
 | Approvers | hold their keys and approve deliberately | approve anything outside the contract and policy (approval never widens them) |
+| An approval broker (`--approvals-url`, optional) | route requests and sign receipts with the approver keys it holds | see the arguments the manifest does not `show`, approve outside the contract and policy, write anything into the approvals directory that does not verify |
 | The operator of the gate's host | run the gate and keep its keys | rewrite history after the fact, once it is anchored |
 | The tool server | perform the calls it receives | (its results are passed back unchecked) |
 | TSA and Rekor | timestamp and log honestly | (two independent services; the verifier checks their signatures and Rekor inclusion proofs) |
@@ -143,6 +145,20 @@ Anchor times come from the TSA and Rekor, not from the host.
 **Approver key compromise.** A stolen approver key can approve calls the
 contract and policy allow until it is removed from `--approver-key`; there
 is no revocation list.
+
+**Approval brokers.** With `--approvals-url`, a broker that holds approver
+keys can approve whatever those keys can: pin only the keys you mean to
+trust. It cannot widen the contract or policy, cannot make the gate write
+a receipt that does not verify (the poller checks each one against the
+pinned keys, the release, the tool, the task id, the fingerprint and the
+ttl, and only a 64-hex fingerprint becomes a file name), and its outage
+only delays approvals, which expire to deny. Requests and polls are
+HMAC-signed with the gate's secret; responses are trusted only as far as
+the receipts in them verify. The request carries the call fingerprint and
+only the values `approval.show` lists; a fingerprint of low-entropy
+arguments can be guessed by brute force, so treat it as revealing them.
+A denial the broker reports refuses that one call (`approval_denied`) and
+cannot let anything through.
 
 **PII detection.** The opt-in PII transform and the PII proxy use regex
 and heuristics (NER with the `ner` feature). They miss entities; measure
