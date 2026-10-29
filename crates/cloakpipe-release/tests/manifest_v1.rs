@@ -332,6 +332,44 @@ fn approval_without_when_is_always_required_and_tools_without_it_never() {
 }
 
 #[test]
+fn approval_show_lists_the_arguments_a_broker_may_see() {
+    // Default: nothing is shown.
+    let m = support();
+    assert!(m.rule("issue_refund").unwrap().approval.as_ref().unwrap().show.is_empty());
+    let m = one_tool(
+        "{ args: { amount: { type: number }, ticket_id: { type: string }, note: { type: string } }, \
+           approval: { approvers: [\"slack:#leads\"], show: [amount, ticket_id] } }",
+    )
+    .unwrap();
+    let approval = m.rule("t").unwrap().approval.clone().unwrap();
+    assert_eq!(approval.show, ["amount", "ticket_id"]);
+    // Only the listed top-level arguments, never the others.
+    let shown = approval.shown(Some(&json!({"amount": 350, "ticket_id": "T-1042", "note": "secret note"})));
+    assert_eq!(shown, json!({"amount": 350, "ticket_id": "T-1042"}).as_object().unwrap().clone());
+    // A listed argument the call leaves out is not shown.
+    let shown = approval.shown(Some(&json!({"amount": 350})));
+    assert_eq!(shown, json!({"amount": 350}).as_object().unwrap().clone());
+    assert!(approval.shown(None).is_empty());
+    assert!(approval.shown(Some(&json!([1, 2]))).is_empty());
+}
+
+#[test]
+fn bad_approval_show_is_refused_at_load() {
+    let args = "args: { amount: { type: number } }";
+    // Not a declared argument (a typo would silently show nothing).
+    let e = one_tool(&format!("{{ {args}, approval: {{ show: [amonut] }} }}")).unwrap_err();
+    assert!(e.contains("approval.show") && e.contains("amonut"), "{e}");
+    // Top-level argument names only: no paths.
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: [amount.x] }} }}")).is_err());
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: [\"\"] }} }}")).is_err());
+    // No duplicates, and a list of strings.
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: [amount, amount] }} }}")).is_err());
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: amount }} }}")).is_err());
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: [1] }} }}")).is_err());
+    assert!(one_tool(&format!("{{ {args}, approval: {{ show: [amount] }} }}")).is_ok());
+}
+
+#[test]
 fn the_condition_language() {
     let args = json!({"amount": 250, "currency": "EUR", "urgent": true, "o": {"n": -1.5}});
     let eval = |src: &str| Condition::parse(src).unwrap_or_else(|e| panic!("{src}: {e}")).matches(&args);

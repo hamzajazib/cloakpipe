@@ -15,7 +15,7 @@
 //!     args:
 //!       amount: { type: number, min: 0, max: 500, required: true }
 //!     side_effect: true
-//!     approval: { when: "amount > 100", approvers: ["slack:#support-leads"], ttl: 15m }
+//!     approval: { when: "amount > 100", approvers: ["slack:#support-leads"], ttl: 15m, show: [amount] }
 //! ```
 //!
 //! The manifest compiles into the same [`ToolRule`]s a legacy
@@ -130,6 +130,8 @@ struct RawApproval {
     #[serde(default)]
     approvers: Vec<String>,
     ttl: Option<String>,
+    #[serde(default)]
+    show: Vec<String>,
 }
 
 /// One argument's constraint, as written in a v1 manifest.
@@ -258,7 +260,18 @@ impl RawTool {
                     Some(t) => Some(parse_duration(&t).map_err(|e| format!("{tool}: approval.ttl: {e}"))?),
                     None => None,
                 };
-                Some(ApprovalRule { when, approvers: a.approvers, ttl_secs })
+                let mut shown = std::collections::BTreeSet::new();
+                for name in &a.show {
+                    if !arguments.contains_key(name) {
+                        return Err(format!(
+                            "{tool}: approval.show names {name:?}, which is not a declared argument (top-level argument names only)"
+                        ));
+                    }
+                    if !shown.insert(name) {
+                        return Err(format!("{tool}: approval.show lists {name:?} twice"));
+                    }
+                }
+                Some(ApprovalRule { when, approvers: a.approvers, ttl_secs, show: a.show })
             }
             None => None,
         };
